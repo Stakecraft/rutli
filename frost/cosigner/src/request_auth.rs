@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Authenticating split-ceremony recipient requests.
@@ -119,7 +119,11 @@ impl KeyKind {
         let spki = cert.public_key();
         let alg = &spki.algorithm.algorithm;
         if *alg == OID_KEY_TYPE_EC_PUBLIC_KEY {
-            let curve = spki.algorithm.parameters.as_ref().and_then(|p| p.as_oid().ok());
+            let curve = spki
+                .algorithm
+                .parameters
+                .as_ref()
+                .and_then(|p| p.as_oid().ok());
             return match curve {
                 Some(c) if c == OID_EC_P256 => Ok(Self::EcdsaP256),
                 Some(c) if c == OID_NIST_EC_P384 => Ok(Self::EcdsaP384),
@@ -188,14 +192,17 @@ impl NodeSigner {
             .filter(|(label, _)| label == "CERTIFICATE")
             .map(|(_, der)| der.to_vec())
             .collect();
-        let leaf_der = chain.first().ok_or_else(|| auth("no certificate in the cert file".into()))?;
+        let leaf_der = chain
+            .first()
+            .ok_or_else(|| auth("no certificate in the cert file".into()))?;
         let leaf = parse(leaf_der)?;
         let kind = KeyKind::of(&leaf).map_err(auth)?;
         let (_, key_der) = pem_blocks(key_pem)?
             .into_iter()
             .find(|(label, _)| label.ends_with("PRIVATE KEY"))
             .ok_or_else(|| auth("no private key in the key file".into()))?;
-        let rejected = |e: aws_lc_rs::error::KeyRejected| auth(format!("private key rejected: {e}"));
+        let rejected =
+            |e: aws_lc_rs::error::KeyRejected| auth(format!("private key rejected: {e}"));
         let (key, public) = match kind {
             KeyKind::EcdsaP256 | KeyKind::EcdsaP384 => {
                 let alg = if kind == KeyKind::EcdsaP256 {
@@ -203,12 +210,14 @@ impl NodeSigner {
                 } else {
                     &signature::ECDSA_P384_SHA384_ASN1_SIGNING
                 };
-                let k = signature::EcdsaKeyPair::from_private_key_der(alg, &key_der).map_err(rejected)?;
+                let k = signature::EcdsaKeyPair::from_private_key_der(alg, &key_der)
+                    .map_err(rejected)?;
                 let public = k.public_key().as_ref().to_vec();
                 (SigningKey::Ecdsa(k), public)
             }
             KeyKind::Ed25519 => {
-                let k = signature::Ed25519KeyPair::from_pkcs8_maybe_unchecked(&key_der).map_err(rejected)?;
+                let k = signature::Ed25519KeyPair::from_pkcs8_maybe_unchecked(&key_der)
+                    .map_err(rejected)?;
                 let public = k.public_key().as_ref().to_vec();
                 (SigningKey::Ed25519(k), public)
             }
@@ -221,7 +230,9 @@ impl NodeSigner {
             }
         };
         if public.as_slice() != leaf.public_key().subject_public_key.data.as_ref() {
-            return Err(auth("the private key does not belong to the leaf certificate".into()));
+            return Err(auth(
+                "the private key does not belong to the leaf certificate".into(),
+            ));
         }
         Ok(Self { chain, kind, key })
     }
@@ -246,7 +257,8 @@ impl NodeSigner {
             SigningKey::Ed25519(k) => k.sign(msg).as_ref().to_vec(),
             SigningKey::Rsa(k) => {
                 let mut out = vec![0u8; k.public_modulus_len()];
-                k.sign(&signature::RSA_PKCS1_SHA256, &rng, msg, &mut out).map_err(fail)?;
+                k.sign(&signature::RSA_PKCS1_SHA256, &rng, msg, &mut out)
+                    .map_err(fail)?;
                 out
             }
         })
@@ -306,7 +318,10 @@ fn check_request(r: &RecipientRequest, ca_pem: &[u8], expected_cluster: &str) ->
     let chain_der: Vec<Vec<u8>> = r
         .signer_chain
         .iter()
-        .map(|c| b64.decode(c).map_err(|_| auth("signer_chain is not base64".into())))
+        .map(|c| {
+            b64.decode(c)
+                .map_err(|_| auth("signer_chain is not base64".into()))
+        })
         .collect::<Result<_>>()?;
     let leaf = verify_chain(&chain_der, ca_pem, false).map_err(auth)?;
 
@@ -320,7 +335,9 @@ fn check_request(r: &RecipientRequest, ca_pem: &[u8], expected_cluster: &str) ->
     }
 
     // Signature over the canonical request.
-    let sig = b64.decode(&r.signature).map_err(|_| auth("signature is not base64".into()))?;
+    let sig = b64
+        .decode(&r.signature)
+        .map_err(|_| auth("signature is not base64".into()))?;
     leaf.verify(&r.signature_alg, &canonical_bytes(r), &sig)
         .map_err(|e| auth(e.replace("{signer}", &format!("for node {}", r.identifier))))
 }
@@ -380,8 +397,10 @@ pub fn verify_chain(
     if anchors_der.is_empty() {
         return Err("no certificate in the CA file".into());
     }
-    let anchors: Vec<X509Certificate<'_>> =
-        anchors_der.iter().map(|d| crate::trust::parse(d)).collect::<std::result::Result<_, _>>()?;
+    let anchors: Vec<X509Certificate<'_>> = anchors_der
+        .iter()
+        .map(|d| crate::trust::parse(d))
+        .collect::<std::result::Result<_, _>>()?;
 
     if chain_der.is_empty() {
         return Err("the request is not signed (no signer_chain)".into());
@@ -389,8 +408,10 @@ pub fn verify_chain(
     if chain_der.len() > 4 {
         return Err("signer_chain is too long".into());
     }
-    let chain: Vec<X509Certificate<'_>> =
-        chain_der.iter().map(|d| crate::trust::parse(d)).collect::<std::result::Result<_, _>>()?;
+    let chain: Vec<X509Certificate<'_>> = chain_der
+        .iter()
+        .map(|d| crate::trust::parse(d))
+        .collect::<std::result::Result<_, _>>()?;
 
     // Trust anchors: each itself valid now, and a CA allowed to sign certificates. An anchor that
     // is neither is not usable — but it does not poison the others in a rotation bundle. With a
@@ -418,7 +439,9 @@ pub fn verify_chain(
     }
     if usable.is_empty() {
         if anchors.len() > 1 && anchors.iter().all(|ca| !ca.validity().is_valid_at(now)) {
-            return Err("the CA certificate is expired or not yet valid (every CA in the CA file)".into());
+            return Err(
+                "the CA certificate is expired or not yet valid (every CA in the CA file)".into(),
+            );
         }
         return Err(first_unusable.expect("no usable anchor means at least one was refused"));
     }
@@ -426,10 +449,13 @@ pub fn verify_chain(
     // Chain: each certificate signed by the next. Intermediates must be CAs.
     for (i, cert) in chain.iter().enumerate() {
         if !cert.validity().is_valid_at(now) {
-            return Err(format!("certificate {i} of signer_chain is expired or not yet valid"));
+            return Err(format!(
+                "certificate {i} of signer_chain is expired or not yet valid"
+            ));
         }
         if let Some(issuer) = chain.get(i + 1) {
-            crate::trust::check_issuer(issuer).map_err(|e| format!("an intermediate in signer_chain {e}"))?;
+            crate::trust::check_issuer(issuer)
+                .map_err(|e| format!("an intermediate in signer_chain {e}"))?;
             verify_cert_signature(cert, issuer)?;
         }
     }
@@ -448,7 +474,9 @@ pub fn verify_chain(
     }
 
     // The leaf: an end-entity TLS certificate, not a CA, usable for signatures.
-    let leaf = chain.first().ok_or_else(|| "signer_chain is empty".to_string())?;
+    let leaf = chain
+        .first()
+        .ok_or_else(|| "signer_chain is empty".to_string())?;
     if crate::trust::ca_flag(leaf).map_err(|e| format!("a certificate {e}"))? {
         return Err("the signing certificate is a CA certificate, not a cosigner's".into());
     }
@@ -459,16 +487,16 @@ pub fn verify_chain(
         Ok(_) => {}
         Err(_) => return Err("the signing certificate's keyUsage is malformed".into()),
     }
-    let client_auth = match leaf.extended_key_usage() {
-        Ok(Some(eku)) if !(eku.value.client_auth || eku.value.server_auth) => {
-            return Err(
-                "the signing certificate's extendedKeyUsage has neither clientAuth nor serverAuth".into(),
-            )
-        }
-        Ok(Some(eku)) => Some(eku.value.client_auth),
-        Ok(None) => None,
-        Err(_) => return Err("the signing certificate's extendedKeyUsage is malformed".into()),
-    };
+    let client_auth =
+        match leaf.extended_key_usage() {
+            Ok(Some(eku)) if !(eku.value.client_auth || eku.value.server_auth) => return Err(
+                "the signing certificate's extendedKeyUsage has neither clientAuth nor serverAuth"
+                    .into(),
+            ),
+            Ok(Some(eku)) => Some(eku.value.client_auth),
+            Ok(None) => None,
+            Err(_) => return Err("the signing certificate's extendedKeyUsage is malformed".into()),
+        };
     let kind = KeyKind::of(leaf)?;
     Ok(VerifiedLeaf {
         cn: crate::tls::subject_cn(leaf),
@@ -480,7 +508,10 @@ pub fn verify_chain(
 }
 
 /// Check `cert`'s signature with `issuer`'s key, and that the names chain.
-fn verify_cert_signature(cert: &X509Certificate<'_>, issuer: &X509Certificate<'_>) -> std::result::Result<(), String> {
+fn verify_cert_signature(
+    cert: &X509Certificate<'_>,
+    issuer: &X509Certificate<'_>,
+) -> std::result::Result<(), String> {
     if cert.issuer().as_raw() != issuer.subject().as_raw() {
         return Err("certificate issuer does not match the CA's subject".into());
     }
@@ -500,9 +531,15 @@ fn verify_cert_signature(cert: &X509Certificate<'_>, issuer: &X509Certificate<'_
             ))
         }
     };
-    UnparsedPublicKey::new(verifier, issuer.public_key().subject_public_key.data.as_ref())
-        .verify(cert.tbs_certificate.as_ref(), cert.signature_value.data.as_ref())
-        .map_err(|_| "a certificate in signer_chain is not signed by the cluster CA".to_string())
+    UnparsedPublicKey::new(
+        verifier,
+        issuer.public_key().subject_public_key.data.as_ref(),
+    )
+    .verify(
+        cert.tbs_certificate.as_ref(),
+        cert.signature_value.data.as_ref(),
+    )
+    .map_err(|_| "a certificate in signer_chain is not signed by the cluster CA".to_string())
 }
 
 fn parse(der: &[u8]) -> Result<X509Certificate<'_>> {
@@ -520,9 +557,9 @@ fn auth(msg: String) -> DaemonError {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_pki::TestPki;
     use super::*;
     use crate::share_delivery::{RECIPIENT_KIND, RECIPIENT_VERSION};
+    use crate::test_pki::TestPki;
 
     fn request(pki: &TestPki, identifier: u16) -> RecipientRequest {
         RecipientRequest {
@@ -544,10 +581,16 @@ mod tests {
 
     #[test]
     fn a_request_signed_by_its_node_verifies_for_every_supported_key_type() {
-        for alg in [&rcgen::PKCS_ECDSA_P256_SHA256, &rcgen::PKCS_ECDSA_P384_SHA384, &rcgen::PKCS_ED25519] {
+        for alg in [
+            &rcgen::PKCS_ECDSA_P256_SHA256,
+            &rcgen::PKCS_ECDSA_P384_SHA384,
+            &rcgen::PKCS_ED25519,
+        ] {
             let pki = TestPki::with_alg(alg);
             let mut r = request(&pki, 2);
-            pki.signer_with("cosigner2", alg, false).sign(&mut r).unwrap();
+            pki.signer_with("cosigner2", alg, false)
+                .sign(&mut r)
+                .unwrap();
             verify_request(&r, pki.ca_pem.as_bytes()).unwrap();
         }
     }
@@ -561,7 +604,8 @@ mod tests {
 
         // Any field changed after signing: the recipient key above all (the PoC).
         for mutate in [
-            (|r: &mut RecipientRequest| r.recipient_pub = hex::encode([8u8; 32])) as fn(&mut RecipientRequest),
+            (|r: &mut RecipientRequest| r.recipient_pub = hex::encode([8u8; 32]))
+                as fn(&mut RecipientRequest),
             |r| r.ceremony_id = "d".into(),
             |r| r.key_id = "frost-import-y".into(),
             |r| r.threshold = 3,
@@ -592,7 +636,9 @@ mod tests {
         // Unsigned, and expired.
         assert!(verify_request(&request(&pki, 1), pki.ca_pem.as_bytes()).is_err());
         let mut r = request(&pki, 1);
-        pki.signer_with("cosigner1", &rcgen::PKCS_ECDSA_P256_SHA256, true).sign(&mut r).unwrap();
+        pki.signer_with("cosigner1", &rcgen::PKCS_ECDSA_P256_SHA256, true)
+            .sign(&mut r)
+            .unwrap();
         assert!(verify_request(&r, pki.ca_pem.as_bytes()).is_err());
     }
 
@@ -615,11 +661,15 @@ mod tests {
         let pki = TestPki::new();
         let signed_by = |(cert, key): (String, String)| {
             let mut r = request(&pki, 1);
-            NodeSigner::from_pem(cert.as_bytes(), key.as_bytes()).unwrap().sign(&mut r).unwrap();
+            NodeSigner::from_pem(cert.as_bytes(), key.as_bytes())
+                .unwrap()
+                .sign(&mut r)
+                .unwrap();
             verify_request(&r, pki.ca_pem.as_bytes())
         };
         let cn1 = |p: &mut rcgen::CertificateParams| {
-            p.distinguished_name.push(rcgen::DnType::CommonName, "cosigner1");
+            p.distinguished_name
+                .push(rcgen::DnType::CommonName, "cosigner1");
         };
         // (a) a CA certificate as the leaf.
         assert!(signed_by(pki.leaf_custom(|p| {
@@ -634,7 +684,8 @@ mod tests {
                 rcgen::DnType::CommonName,
                 rcgen::DnValue::BmpString("cosigner2".try_into().unwrap()),
             );
-            p.distinguished_name.push(rcgen::DnType::CustomDnType(vec![2, 5, 4, 3]), "cosigner1");
+            p.distinguished_name
+                .push(rcgen::DnType::CustomDnType(vec![2, 5, 4, 3]), "cosigner1");
         }))
         .is_err());
         // (b') a single CN that does not decode as a string.
@@ -669,7 +720,9 @@ mod tests {
         .unwrap();
         // (e) a trust anchor that is not a CA, or is expired.
         for bad_ca in [
-            TestPki::with_ca(&rcgen::PKCS_ECDSA_P256_SHA256, |p| p.is_ca = rcgen::IsCa::NoCa),
+            TestPki::with_ca(&rcgen::PKCS_ECDSA_P256_SHA256, |p| {
+                p.is_ca = rcgen::IsCa::NoCa
+            }),
             TestPki::with_ca(&rcgen::PKCS_ECDSA_P256_SHA256, |p| {
                 p.not_before = rcgen::date_time_ymd(2001, 1, 1);
                 p.not_after = rcgen::date_time_ymd(2002, 1, 1);
@@ -688,26 +741,40 @@ mod tests {
         let old = TestPki::new();
         let new = TestPki::new();
         let pinned = old.cluster_id(); // pinned to the pre-rotation derived id
-        // Node 2 already has its new leaf (CA B), its request carries the pinned id.
+                                       // Node 2 already has its new leaf (CA B), its request carries the pinned id.
         let mut r = request(&old, 2);
         new.signer("cosigner2").sign(&mut r).unwrap();
         // ...and node 1 still has its old leaf (CA A).
         let mut r_old = request(&old, 1);
         old.signer("cosigner1").sign(&mut r_old).unwrap();
 
-        for bundle in [crate::test_pki::bundle(&[&old, &new]), crate::test_pki::bundle(&[&new, &old])] {
+        for bundle in [
+            crate::test_pki::bundle(&[&old, &new]),
+            crate::test_pki::bundle(&[&new, &old]),
+        ] {
             verify_request_for_cluster(&r, bundle.as_bytes(), &pinned).unwrap();
             verify_request_for_cluster(&r_old, bundle.as_bytes(), &pinned).unwrap();
             // Unpinned verification derives the id from the bundle's bytes, which is neither CA's.
-            let e = verify_request(&r, bundle.as_bytes()).unwrap_err().to_string();
+            let e = verify_request(&r, bundle.as_bytes())
+                .unwrap_err()
+                .to_string();
             assert!(e.contains("cluster"), "{e}");
             // A wrong pin is refused, whatever the chain.
-            for wrong in [new.cluster_id(), wrap_id(&bundle), "0000000000000000".into()] {
-                assert!(verify_request_for_cluster(&r, bundle.as_bytes(), &wrong).is_err(), "{wrong}");
+            for wrong in [
+                new.cluster_id(),
+                wrap_id(&bundle),
+                "0000000000000000".into(),
+            ] {
+                assert!(
+                    verify_request_for_cluster(&r, bundle.as_bytes(), &wrong).is_err(),
+                    "{wrong}"
+                );
             }
         }
         // Against the old CA alone, the new leaf is not certified.
-        let e = verify_request_for_cluster(&r, old.ca_pem.as_bytes(), &pinned).unwrap_err().to_string();
+        let e = verify_request_for_cluster(&r, old.ca_pem.as_bytes(), &pinned)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("not signed by the cluster CA"), "{e}");
         // Every other check still runs per request: another node's new leaf naming node 2.
         let mut forged = request(&old, 2);
@@ -718,7 +785,9 @@ mod tests {
         let rogue = TestPki::new();
         let mut r = request(&old, 2);
         rogue.signer("cosigner2").sign(&mut r).unwrap();
-        let e = verify_request_for_cluster(&r, bundle.as_bytes(), &pinned).unwrap_err().to_string();
+        let e = verify_request_for_cluster(&r, bundle.as_bytes(), &pinned)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("not certified by any of the 2"), "{e}");
     }
 
@@ -755,10 +824,17 @@ mod tests {
         verify_request_for_cluster(&ok, bundle.as_bytes(), &pinned).unwrap();
         // Every CA in the file expired: the error says so.
         let both = crate::test_pki::bundle(&[&expired, &expired]);
-        let e = verify_request_for_cluster(&r, both.as_bytes(), &pinned).unwrap_err().to_string();
-        assert!(e.contains("the CA certificate is expired or not yet valid"), "{e}");
+        let e = verify_request_for_cluster(&r, both.as_bytes(), &pinned)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("the CA certificate is expired or not yet valid"),
+            "{e}"
+        );
         // A non-CA certificate in the bundle is no anchor either.
-        let not_ca = TestPki::with_ca(&rcgen::PKCS_ECDSA_P256_SHA256, |p| p.is_ca = rcgen::IsCa::NoCa);
+        let not_ca = TestPki::with_ca(&rcgen::PKCS_ECDSA_P256_SHA256, |p| {
+            p.is_ca = rcgen::IsCa::NoCa
+        });
         let mut r = request(&valid, 1);
         not_ca.signer("cosigner1").sign(&mut r).unwrap();
         let bundle = crate::test_pki::bundle(&[&not_ca, &valid]);
@@ -773,7 +849,14 @@ mod tests {
     #[test]
     fn cn_mapping_is_strict() {
         assert_eq!(identifier_from_cn("cosigner3"), Some(3));
-        for bad in ["cosigner", "cosigner03", "cosigner-1", "Cosigner1", "cosigner1 ", "driver"] {
+        for bad in [
+            "cosigner",
+            "cosigner03",
+            "cosigner-1",
+            "Cosigner1",
+            "cosigner1 ",
+            "driver",
+        ] {
             assert_eq!(identifier_from_cn(bad), None, "{bad}");
         }
     }
@@ -784,11 +867,18 @@ mod tests {
         let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
         let other = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
         let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
-        params.distinguished_name.push(rcgen::DnType::CommonName, "cosigner1");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "cosigner1");
         let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let ca = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap().self_signed(&ca_key).unwrap();
+        let ca = rcgen::CertificateParams::new(Vec::<String>::new())
+            .unwrap()
+            .self_signed(&ca_key)
+            .unwrap();
         let cert = params.signed_by(&key, &ca, &ca_key).unwrap();
-        assert!(NodeSigner::from_pem(cert.pem().as_bytes(), other.serialize_pem().as_bytes()).is_err());
+        assert!(
+            NodeSigner::from_pem(cert.pem().as_bytes(), other.serialize_pem().as_bytes()).is_err()
+        );
         let _ = pki;
     }
 }

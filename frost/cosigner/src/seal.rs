@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Share sealing: encryption-at-rest for this node's key shares.
@@ -80,7 +80,9 @@ pub fn derive_share_dek(master: &[u8], node_identifier: u16) -> Zeroizing<[u8; 3
 /// UTF-8 bytes, at least [`MIN_MASTER_LEN`] chars.
 pub fn read_master_env(env_var: &str) -> Result<Zeroizing<String>> {
     let master = Zeroizing::new(std::env::var(env_var).map_err(|_| {
-        DaemonError::Config(format!("share sealing enabled but env var {env_var} is not set"))
+        DaemonError::Config(format!(
+            "share sealing enabled but env var {env_var} is not set"
+        ))
     })?);
     // Prefer ≥ 32 bytes of entropy (`openssl rand -hex 32` → 64 hex chars). Reject short
     // operator secrets so a typo / weak password cannot silently become the cluster DEK root.
@@ -126,7 +128,12 @@ pub struct KeyFileBinding {
 
 impl KeyFileBinding {
     pub fn v1(node: u16) -> Self {
-        Self { node, cluster_uuid: None, write_version: 1, accept_v1: true }
+        Self {
+            node,
+            cluster_uuid: None,
+            write_version: 1,
+            accept_v1: true,
+        }
     }
 }
 
@@ -155,9 +162,14 @@ impl RecordKind {
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        [RecordKind::FrostShare, RecordKind::HostedKey, RecordKind::Tombstone, RecordKind::Recipient]
-            .into_iter()
-            .find(|k| k.as_str() == s)
+        [
+            RecordKind::FrostShare,
+            RecordKind::HostedKey,
+            RecordKind::Tombstone,
+            RecordKind::Recipient,
+        ]
+        .into_iter()
+        .find(|k| k.as_str() == s)
     }
 }
 
@@ -245,15 +257,22 @@ pub fn file_version(file_bytes: &[u8]) -> Option<u8> {
         hdr: Option<serde_json::Value>,
     }
     match serde_json::from_slice::<Probe>(file_bytes) {
-        Ok(Probe { v: 1, sealed: true, .. }) => Some(1),
-        Ok(Probe { v: 2, hdr: Some(_), .. }) => Some(2),
+        Ok(Probe {
+            v: 1, sealed: true, ..
+        }) => Some(1),
+        Ok(Probe {
+            v: 2, hdr: Some(_), ..
+        }) => Some(2),
         _ => None,
     }
 }
 
 /// The clear header of a v2 key file, without decrypting anything (restore, `keyfile status`).
 pub fn header_of(file_bytes: &[u8]) -> Option<KeyFileHeader> {
-    serde_json::from_slice::<EnvelopeV2>(file_bytes).ok().filter(|e| e.v == 2).map(|e| e.hdr)
+    serde_json::from_slice::<EnvelopeV2>(file_bytes)
+        .ok()
+        .filter(|e| e.v == 2)
+        .map(|e| e.hdr)
 }
 
 /// Which of a sealer's DEKs a file is sealed under.
@@ -279,7 +298,11 @@ impl Sealer {
 
     /// A sealer over an explicit 32-byte DEK (a node seal bundle's `share_dek`) for node `node`.
     pub fn from_dek(key: Zeroizing<[u8; 32]>, node: u16) -> Self {
-        Self { key, previous: Vec::new(), binding: KeyFileBinding::v1(node) }
+        Self {
+            key,
+            previous: Vec::new(),
+            binding: KeyFileBinding::v1(node),
+        }
     }
 
     /// Bind v2 key files to `keyfile` (cluster UUID, write format, v1 acceptance).
@@ -322,7 +345,12 @@ impl Sealer {
 
     /// Seal a key-file record in format `version` (1 or 2), whatever the configured one: the
     /// offline `keyfile migrate` / `keyfile downgrade` rewrite.
-    pub fn seal_record_as(&self, version: u8, meta: &RecordMeta<'_>, plaintext: &[u8]) -> Result<Vec<u8>> {
+    pub fn seal_record_as(
+        &self,
+        version: u8,
+        meta: &RecordMeta<'_>,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>> {
         match version {
             1 => self.seal(plaintext),
             2 => {
@@ -345,12 +373,25 @@ impl Sealer {
                 let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
                 let aad = header_aad(&hdr);
                 let ct = cipher
-                    .encrypt(&nonce, aes_gcm::aead::Payload { msg: plaintext, aad: &aad })
+                    .encrypt(
+                        &nonce,
+                        aes_gcm::aead::Payload {
+                            msg: plaintext,
+                            aad: &aad,
+                        },
+                    )
                     .map_err(|_| DaemonError::Config("share sealing failed".into()))?;
-                let env = EnvelopeV2 { v: 2, hdr, nonce: hex::encode(nonce), ct: hex::encode(ct) };
+                let env = EnvelopeV2 {
+                    v: 2,
+                    hdr,
+                    nonce: hex::encode(nonce),
+                    ct: hex::encode(ct),
+                };
                 Ok(serde_json::to_vec_pretty(&env)?)
             }
-            other => Err(DaemonError::Config(format!("unknown key-file format version {other}"))),
+            other => Err(DaemonError::Config(format!(
+                "unknown key-file format version {other}"
+            ))),
         }
     }
 
@@ -392,7 +433,8 @@ impl Sealer {
                     .ok()
                     .filter(|n| n.len() == NONCE_LEN)
                     .ok_or_else(|| keyfile_err(format!("{key_id}: bad nonce")))?;
-                let ct = hex::decode(&env.ct).map_err(|_| keyfile_err(format!("{key_id}: bad ciphertext hex")))?;
+                let ct = hex::decode(&env.ct)
+                    .map_err(|_| keyfile_err(format!("{key_id}: bad ciphertext hex")))?;
                 let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_ref()));
                 let aad = header_aad(h);
                 let plain = cipher
@@ -411,7 +453,10 @@ impl Sealer {
 
     fn check_header(&self, h: &KeyFileHeader, key_id: &str, kinds: &[RecordKind]) -> Result<()> {
         if h.fmt != KEYFILE_FMT {
-            return Err(keyfile_err(format!("{key_id}: unknown key-file format {:?}", h.fmt)));
+            return Err(keyfile_err(format!(
+                "{key_id}: unknown key-file format {:?}",
+                h.fmt
+            )));
         }
         match &self.binding.cluster_uuid {
             Some(c) if *c == h.cluster => {}
@@ -447,13 +492,19 @@ impl Sealer {
             _ => Err(keyfile_err(format!(
                 "{key_id}: the file holds a {:?} record where a {} is expected",
                 h.kind,
-                kinds.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(" or ")
+                kinds
+                    .iter()
+                    .map(|k| k.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" or ")
             ))),
         }
     }
 
     fn dek_for(&self, id: &str) -> Option<&Zeroizing<[u8; 32]>> {
-        std::iter::once(&self.key).chain(self.previous.iter()).find(|k| dek_id(k) == id)
+        std::iter::once(&self.key)
+            .chain(self.previous.iter())
+            .find(|k| dek_id(k) == id)
     }
 
     /// Which DEK `file_bytes` is sealed under: a v2 file by its `dek_id`, a v1 file by trial
@@ -463,22 +514,40 @@ impl Sealer {
             if dek_id(&self.key) == id {
                 return DekUse::Current;
             }
-            self.previous.iter().position(|k| dek_id(k) == id).map(DekUse::Previous).unwrap_or(DekUse::Unknown)
+            self.previous
+                .iter()
+                .position(|k| dek_id(k) == id)
+                .map(DekUse::Previous)
+                .unwrap_or(DekUse::Unknown)
         };
         match file_version(file_bytes) {
-            Some(2) => header_of(file_bytes).map(|h| which(&h.dek_id)).unwrap_or(DekUse::Unknown),
+            Some(2) => header_of(file_bytes)
+                .map(|h| which(&h.dek_id))
+                .unwrap_or(DekUse::Unknown),
             Some(1) => {
-                let Ok(env) = serde_json::from_slice::<SealedEnvelope>(file_bytes) else { return DekUse::Unknown };
+                let Ok(env) = serde_json::from_slice::<SealedEnvelope>(file_bytes) else {
+                    return DekUse::Unknown;
+                };
                 let (Ok(nonce), Ok(ct)) = (hex::decode(&env.nonce), hex::decode(&env.ct)) else {
                     return DekUse::Unknown;
                 };
                 if nonce.len() != NONCE_LEN {
                     return DekUse::Unknown;
                 }
-                for (i, key) in std::iter::once(&self.key).chain(self.previous.iter()).enumerate() {
+                for (i, key) in std::iter::once(&self.key)
+                    .chain(self.previous.iter())
+                    .enumerate()
+                {
                     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_ref()));
-                    if cipher.decrypt(Nonce::from_slice(&nonce), ct.as_slice()).is_ok() {
-                        return if i == 0 { DekUse::Current } else { DekUse::Previous(i - 1) };
+                    if cipher
+                        .decrypt(Nonce::from_slice(&nonce), ct.as_slice())
+                        .is_ok()
+                    {
+                        return if i == 0 {
+                            DekUse::Current
+                        } else {
+                            DekUse::Previous(i - 1)
+                        };
                     }
                 }
                 DekUse::Unknown
@@ -495,10 +564,15 @@ impl Sealer {
             return None;
         }
         let env = serde_json::from_slice::<SealedEnvelope>(file_bytes).ok()?;
-        let nonce = hex::decode(&env.nonce).ok().filter(|n| n.len() == NONCE_LEN)?;
+        let nonce = hex::decode(&env.nonce)
+            .ok()
+            .filter(|n| n.len() == NONCE_LEN)?;
         let ct = hex::decode(&env.ct).ok()?;
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(self.key.as_ref()));
-        cipher.decrypt(Nonce::from_slice(&nonce), ct.as_slice()).ok().map(Zeroizing::new)
+        cipher
+            .decrypt(Nonce::from_slice(&nonce), ct.as_slice())
+            .ok()
+            .map(Zeroizing::new)
     }
 
     /// Which of this sealer's DEKs equals `dek`, compared in constant time over every DEK it
@@ -621,7 +695,9 @@ impl Drop for BundleFile {
         use zeroize::Zeroize;
         self.share_dek.zeroize();
         self.dist_seed.zeroize();
-        self.previous_share_deks.iter_mut().for_each(|k| k.zeroize());
+        self.previous_share_deks
+            .iter_mut()
+            .for_each(|k| k.zeroize());
     }
 }
 
@@ -659,7 +735,12 @@ impl NodeSealBundle {
         let (mut dek, mut seed) = (Zeroizing::new([0u8; 32]), Zeroizing::new([0u8; 32]));
         rand::rngs::OsRng.fill_bytes(dek.as_mut());
         rand::rngs::OsRng.fill_bytes(seed.as_mut());
-        Self { node, share_dek: dek, dist_seed: seed, previous_share_deks: Vec::new() }
+        Self {
+            node,
+            share_dek: dek,
+            dist_seed: seed,
+            previous_share_deks: Vec::new(),
+        }
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self> {
@@ -692,7 +773,11 @@ impl NodeSealBundle {
             node: self.node,
             share_dek: hex::encode(*self.share_dek),
             dist_seed: hex::encode(*self.dist_seed),
-            previous_share_deks: self.previous_share_deks.iter().map(|k| hex::encode(**k)).collect(),
+            previous_share_deks: self
+                .previous_share_deks
+                .iter()
+                .map(|k| hex::encode(**k))
+                .collect(),
         };
         let mut out = serde_json::to_vec_pretty(&f)?;
         out.push(b'\n');
@@ -752,7 +837,12 @@ impl NodeSealBundle {
         rand::rngs::OsRng.fill_bytes(dek.as_mut());
         let mut previous = vec![self.share_dek.clone()];
         previous.extend(self.previous_share_deks.iter().cloned());
-        Self { node: self.node, share_dek: dek, dist_seed: self.dist_seed.clone(), previous_share_deks: previous }
+        Self {
+            node: self.node,
+            share_dek: dek,
+            dist_seed: self.dist_seed.clone(),
+            previous_share_deks: previous,
+        }
     }
 
     /// DEK rotation, last step: the same bundle without `previous_share_deks` — once `keyfile
@@ -793,17 +883,24 @@ impl NodeSealBundle {
 /// command). Drop it once the [`Sealer`] and the hosted-key keyring are built.
 pub enum SealKeys {
     /// `secret_env`: the legacy shared cluster master. Deprecated (audit C3).
-    LegacyMaster { env: String, master: Zeroizing<String> },
+    LegacyMaster {
+        env: String,
+        master: Zeroizing<String>,
+    },
     /// `secret_file`: this node's own [`NodeSealBundle`].
-    Bundle { path: std::path::PathBuf, bundle: NodeSealBundle },
+    Bundle {
+        path: std::path::PathBuf,
+        bundle: NodeSealBundle,
+    },
 }
 
 impl SealKeys {
     pub fn load(cfg: &ShareSealConfig, node_identifier: u16) -> Result<Self> {
         match (&cfg.secret_env, &cfg.secret_file) {
-            (Some(env), None) => {
-                Ok(Self::LegacyMaster { env: env.clone(), master: read_master_env(env)? })
-            }
+            (Some(env), None) => Ok(Self::LegacyMaster {
+                env: env.clone(),
+                master: read_master_env(env)?,
+            }),
             (None, Some(path)) => Ok(Self::Bundle {
                 path: path.clone(),
                 bundle: NodeSealBundle::read_file(path, node_identifier)?,
@@ -847,7 +944,10 @@ impl SealKeys {
     /// present, must agree for this node and the commitment key (a mismatch is a pasted-wrong
     /// value or the wrong master), and a peer's pin wins over the derivation — that peer runs its
     /// own bundle.
-    pub fn hosted_keyring(&self, cfg: &crate::config::Config) -> Result<crate::node::HostedKeyring> {
+    pub fn hosted_keyring(
+        &self,
+        cfg: &crate::config::Config,
+    ) -> Result<crate::node::HostedKeyring> {
         use crate::wrap::DistKey;
         let me = cfg.identifier;
         let dist_key = match self {
@@ -855,30 +955,31 @@ impl SealKeys {
             Self::Bundle { bundle, .. } => bundle.dist_key(),
         };
         let hosted = cfg.hosted_keys.as_ref();
-        let configured_commitment =
-            hosted.map(|h| h.commitment_key_bytes()).transpose()?.flatten();
-        let commitment_key = match (self, configured_commitment) {
-            (Self::LegacyMaster { master, .. }, configured) => {
-                let derived = crate::wrap::legacy_commitment_key(master.as_bytes());
-                if configured.is_some_and(|c| c != derived) {
-                    return Err(DaemonError::Config(
-                        "hosted_keys.commitment_key does not match the value derived from the \
+        let configured_commitment = hosted
+            .map(|h| h.commitment_key_bytes())
+            .transpose()?
+            .flatten();
+        let commitment_key =
+            match (self, configured_commitment) {
+                (Self::LegacyMaster { master, .. }, configured) => {
+                    let derived = crate::wrap::legacy_commitment_key(master.as_bytes());
+                    if configured.is_some_and(|c| c != derived) {
+                        return Err(DaemonError::Config(
+                            "hosted_keys.commitment_key does not match the value derived from the \
                          legacy master in share_seal.secret_env — a wrong value was pasted, or \
                          this is the wrong master"
-                            .into(),
-                    ));
+                                .into(),
+                        ));
+                    }
+                    derived
                 }
-                derived
-            }
-            (Self::Bundle { .. }, Some(c)) => c,
-            (Self::Bundle { .. }, None) => {
-                return Err(DaemonError::Config(
+                (Self::Bundle { .. }, Some(c)) => c,
+                (Self::Bundle { .. }, None) => return Err(DaemonError::Config(
                     "hosted_keys.commitment_key is required with share_seal.secret_file (print it \
                      with `rutli-cosigner seal split-legacy`, or generate one for a new cluster)"
                         .into(),
-                ))
-            }
-        };
+                )),
+            };
         let mut peer_dist_keys = std::collections::BTreeMap::new();
         for p in &cfg.peers {
             let pinned = p.dist_public_key_bytes()?;
@@ -907,7 +1008,11 @@ impl SealKeys {
             };
             peer_dist_keys.insert(p.identifier, key);
         }
-        Ok(crate::node::HostedKeyring { dist_key, commitment_key, peer_dist_keys })
+        Ok(crate::node::HostedKeyring {
+            dist_key,
+            commitment_key,
+            peer_dist_keys,
+        })
     }
 }
 
@@ -936,7 +1041,10 @@ mod tests {
         let a = Sealer::from_master_secret(b"one master secret", 1);
         let b = Sealer::from_master_secret(b"one master secret", 2);
         let sealed = a.seal(b"share bytes").unwrap();
-        assert!(b.unseal(&sealed).is_err(), "node-2 key must not open node-1 shares");
+        assert!(
+            b.unseal(&sealed).is_err(),
+            "node-2 key must not open node-1 shares"
+        );
     }
 
     #[test]
@@ -962,7 +1070,10 @@ mod tests {
             env.v = v;
             env.sealed = flag;
             let err = s.unseal(&serde_json::to_vec(&env).unwrap()).unwrap_err();
-            assert!(err.to_string().contains("unsupported sealed envelope"), "v={v} sealed={flag}: {err}");
+            assert!(
+                err.to_string().contains("unsupported sealed envelope"),
+                "v={v} sealed={flag}: {err}"
+            );
         }
     }
 
@@ -989,11 +1100,16 @@ mod tests {
 
     #[test]
     fn seal_keys_say_where_they_came_from_and_never_the_keys() {
-        let legacy = SealKeys::LegacyMaster { env: "SEAL_ENV".into(), master: Zeroizing::new("s3cret".repeat(8)) };
+        let legacy = SealKeys::LegacyMaster {
+            env: "SEAL_ENV".into(),
+            master: Zeroizing::new("s3cret".repeat(8)),
+        };
         assert!(legacy.is_legacy());
         assert_eq!(legacy.describe(), "legacy shared master env=SEAL_ENV");
-        let bundle =
-            SealKeys::Bundle { path: std::path::PathBuf::from("/seal/node2.json"), bundle: NodeSealBundle::random(2) };
+        let bundle = SealKeys::Bundle {
+            path: std::path::PathBuf::from("/seal/node2.json"),
+            bundle: NodeSealBundle::random(2),
+        };
         assert!(!bundle.is_legacy());
         assert_eq!(bundle.describe(), "bundle node=2 file=/seal/node2.json");
     }
@@ -1018,8 +1134,12 @@ mod tests {
     fn a_file_sealed_under_the_legacy_master_opens_under_the_split_bundle_and_back() {
         for node in [1u16, 2, 3] {
             let legacy = Sealer::from_master_secret(MASTER, node);
-            let bundle = NodeSealBundle::parse(&NodeSealBundle::from_legacy_master(MASTER, node).to_json().unwrap())
-                .unwrap();
+            let bundle = NodeSealBundle::parse(
+                &NodeSealBundle::from_legacy_master(MASTER, node)
+                    .to_json()
+                    .unwrap(),
+            )
+            .unwrap();
             assert_eq!(bundle.node, node);
             let sealed = legacy.seal(b"share bytes").unwrap();
             assert_eq!(bundle.sealer().unseal(&sealed).unwrap(), b"share bytes");
@@ -1045,7 +1165,10 @@ mod tests {
         assert_ne!(a.dist_public_key(), b.dist_public_key());
         let a2 = NodeSealBundle::parse(&a.to_json().unwrap()).unwrap();
         assert_eq!(a2.dist_public_key(), a.dist_public_key());
-        assert_eq!(a2.sealer().unseal(&a.sealer().seal(b"k").unwrap()).unwrap(), b"k");
+        assert_eq!(
+            a2.sealer().unseal(&a.sealer().seal(b"k").unwrap()).unwrap(),
+            b"k"
+        );
     }
 
     #[test]
@@ -1058,7 +1181,10 @@ mod tests {
         let rotated = NodeSealBundle::parse(json.to_string().as_bytes()).unwrap();
         assert_eq!(rotated.sealer().unseal(&sealed_old).unwrap(), b"old");
         let sealed_new = rotated.sealer().seal(b"new").unwrap();
-        assert!(old.sealer().unseal(&sealed_new).is_err(), "new writes use the current DEK only");
+        assert!(
+            old.sealer().unseal(&sealed_new).is_err(),
+            "new writes use the current DEK only"
+        );
     }
 
     #[test]
@@ -1071,11 +1197,26 @@ mod tests {
             NodeSealBundle::parse(v.to_string().as_bytes())
         };
         assert!(mutate(&|v| v["v"] = 2.into()).is_err(), "future version");
-        assert!(mutate(&|v| v["kind"] = "something-else".into()).is_err(), "wrong kind");
-        assert!(mutate(&|v| v["share_dek"] = "abcd".into()).is_err(), "short key");
-        assert!(mutate(&|v| v["dist_seed"] = "zz".repeat(32).into()).is_err(), "not hex");
-        assert!(mutate(&|v| v["master"] = "oops".into()).is_err(), "unknown field");
-        assert!(mutate(&|v| { v.as_object_mut().unwrap().remove("dist_seed"); }).is_err());
+        assert!(
+            mutate(&|v| v["kind"] = "something-else".into()).is_err(),
+            "wrong kind"
+        );
+        assert!(
+            mutate(&|v| v["share_dek"] = "abcd".into()).is_err(),
+            "short key"
+        );
+        assert!(
+            mutate(&|v| v["dist_seed"] = "zz".repeat(32).into()).is_err(),
+            "not hex"
+        );
+        assert!(
+            mutate(&|v| v["master"] = "oops".into()).is_err(),
+            "unknown field"
+        );
+        assert!(mutate(&|v| {
+            v.as_object_mut().unwrap().remove("dist_seed");
+        })
+        .is_err());
         assert!(mutate(&|_| {}).is_ok());
     }
 
@@ -1085,17 +1226,36 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node.json");
-        std::fs::write(&path, &*NodeSealBundle::from_legacy_master(MASTER, 2).to_json().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            &*NodeSealBundle::from_legacy_master(MASTER, 2)
+                .to_json()
+                .unwrap(),
+        )
+        .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o440)).unwrap();
         assert_eq!(NodeSealBundle::read_file(&path, 2).unwrap().node, 2);
-        let e = NodeSealBundle::read_file(&path, 3).err().unwrap().to_string();
-        assert!(e.contains("for node 2") && e.contains("wrong Secret"), "{e}");
+        let e = NodeSealBundle::read_file(&path, 3)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            e.contains("for node 2") && e.contains("wrong Secret"),
+            "{e}"
+        );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let e = NodeSealBundle::read_file(&path, 2).err().unwrap().to_string();
+        let e = NodeSealBundle::read_file(&path, 2)
+            .err()
+            .unwrap()
+            .to_string();
         assert!(e.contains("every user"), "{e}");
     }
 
-    fn cfg_with(seal: ShareSealConfig, pins: [Option<[u8; 32]>; 3], commitment: Option<[u8; 32]>) -> crate::config::Config {
+    fn cfg_with(
+        seal: ShareSealConfig,
+        pins: [Option<[u8; 32]>; 3],
+        commitment: Option<[u8; 32]>,
+    ) -> crate::config::Config {
         let mut peers: Vec<_> = (1..=3)
             .map(|i| crate::config::PeerConfig::new(i, format!("http://n{i}:9101")))
             .collect();
@@ -1152,8 +1312,22 @@ mod tests {
             bundle: NodeSealBundle::from_legacy_master(MASTER, 2),
         };
         let commitment = crate::wrap::legacy_commitment_key(MASTER);
-        let cfg_legacy = cfg_with(ShareSealConfig { secret_env: Some("E".into()), secret_file: None }, [None; 3], None);
-        let cfg_bundle = cfg_with(ShareSealConfig { secret_env: None, secret_file: Some("/b".into()) }, pins(), Some(commitment));
+        let cfg_legacy = cfg_with(
+            ShareSealConfig {
+                secret_env: Some("E".into()),
+                secret_file: None,
+            },
+            [None; 3],
+            None,
+        );
+        let cfg_bundle = cfg_with(
+            ShareSealConfig {
+                secret_env: None,
+                secret_file: Some("/b".into()),
+            },
+            pins(),
+            Some(commitment),
+        );
         let a = legacy.hosted_keyring(&cfg_legacy).unwrap();
         let b = bundle.hosted_keyring(&cfg_bundle).unwrap();
         assert_eq!(a.peer_dist_keys, b.peer_dist_keys);
@@ -1169,24 +1343,44 @@ mod tests {
             path: "/b".into(),
             bundle: NodeSealBundle::from_legacy_master(MASTER, 2),
         };
-        let file = || ShareSealConfig { secret_env: None, secret_file: Some("/b".into()) };
+        let file = || ShareSealConfig {
+            secret_env: None,
+            secret_file: Some("/b".into()),
+        };
         let commitment = crate::wrap::legacy_commitment_key(MASTER);
         let mut wrong = pins();
         wrong[1] = Some([7u8; 32]);
-        let e = bundle.hosted_keyring(&cfg_with(file(), wrong, Some(commitment))).err().unwrap().to_string();
+        let e = bundle
+            .hosted_keyring(&cfg_with(file(), wrong, Some(commitment)))
+            .err()
+            .unwrap()
+            .to_string();
         assert!(e.contains("wrong seal bundle"), "{e}");
-        let e = bundle.hosted_keyring(&cfg_with(file(), pins(), None)).err().unwrap().to_string();
+        let e = bundle
+            .hosted_keyring(&cfg_with(file(), pins(), None))
+            .err()
+            .unwrap()
+            .to_string();
         assert!(e.contains("commitment_key is required"), "{e}");
         let mut missing = pins();
         missing[2] = None;
-        assert!(bundle.hosted_keyring(&cfg_with(file(), missing, Some(commitment))).is_err());
+        assert!(bundle
+            .hosted_keyring(&cfg_with(file(), missing, Some(commitment)))
+            .is_err());
 
         let legacy = SealKeys::LegacyMaster {
             env: "E".into(),
             master: Zeroizing::new(String::from_utf8(MASTER.to_vec()).unwrap()),
         };
-        let env = ShareSealConfig { secret_env: Some("E".into()), secret_file: None };
-        let e = legacy.hosted_keyring(&cfg_with(env, [None; 3], Some([9u8; 32]))).err().unwrap().to_string();
+        let env = ShareSealConfig {
+            secret_env: Some("E".into()),
+            secret_file: None,
+        };
+        let e = legacy
+            .hosted_keyring(&cfg_with(env, [None; 3], Some([9u8; 32])))
+            .err()
+            .unwrap()
+            .to_string();
         assert!(e.contains("does not match"), "{e}");
     }
 }

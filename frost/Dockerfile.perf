@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # The image of the load tests (scripts/perf-load.sh): the cosigner built exactly as frost/Dockerfile
 # builds it, plus the load generator. Never published, never a release artifact.

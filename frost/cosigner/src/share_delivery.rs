@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Getting dealer shares to cosigners in the split ceremony (docs/split-ceremony.md, B2).
@@ -58,9 +58,9 @@
 
 use std::path::{Path, PathBuf};
 
-use frost_ed25519 as frost;
 use frost::keys::{PublicKeyPackage, SecretShare};
 use frost::Identifier;
+use frost_ed25519 as frost;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -100,7 +100,9 @@ const SECRET_KIND: &str = "rutli-share-recipient-secret";
 pub fn is_import_key_id(key_id: &str) -> bool {
     let alphabet = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
     key_id.chars().all(alphabet)
-        && key_id.find(IMPORT_MARKER).is_some_and(|i| key_id.len() > i + IMPORT_MARKER.len())
+        && key_id
+            .find(IMPORT_MARKER)
+            .is_some_and(|i| key_id.len() > i + IMPORT_MARKER.len())
 }
 
 /// True for a key id DKG must refuse: anything containing [`IMPORT_MARKER`].
@@ -112,7 +114,9 @@ pub fn is_reserved_for_import(key_id: &str) -> bool {
 pub fn validate_ceremony_id(ceremony_id: &str) -> Result<()> {
     let ok = !ceremony_id.is_empty()
         && ceremony_id.len() <= 64
-        && ceremony_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        && ceremony_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     if ok {
         Ok(())
     } else {
@@ -228,7 +232,11 @@ pub fn ceremony_dir(data_dir: &Path) -> PathBuf {
 }
 
 pub fn recipient_path(data_dir: &Path, key_id: &str) -> Result<PathBuf> {
-    if !key_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') || key_id.is_empty() {
+    if !key_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        || key_id.is_empty()
+    {
         return Err(DaemonError::Config(format!("invalid key id: {key_id:?}")));
     }
     Ok(ceremony_dir(data_dir).join(format!("{key_id}.recipient")))
@@ -291,7 +299,10 @@ pub fn load_recipient(data_dir: &Path, sealer: &Sealer, key_id: &str) -> Result<
     }
     let bytes = std::fs::read(&path)?;
     if !Sealer::is_sealed(&bytes) {
-        return Err(DaemonError::Ceremony(format!("{} is not sealed — refusing it", path.display())));
+        return Err(DaemonError::Ceremony(format!(
+            "{} is not sealed — refusing it",
+            path.display()
+        )));
     }
     let (plain, _) = sealer.unseal_record(&bytes, key_id, &[crate::seal::RecordKind::Recipient])?;
     let plain = Zeroizing::new(plain);
@@ -306,9 +317,14 @@ pub fn load_recipient(data_dir: &Path, sealer: &Sealer, key_id: &str) -> Result<
     let secret = StaticSecret::from(*Zeroizing::new(hex32(&secret_hex, "recipient secret")?));
     file.request.validate()?;
     if PublicKey::from(&secret).as_bytes() != &file.request.public_key()? {
-        return Err(DaemonError::Ceremony("recipient secret does not match its public key".into()));
+        return Err(DaemonError::Ceremony(
+            "recipient secret does not match its public key".into(),
+        ));
     }
-    Ok(RecipientState { request: file.request, secret })
+    Ok(RecipientState {
+        request: file.request,
+        secret,
+    })
 }
 
 /// Remove the pending recipient for `key_id`. Returns whether there was one. Best-effort erasure:
@@ -340,7 +356,12 @@ pub fn reseal_recipient(data_dir: &Path, sealer: &Sealer, key_id: &str, version:
     let bytes = std::fs::read(&path)?;
     let (plain, _) = sealer.unseal_record(&bytes, key_id, &[crate::seal::RecordKind::Recipient])?;
     let plain = Zeroizing::new(plain);
-    let meta = crate::seal::RecordMeta { kind: crate::seal::RecordKind::Recipient, key_id, epoch: 0, digest: &[] };
+    let meta = crate::seal::RecordMeta {
+        kind: crate::seal::RecordKind::Recipient,
+        key_id,
+        epoch: 0,
+        digest: &[],
+    };
     write_private_atomic(&path, &sealer.seal_record_as(version, &meta, &plain)?)
 }
 
@@ -411,8 +432,12 @@ pub fn share_aad(
     usage: &crate::carry::CarriedUsage,
 ) -> Vec<u8> {
     let usage_fields = usage.aad_fields();
-    let mut extra: Vec<&[u8]> =
-        vec![ceremony_id.as_bytes(), group_verifying_key, canton_fingerprint.as_bytes(), pkp_digest];
+    let mut extra: Vec<&[u8]> = vec![
+        ceremony_id.as_bytes(),
+        group_verifying_key,
+        canton_fingerprint.as_bytes(),
+        pkp_digest,
+    ];
     extra.extend(usage_fields.iter().map(Vec::as_slice));
     wrap::aad(cluster_id, key_id, SHARE_SPEC, recipient, &extra)
 }
@@ -426,7 +451,9 @@ pub fn canonical_fingerprint(input: &str) -> Result<String> {
     if fp.len() == 68 && fp.starts_with("1220") && fp.chars().all(|c| c.is_ascii_hexdigit()) {
         Ok(fp)
     } else {
-        Err(DaemonError::Ceremony(format!("{input:?} is not a 1220… Canton fingerprint (68 hex digits)")))
+        Err(DaemonError::Ceremony(format!(
+            "{input:?} is not a 1220… Canton fingerprint (68 hex digits)"
+        )))
     }
 }
 
@@ -528,7 +555,11 @@ impl ShareBundle {
         // The dealer's carry rules, again, whatever dealer made the bundle (carry.rs): a protocol
         // key never under a namespace id or the other way round, and the namespace acknowledgement
         // checked against this bundle's own fingerprint.
-        crate::carry::check_carried_id(&self.key_id, &self.canton_fingerprint, self.carried_usage()?)?;
+        crate::carry::check_carried_id(
+            &self.key_id,
+            &self.canton_fingerprint,
+            self.carried_usage()?,
+        )?;
         let mismatch = |what: &str, got: &dyn std::fmt::Debug, want: &dyn std::fmt::Debug| {
             Err(DaemonError::Ceremony(format!(
                 "bundle {what} is {got:?}, this node expects {want:?}"
@@ -567,8 +598,12 @@ impl ShareBundle {
         let roster: Vec<u16> = request.roster.clone();
         let ids: std::collections::BTreeSet<Identifier> =
             roster.iter().map(|&i| ident(i)).collect::<Result<_>>()?;
-        let pkp_ids: std::collections::BTreeSet<Identifier> =
-            self.public_key_package.verifying_shares().keys().copied().collect();
+        let pkp_ids: std::collections::BTreeSet<Identifier> = self
+            .public_key_package
+            .verifying_shares()
+            .keys()
+            .copied()
+            .collect();
         if pkp_ids != ids {
             return Err(DaemonError::Ceremony(format!(
                 "the bundle's public key package is not for roster {roster:?}"
@@ -658,7 +693,11 @@ pub fn to_json_zeroizing<T: Serialize>(value: &T) -> Result<Zeroizing<Vec<u8>>> 
     serde_json::to_writer(&mut count, value)?;
     let mut buf = Zeroizing::new(Vec::with_capacity(count.0));
     serde_json::to_writer(&mut *buf, value)?;
-    debug_assert_eq!(buf.capacity(), count.0, "the buffer must not have been reallocated");
+    debug_assert_eq!(
+        buf.capacity(),
+        count.0,
+        "the buffer must not have been reallocated"
+    );
     Ok(buf)
 }
 
@@ -685,7 +724,9 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     create_private_dir(dir)?;
     let tmp = dir.join(format!(
         ".{}.{}.tmp",
-        path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+        path.file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default(),
         uuid::Uuid::new_v4()
     ));
     {
@@ -771,7 +812,9 @@ mod tests {
     impl Node {
         fn new(id: u16) -> Self {
             let dir = tempfile::tempdir().unwrap();
-            let request = create_recipient(dir.path(), &sealer(id), &signer(id), template(id), false).unwrap();
+            let request =
+                create_recipient(dir.path(), &sealer(id), &signer(id), template(id), false)
+                    .unwrap();
             Self { dir, id, request }
         }
         fn state(&self) -> Result<RecipientState> {
@@ -783,11 +826,14 @@ mod tests {
     fn deal(nodes: &[Node]) -> (Vec<ShareBundle>, PublicKeyPackage, Vec<SecretShare>) {
         let ids: Vec<u16> = nodes.iter().map(|n| n.id).collect();
         let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&SEED, &ids, 2).unwrap();
-        let fp = ed25519_fingerprint(&rutli_frost_core::dkg::group_verifying_key_bytes(&pkp).unwrap());
+        let fp =
+            ed25519_fingerprint(&rutli_frost_core::dkg::group_verifying_key_bytes(&pkp).unwrap());
         let bundles = nodes
             .iter()
             .zip(&shares)
-            .map(|(n, s)| seal_share(&verified(&n.request), s, &pkp, &fp, &namespace_usage()).unwrap())
+            .map(|(n, s)| {
+                seal_share(&verified(&n.request), s, &pkp, &fp, &namespace_usage()).unwrap()
+            })
             .collect();
         (bundles, pkp, shares)
     }
@@ -820,13 +866,19 @@ mod tests {
         let nodes = nodes();
         let (bundles, _, _) = deal(&nodes);
         let for_two = &bundles[1];
-        assert!(for_two.open(&nodes[2].state().unwrap()).is_err(), "wrong node");
+        assert!(
+            for_two.open(&nodes[2].state().unwrap()).is_err(),
+            "wrong node"
+        );
 
         // Relabelled to node 3, with node 3's public key: the field checks pass, the AEAD does not.
         let mut relabelled = for_two.clone();
         relabelled.recipient = 3;
         relabelled.recipient_pub = nodes[2].request.recipient_pub.clone();
-        let err = relabelled.open(&nodes[2].state().unwrap()).unwrap_err().to_string();
+        let err = relabelled
+            .open(&nodes[2].state().unwrap())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("authentication"), "{err}");
     }
 
@@ -855,24 +907,29 @@ mod tests {
         // A bundle whose public parts are all self-consistent but describe a DIFFERENT sharing
         // (another key): the package, group key, fingerprint and digest swapped together. Only the
         // AEAD can notice, and it does.
-        let (_, other_pkp) = rutli_frost_core::dealer::split_ed25519_seed(&[8u8; 32], &[1, 2, 3], 2).unwrap();
+        let (_, other_pkp) =
+            rutli_frost_core::dealer::split_ed25519_seed(&[8u8; 32], &[1, 2, 3], 2).unwrap();
         let other_group = rutli_frost_core::dkg::group_verifying_key_bytes(&other_pkp).unwrap();
         let mut swapped = b.clone();
         swapped.public_key_package = other_pkp.clone();
         swapped.group_verifying_key = hex::encode(other_group);
         swapped.canton_fingerprint = ed25519_fingerprint(&other_group);
         swapped.pkp_digest = hex::encode(rutli_frost_core::dealer::pkp_digest(&other_pkp).unwrap());
-        swapped.check_against(&state.request).expect("public parts are consistent");
+        swapped
+            .check_against(&state.request)
+            .expect("public parts are consistent");
         let err = swapped.open(&state).unwrap_err().to_string();
         assert!(err.contains("authentication"), "{err}");
 
         // Same key, refreshed-looking package (same group key, different shares): digest differs,
         // the AEAD binds the digest.
-        let (_, fresh_pkp) = rutli_frost_core::dealer::split_ed25519_seed(&SEED, &[1, 2, 3], 2).unwrap();
+        let (_, fresh_pkp) =
+            rutli_frost_core::dealer::split_ed25519_seed(&SEED, &[1, 2, 3], 2).unwrap();
         assert_ne!(fresh_pkp, pkp);
         let mut repackaged = b.clone();
         repackaged.public_key_package = fresh_pkp.clone();
-        repackaged.pkp_digest = hex::encode(rutli_frost_core::dealer::pkp_digest(&fresh_pkp).unwrap());
+        repackaged.pkp_digest =
+            hex::encode(rutli_frost_core::dealer::pkp_digest(&fresh_pkp).unwrap());
         assert!(repackaged.open(&state).is_err());
 
         // Untouched, it still opens.
@@ -889,11 +946,12 @@ mod tests {
 
         // Relabelled usage that passes every carry rule for this bundle: only the AEAD can tell.
         let own = Some(bundles[0].canton_fingerprint.clone());
-        let usage = |recorded: Option<&[&str]>, namespace_fingerprint: Option<String>| CarriedUsage {
-            expected: "namespace".into(),
-            recorded: recorded.map(|r| r.iter().map(|s| s.to_string()).collect()),
-            namespace_fingerprint,
-        };
+        let usage =
+            |recorded: Option<&[&str]>, namespace_fingerprint: Option<String>| CarriedUsage {
+                expected: "namespace".into(),
+                recorded: recorded.map(|r| r.iter().map(|s| s.to_string()).collect()),
+                namespace_fingerprint,
+            };
         for usage in [
             usage(Some(&["identity-delegation", "namespace"]), None),
             usage(Some(&["namespace"]), own.clone()),
@@ -903,14 +961,23 @@ mod tests {
         ] {
             let mut b = bundles[0].clone();
             b.usage = Some(usage);
-            b.check_against(&state.request).expect("public parts are consistent");
-            assert!(b.open(&state).unwrap_err().to_string().contains("authentication"));
+            b.check_against(&state.request)
+                .expect("public parts are consistent");
+            assert!(b
+                .open(&state)
+                .unwrap_err()
+                .to_string()
+                .contains("authentication"));
         }
         // Stripped and downgraded to a B2 envelope: refused by name, before any decryption.
         let mut b = bundles[0].clone();
         b.usage = None;
         b.wrapped.version = PRE_B6_SHARE_WRAP_VERSION;
-        assert!(b.open(&state).unwrap_err().to_string().contains("pre-B6 dealer"));
+        assert!(b
+            .open(&state)
+            .unwrap_err()
+            .to_string()
+            .contains("pre-B6 dealer"));
         // Protocol usage under a namespace id: refused before decryption, whatever sealed it.
         let mut b = bundles[0].clone();
         b.usage = Some(CarriedUsage {
@@ -918,16 +985,30 @@ mod tests {
             recorded: Some(vec!["signing".into()]),
             namespace_fingerprint: Some(format!("1220{}", "ab".repeat(32))),
         });
-        assert!(b.open(&state).unwrap_err().to_string().contains("namespace-style id"));
+        assert!(b
+            .open(&state)
+            .unwrap_err()
+            .to_string()
+            .contains("namespace-style id"));
         // The dealer side refuses to seal it in the first place.
         let fp = bundles[0].canton_fingerprint.clone();
-        assert!(seal_share(&verified(&nodes[0].request), &shares[0], &pkp, &fp, b.usage.as_ref().unwrap()).is_err());
+        assert!(seal_share(
+            &verified(&nodes[0].request),
+            &shares[0],
+            &pkp,
+            &fp,
+            b.usage.as_ref().unwrap()
+        )
+        .is_err());
 
         // A genuine B2 bundle — the version 2 AAD, no usage — is refused by name, unopened.
         let mut b2 = bundles[0].clone();
         b2.usage = None;
         let e = b2.open(&state).unwrap_err().to_string();
-        assert!(e.contains("pre-B6 dealer") && e.contains("re-run the split"), "{e}");
+        assert!(
+            e.contains("pre-B6 dealer") && e.contains("re-run the split"),
+            "{e}"
+        );
         assert_eq!(bundles[0].open(&state).unwrap(), shares[0]);
     }
 
@@ -957,10 +1038,18 @@ mod tests {
         // A version 3 envelope must carry usage; version 2 is refused with or without one.
         let mut b = bundles[0].clone();
         b.usage = None;
-        assert!(b.open(&state).unwrap_err().to_string().contains("pre-B6 dealer"));
+        assert!(b
+            .open(&state)
+            .unwrap_err()
+            .to_string()
+            .contains("pre-B6 dealer"));
         let mut b = bundles[0].clone();
         b.wrapped.version = PRE_B6_SHARE_WRAP_VERSION;
-        assert!(b.open(&state).unwrap_err().to_string().contains("pre-B6 dealer"));
+        assert!(b
+            .open(&state)
+            .unwrap_err()
+            .to_string()
+            .contains("pre-B6 dealer"));
         let mut b = bundles[0].clone();
         b.wrapped.version = crate::wrap::WRAP_VERSION; // a hosted-key envelope version
         assert!(b.open(&state).is_err());
@@ -976,9 +1065,19 @@ mod tests {
         let (bundles, _, _) = deal(&nodes);
         assert!(delete_recipient(nodes[0].dir.path(), KEY).unwrap());
         assert!(nodes[0].state().is_err(), "no secret, no replay");
-        assert!(!delete_recipient(nodes[0].dir.path(), KEY).unwrap(), "idempotent");
+        assert!(
+            !delete_recipient(nodes[0].dir.path(), KEY).unwrap(),
+            "idempotent"
+        );
         // A NEW recipient for the same key cannot open the old bundle either.
-        let fresh = create_recipient(nodes[0].dir.path(), &sealer(1), &signer(1), template(1), false).unwrap();
+        let fresh = create_recipient(
+            nodes[0].dir.path(),
+            &sealer(1),
+            &signer(1),
+            template(1),
+            false,
+        )
+        .unwrap();
         assert_ne!(fresh.recipient_pub, nodes[0].request.recipient_pub);
         assert!(bundles[0].open(&nodes[0].state().unwrap()).is_err());
     }
@@ -991,13 +1090,19 @@ mod tests {
         let raw = std::fs::read(&path).unwrap();
         assert!(Sealer::is_sealed(&raw));
         let text = String::from_utf8_lossy(&raw);
-        assert!(!text.contains(&node.request.recipient_pub), "not even the public half in clear");
+        assert!(
+            !text.contains(&node.request.recipient_pub),
+            "not even the public half in clear"
+        );
         // Another node's seal key cannot read it.
         assert!(load_recipient(node.dir.path(), &sealer(2), KEY).is_err());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
             let dir = std::fs::metadata(path.parent().unwrap()).unwrap();
             assert_eq!(dir.permissions().mode() & 0o777, 0o700);
         }
@@ -1006,9 +1111,11 @@ mod tests {
     #[test]
     fn a_pending_recipient_is_not_replaced_unless_asked() {
         let node = Node::new(1);
-        let err = create_recipient(node.dir.path(), &sealer(1), &signer(1), template(1), false).unwrap_err();
+        let err = create_recipient(node.dir.path(), &sealer(1), &signer(1), template(1), false)
+            .unwrap_err();
         assert!(err.to_string().contains("already pending"), "{err}");
-        let replaced = create_recipient(node.dir.path(), &sealer(1), &signer(1), template(1), true).unwrap();
+        let replaced =
+            create_recipient(node.dir.path(), &sealer(1), &signer(1), template(1), true).unwrap();
         assert_ne!(replaced.recipient_pub, node.request.recipient_pub);
         assert_eq!(node.state().unwrap().request, replaced);
     }
@@ -1033,11 +1140,21 @@ mod tests {
 
     #[test]
     fn import_key_ids_follow_the_reserved_pattern() {
-        for ok in ["frost-import-1220cb0e", "p1-frost-import-x", "frost-import-a_b-c"] {
+        for ok in [
+            "frost-import-1220cb0e",
+            "p1-frost-import-x",
+            "frost-import-a_b-c",
+        ] {
             assert!(is_import_key_id(ok), "{ok}");
             assert!(is_reserved_for_import(ok));
         }
-        for bad in ["frost-namespace", "frost-import-", "frost-import-a.b", "x frost-import-a", ""] {
+        for bad in [
+            "frost-namespace",
+            "frost-import-",
+            "frost-import-a.b",
+            "x frost-import-a",
+            "",
+        ] {
             assert!(!is_import_key_id(bad), "{bad}");
         }
         assert!(!is_reserved_for_import("frost-namespace"));

@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! `rutli-cosigner backup-retain` through the real binary, on real tars made the way the backup
@@ -27,7 +27,11 @@ fn cosigner(cfg: &Path, args: &[&str]) -> Output {
 }
 
 fn text(o: &Output) -> String {
-    format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    )
 }
 
 fn config(dir: &Path) -> PathBuf {
@@ -60,13 +64,25 @@ fn store(keys: &Path) -> KeyStore {
 
 /// The same sharing (one dealt split, made once) at `epoch`.
 fn share(epoch: u64) -> Share {
-    static SPLIT: std::sync::OnceLock<(frost_ed25519::keys::KeyPackage, frost_ed25519::keys::PublicKeyPackage)> =
-        std::sync::OnceLock::new();
+    static SPLIT: std::sync::OnceLock<(
+        frost_ed25519::keys::KeyPackage,
+        frost_ed25519::keys::PublicKeyPackage,
+    )> = std::sync::OnceLock::new();
     let (kp, pkp) = SPLIT.get_or_init(|| {
-        let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&[5u8; 32], &[1, 2, 3], 2).unwrap();
-        (frost_ed25519::keys::KeyPackage::try_from(shares[0].clone()).unwrap(), pkp)
+        let (shares, pkp) =
+            rutli_frost_core::dealer::split_ed25519_seed(&[5u8; 32], &[1, 2, 3], 2).unwrap();
+        (
+            frost_ed25519::keys::KeyPackage::try_from(shares[0].clone()).unwrap(),
+            pkp,
+        )
     });
-    Share { key_package: kp.clone(), public_key_package: pkp.clone(), origin: None, epoch, key_id: KEY.into() }
+    Share {
+        key_package: kp.clone(),
+        public_key_package: pkp.clone(),
+        origin: None,
+        epoch,
+        key_id: KEY.into(),
+    }
 }
 
 /// A tar of one key file of `epoch`, named as the sidecar names it.
@@ -76,7 +92,11 @@ fn archive(dir: &Path, stamp: &str, epoch: u64) {
     store(&keys).create(KEY, &share(epoch)).unwrap();
     let stage = scratch.path().join("stage");
     std::fs::create_dir_all(&stage).unwrap();
-    std::os::unix::fs::symlink(keys.join(format!("{KEY}.json")), stage.join(format!("{KEY}.json"))).unwrap();
+    std::os::unix::fs::symlink(
+        keys.join(format!("{KEY}.json")),
+        stage.join(format!("{KEY}.json")),
+    )
+    .unwrap();
     std::fs::create_dir_all(dir).unwrap();
     let ok = Command::new("tar")
         .args(["-h", "-C"])
@@ -109,21 +129,38 @@ fn old_epochs_go_only_after_the_new_one_is_proven_and_never_on_a_dry_run() {
     let backups = tmp.path().join("backup");
     let live = share(3);
     store(&keys).create(KEY, &live).unwrap();
-    for (stamp, epoch) in [("20261101T000000Z", 1), ("20261102T000000Z", 2), ("20261103T000000Z", 3)] {
+    for (stamp, epoch) in [
+        ("20261101T000000Z", 1),
+        ("20261102T000000Z", 2),
+        ("20261103T000000Z", 3),
+    ] {
         archive(&backups, stamp, epoch);
     }
     let dir = backups.to_str().unwrap();
-    let all = vec!["node-1-20261101T000000Z.tar", "node-1-20261102T000000Z.tar", "node-1-20261103T000000Z.tar"];
+    let all = vec![
+        "node-1-20261101T000000Z.tar",
+        "node-1-20261102T000000Z.tar",
+        "node-1-20261103T000000Z.tar",
+    ];
 
     // No proof: every older archive stays, and says why.
-    let out = cosigner(&cfg, &["backup-retain", "--dir", dir, "--min-proof-age-days", "0"]);
+    let out = cosigner(
+        &cfg,
+        &["backup-retain", "--dir", dir, "--min-proof-age-days", "0"],
+    );
     assert!(out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains("reason=unproven-epoch"), "{}", text(&out));
+    assert!(
+        text(&out).contains("reason=unproven-epoch"),
+        "{}",
+        text(&out)
+    );
     assert_eq!(tars(&backups), all);
 
     // Prove epoch 3 (the operator's statement), then a dry run lists, a real run deletes.
     let digest = hex::encode(live.pkp_digest().unwrap());
-    let group = hex::encode(rutli_frost_core::dkg::group_verifying_key_bytes(&live.public_key_package).unwrap());
+    let group = hex::encode(
+        rutli_frost_core::dkg::group_verifying_key_bytes(&live.public_key_package).unwrap(),
+    );
     let report = serde_json::json!({
         "key_id": KEY, "ok": true, "problems": [], "group_verifying_key": group, "pkp_digest": digest, "epoch": 3,
         "nodes": (1..=3).map(|i| serde_json::json!({
@@ -138,7 +175,19 @@ fn old_epochs_go_only_after_the_new_one_is_proven_and_never_on_a_dry_run() {
     });
     let report_path = tmp.path().join("report.json");
     std::fs::write(&report_path, report.to_string()).unwrap();
-    let proved = cosigner(&cfg, &["keyfile", "prove", "--key-id", KEY, "--epoch", "3", "--report", report_path.to_str().unwrap()]);
+    let proved = cosigner(
+        &cfg,
+        &[
+            "keyfile",
+            "prove",
+            "--key-id",
+            KEY,
+            "--epoch",
+            "3",
+            "--report",
+            report_path.to_str().unwrap(),
+        ],
+    );
     assert!(proved.status.success(), "{}", text(&proved));
 
     // The proof is seconds old: with the default 7 days nothing goes.
@@ -146,15 +195,38 @@ fn old_epochs_go_only_after_the_new_one_is_proven_and_never_on_a_dry_run() {
     assert!(young.status.success(), "{}", text(&young));
     assert_eq!(tars(&backups), all, "a young proof deletes nothing");
 
-    let dry = cosigner(&cfg, &["backup-retain", "--dir", dir, "--min-proof-age-days", "0", "--dry-run"]);
+    let dry = cosigner(
+        &cfg,
+        &[
+            "backup-retain",
+            "--dir",
+            dir,
+            "--min-proof-age-days",
+            "0",
+            "--dry-run",
+        ],
+    );
     assert!(dry.status.success(), "{}", text(&dry));
-    assert_eq!(text(&dry).matches("verdict=would-delete").count(), 2, "{}", text(&dry));
+    assert_eq!(
+        text(&dry).matches("verdict=would-delete").count(),
+        2,
+        "{}",
+        text(&dry)
+    );
     assert!(text(&dry).contains("dry_run=true"));
     assert_eq!(tars(&backups), all, "a dry run deletes nothing");
 
-    let real = cosigner(&cfg, &["backup-retain", "--dir", dir, "--min-proof-age-days", "0"]);
+    let real = cosigner(
+        &cfg,
+        &["backup-retain", "--dir", dir, "--min-proof-age-days", "0"],
+    );
     assert!(real.status.success(), "{}", text(&real));
-    assert_eq!(tars(&backups), vec!["node-1-20261103T000000Z.tar"], "{}", text(&real));
+    assert_eq!(
+        tars(&backups),
+        vec!["node-1-20261103T000000Z.tar"],
+        "{}",
+        text(&real)
+    );
 }
 
 #[test]
@@ -166,9 +238,24 @@ fn a_node_behind_its_newest_archive_deletes_nothing() {
     store(&keys).create(KEY, &share(2)).unwrap(); // this node missed the refresh to 3
     archive(&backups, "20261101T000000Z", 1);
     archive(&backups, "20261103T000000Z", 3);
-    let out = cosigner(&cfg, &["backup-retain", "--dir", backups.to_str().unwrap(), "--min-proof-age-days", "0", "--keep-count", "1"]);
+    let out = cosigner(
+        &cfg,
+        &[
+            "backup-retain",
+            "--dir",
+            backups.to_str().unwrap(),
+            "--min-proof-age-days",
+            "0",
+            "--keep-count",
+            "1",
+        ],
+    );
     assert!(out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains("BACKUP_RETENTION_SKIPPED") && text(&out).contains("nothing-deleted"), "{}", text(&out));
+    assert!(
+        text(&out).contains("BACKUP_RETENTION_SKIPPED") && text(&out).contains("nothing-deleted"),
+        "{}",
+        text(&out)
+    );
     assert_eq!(tars(&backups).len(), 2, "not even the count cap runs");
 }
 
@@ -179,14 +266,38 @@ fn an_unreadable_directory_is_an_error_and_a_damaged_archive_is_kept() {
     let keys = tmp.path().join("data").join("keys");
     let backups = tmp.path().join("backup");
     store(&keys).create(KEY, &share(3)).unwrap();
-    let missing = cosigner(&cfg, &["backup-retain", "--dir", tmp.path().join("nope").to_str().unwrap()]);
-    assert!(!missing.status.success() && text(&missing).contains("cannot list"), "{}", text(&missing));
+    let missing = cosigner(
+        &cfg,
+        &[
+            "backup-retain",
+            "--dir",
+            tmp.path().join("nope").to_str().unwrap(),
+        ],
+    );
+    assert!(
+        !missing.status.success() && text(&missing).contains("cannot list"),
+        "{}",
+        text(&missing)
+    );
 
     archive(&backups, "20261101T000000Z", 3);
     archive(&backups, "20261103T000000Z", 3);
     let damaged = backups.join("node-1-20261102T000000Z.tar");
     std::fs::write(&damaged, vec![1u8; 700]).unwrap();
-    let out = cosigner(&cfg, &["backup-retain", "--dir", backups.to_str().unwrap(), "--min-proof-age-days", "0"]);
+    let out = cosigner(
+        &cfg,
+        &[
+            "backup-retain",
+            "--dir",
+            backups.to_str().unwrap(),
+            "--min-proof-age-days",
+            "0",
+        ],
+    );
     assert!(out.status.success(), "{}", text(&out));
-    assert!(damaged.exists(), "an archive whose epoch cannot be read is never deleted: {}", text(&out));
+    assert!(
+        damaged.exists(),
+        "an archive whose epoch cannot be read is never deleted: {}",
+        text(&out)
+    );
 }

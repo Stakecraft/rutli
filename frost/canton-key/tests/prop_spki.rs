@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Property tests for public-key encodings and Canton fingerprints (issue #121): an SPKI DER
@@ -20,7 +20,11 @@ fn config(cases: u32) -> ProptestConfig {
 }
 
 fn ed25519_public(seed: [u8; 32]) -> PublicKey {
-    PublicKey::Ed25519(ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key().to_bytes())
+    PublicKey::Ed25519(
+        ed25519_dalek::SigningKey::from_bytes(&seed)
+            .verifying_key()
+            .to_bytes(),
+    )
 }
 
 /// A P-256 public key from a scalar, or `None` for a scalar out of range.

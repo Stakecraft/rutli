@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Canton's private-key protobuf messages (`crypto/v30/crypto.proto`) and their two containers:
@@ -40,21 +40,42 @@ fn signing_private_key(buf: &[u8]) -> Result<PrivateKeyMsg<'_>> {
             1 => KeySpec::Ed25519,
             2 => KeySpec::EcP256,
             3 => return Err(unsupported_signing("EC-DSA-P384 (legacy scheme)")),
-            0 => return Err(Error::Malformed("SigningPrivateKey: neither key_spec nor scheme set".into())),
-            s => return Err(Error::Unsupported(format!("SigningPrivateKey: unknown legacy scheme {s}"))),
+            0 => {
+                return Err(Error::Malformed(
+                    "SigningPrivateKey: neither key_spec nor scheme set".into(),
+                ))
+            }
+            s => {
+                return Err(Error::Unsupported(format!(
+                    "SigningPrivateKey: unknown legacy scheme {s}"
+                )))
+            }
         },
-        s => return Err(Error::Unsupported(format!("SigningPrivateKey: unknown key_spec {s}"))),
+        s => {
+            return Err(Error::Unsupported(format!(
+                "SigningPrivateKey: unknown key_spec {s}"
+            )))
+        }
     };
     let usage = m
         .repeated_varint(5)?
         .into_iter()
         .map(SigningKeyUsage::from_proto)
         .collect::<Result<Vec<_>>>()?;
-    Ok(PrivateKeyMsg { id, format, key, spec, purpose: KeyPurpose::Signing, usage })
+    Ok(PrivateKeyMsg {
+        id,
+        format,
+        key,
+        spec,
+        purpose: KeyPurpose::Signing,
+        usage,
+    })
 }
 
 fn unsupported_signing(spec: &str) -> Error {
-    Error::Unsupported(format!("signing key spec {spec}; Rütli handles Ed25519 and EC-P256"))
+    Error::Unsupported(format!(
+        "signing key spec {spec}; Rütli handles Ed25519 and EC-P256"
+    ))
 }
 
 /// `message EncryptionPrivateKey { string id = 1; CryptoKeyFormat format = 2;
@@ -71,17 +92,37 @@ fn encryption_private_key(buf: &[u8]) -> Result<PrivateKeyMsg<'_>> {
         0 => match m.varint(4)? {
             1 | 2 => KeySpec::EcP256,
             3 => KeySpec::Rsa2048,
-            0 => return Err(Error::Malformed("EncryptionPrivateKey: neither key_spec nor scheme set".into())),
-            s => return Err(Error::Unsupported(format!("EncryptionPrivateKey: unknown legacy scheme {s}"))),
+            0 => {
+                return Err(Error::Malformed(
+                    "EncryptionPrivateKey: neither key_spec nor scheme set".into(),
+                ))
+            }
+            s => {
+                return Err(Error::Unsupported(format!(
+                    "EncryptionPrivateKey: unknown legacy scheme {s}"
+                )))
+            }
         },
-        s => return Err(Error::Unsupported(format!("EncryptionPrivateKey: unknown key_spec {s}"))),
+        s => {
+            return Err(Error::Unsupported(format!(
+                "EncryptionPrivateKey: unknown key_spec {s}"
+            )))
+        }
     };
-    Ok(PrivateKeyMsg { id, format, key, spec, purpose: KeyPurpose::Encryption, usage: Vec::new() })
+    Ok(PrivateKeyMsg {
+        id,
+        format,
+        key,
+        spec,
+        purpose: KeyPurpose::Encryption,
+        usage: Vec::new(),
+    })
 }
 
 fn common<'a>(m: &Msg<'a>, name: &str) -> Result<(&'a str, u64, &'a [u8])> {
     let id = m.bytes(1)?.unwrap_or_default();
-    let id = std::str::from_utf8(id).map_err(|_| Error::Malformed(format!("{name}: id is not UTF-8")))?;
+    let id = std::str::from_utf8(id)
+        .map_err(|_| Error::Malformed(format!("{name}: id is not UTF-8")))?;
     if id.is_empty() {
         return Err(Error::Malformed(format!("{name}: no id (fingerprint)")));
     }
@@ -102,7 +143,11 @@ fn decode(msg: PrivateKeyMsg<'_>, source: Source) -> Result<CantonPrivateKey> {
         2 => CryptoKeyFormat::LegacyDer,
         3 => CryptoKeyFormat::Raw,
         5 => CryptoKeyFormat::DerPkcs8,
-        4 => return Err(Error::Malformed("private key labelled as an X.509 public key (format 4)".into())),
+        4 => {
+            return Err(Error::Malformed(
+                "private key labelled as an X.509 public key (format 4)".into(),
+            ))
+        }
         10_000 => return Err(Error::Unsupported("symbolic (test-only) Canton key".into())),
         0 => return Err(Error::Malformed("private key format not set".into())),
         f => return Err(Error::Unsupported(format!("private key format {f}"))),
@@ -111,10 +156,16 @@ fn decode(msg: PrivateKeyMsg<'_>, source: Source) -> Result<CantonPrivateKey> {
         (KeySpec::Ed25519, CryptoKeyFormat::Raw) => {
             let seed = asn1::ed25519_seed(msg.key)?;
             let public = asn1::ed25519_public(&seed);
-            (PrivateKeyMaterial::Ed25519 { seed }, PublicKey::Ed25519(public))
+            (
+                PrivateKeyMaterial::Ed25519 { seed },
+                PublicKey::Ed25519(public),
+            )
         }
         (KeySpec::Ed25519, CryptoKeyFormat::DerPkcs8)
-        | (KeySpec::EcP256 | KeySpec::Rsa2048, CryptoKeyFormat::DerPkcs8 | CryptoKeyFormat::LegacyDer) => {
+        | (
+            KeySpec::EcP256 | KeySpec::Rsa2048,
+            CryptoKeyFormat::DerPkcs8 | CryptoKeyFormat::LegacyDer,
+        ) => {
             let actual = asn1::pkcs8_spec(msg.key)?;
             if actual != msg.spec {
                 return Err(Error::Malformed(format!(
@@ -206,7 +257,11 @@ fn crypto_key_pair(buf: &[u8], source: Source) -> Result<CantonPrivateKey> {
         (Some(pair), None) => signing_private_key(key_pair(pair, "SigningKeyPair")?)?,
         (None, Some(pair)) => encryption_private_key(key_pair(pair, "EncryptionKeyPair")?)?,
         (None, None) => return Err(Error::Malformed("CryptoKeyPair: empty".into())),
-        (Some(_), Some(_)) => return Err(Error::Malformed("CryptoKeyPair: both pair kinds set".into())),
+        (Some(_), Some(_)) => {
+            return Err(Error::Malformed(
+                "CryptoKeyPair: both pair kinds set".into(),
+            ))
+        }
     };
     decode(msg, source)
 }
@@ -219,7 +274,8 @@ fn key_pair<'a>(buf: &'a [u8], name: &'static str) -> Result<&'a [u8]> {
         )));
     }
     m.only(&[2])?;
-    m.bytes(2)?.ok_or_else(|| Error::Malformed(format!("{name}: no private_key")))
+    m.bytes(2)?
+        .ok_or_else(|| Error::Malformed(format!("{name}: no private_key")))
 }
 
 /// The plain `ExportKeyPair` output: `UntypedVersionedMessage(30)` around `CryptoKeyPair`
@@ -252,7 +308,10 @@ pub(crate) enum Shape {
 
 pub(crate) fn shape(inner: &[u8]) -> Result<Shape> {
     let fields = proto::fields(inner, "versioned payload")?;
-    if fields.iter().any(|f| f.number == 3 && matches!(f.value, proto::Value::Varint(_))) {
+    if fields
+        .iter()
+        .any(|f| f.number == 3 && matches!(f.value, proto::Value::Varint(_)))
+    {
         return Ok(Shape::PasswordBasedEncrypted);
     }
     if let [f] = fields.as_slice() {
@@ -293,11 +352,17 @@ pub(crate) fn parse_public(buf: &[u8]) -> Result<(PublicKey, KeyPurpose, Vec<Sig
             0 => None,
             1 => Some(KeySpec::EcP256),
             2 => Some(KeySpec::Rsa2048),
-            s => return Err(Error::Unsupported(format!("encryption public key spec {s}"))),
+            s => {
+                return Err(Error::Unsupported(format!(
+                    "encryption public key spec {s}"
+                )))
+            }
         };
         (KeyPurpose::Encryption, Vec::new(), declared)
     };
-    let key = m.bytes(3)?.ok_or_else(|| Error::Malformed("public key: no key bytes".into()))?;
+    let key = m
+        .bytes(3)?
+        .ok_or_else(|| Error::Malformed("public key: no key bytes".into()))?;
     let public = match m.varint(2)? {
         // DER_X509_SUBJECT_PUBLIC_KEY_INFO, the only format Canton writes since 3.x.
         4 => asn1::parse_spki(key)?,

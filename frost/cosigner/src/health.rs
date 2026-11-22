@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Key-store readiness: the verdict behind `Signer.Health`, the `rutli_keystore_unreadable` gauge,
@@ -71,7 +71,9 @@ pub fn is_definite_io(e: &DaemonError) -> Option<String> {
         _ => return None,
     };
     match io.raw_os_error() {
-        Some(libc::EROFS | libc::EIO | libc::ENOSPC | libc::EACCES | libc::ESTALE) => Some(io.to_string()),
+        Some(libc::EROFS | libc::EIO | libc::ENOSPC | libc::EACCES | libc::ESTALE) => {
+            Some(io.to_string())
+        }
         _ => None,
     }
 }
@@ -145,7 +147,11 @@ impl KeystoreHealth {
             io_hook: None,
             down: AtomicBool::new(false),
             state: Mutex::new(State {
-                verdict: Verdict { failure: None, seq: 0, at: None },
+                verdict: Verdict {
+                    failure: None,
+                    seq: 0,
+                    at: None,
+                },
                 running: None,
             }),
             finished: Condvar::new(),
@@ -204,7 +210,9 @@ impl KeystoreHealth {
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// The current verdict, as Health reports it (healthy until the first probe says otherwise).
@@ -235,7 +243,11 @@ impl KeystoreHealth {
             (None, true) => tracing::info!("key store readable again — Health reports serving"),
             _ => {}
         }
-        *v = Verdict { failure, seq, at: Some(Instant::now()) };
+        *v = Verdict {
+            failure,
+            seq,
+            at: Some(Instant::now()),
+        };
     }
 
     /// Serve the cache, find the probe already running, or start one on its own thread.
@@ -251,10 +263,17 @@ impl KeystoreHealth {
                 return Started::Cached(s.verdict.failure.clone().map_or(Ok(()), Err));
             }
             if let Some(r) = &s.running {
-                return Started::InFlight { seq: r.seq, since: r.since };
+                return Started::InFlight {
+                    seq: r.seq,
+                    since: r.since,
+                };
             }
             let (seq, since) = (self.next_seq(), Instant::now());
-            s.running = Some(Running { seq, since, slow_logged: false });
+            s.running = Some(Running {
+                seq,
+                since,
+                slow_logged: false,
+            });
             (seq, since)
         };
         // A plain thread, not tokio's blocking pool: a probe parked on a dead volume is parked for
@@ -262,12 +281,14 @@ impl KeystoreHealth {
         // pool — is stuck. `slot` frees the single-flight slot and wakes waiters when the probe
         // ends, or when the closure is dropped unrun because the thread could not start.
         let slot = Slot(self.clone(), seq);
-        let spawned = std::thread::Builder::new().name("rutli-keystore-probe".into()).spawn(move || {
-            let h = &slot.0;
-            let verdict = h.run_check();
-            h.publish(seq, verdict.err().map(|e| e.to_string()), false);
-            drop(slot);
-        });
+        let spawned = std::thread::Builder::new()
+            .name("rutli-keystore-probe".into())
+            .spawn(move || {
+                let h = &slot.0;
+                let verdict = h.run_check();
+                h.publish(seq, verdict.err().map(|e| e.to_string()), false);
+                drop(slot);
+            });
         match spawned {
             Ok(_) => Started::Probing { seq, since },
             Err(e) => {
@@ -295,7 +316,11 @@ impl KeystoreHealth {
             return;
         }
         let mut s = self.lock();
-        if let Some(r) = s.running.as_mut().filter(|r| r.seq == seq && !r.slow_logged) {
+        if let Some(r) = s
+            .running
+            .as_mut()
+            .filter(|r| r.seq == seq && !r.slow_logged)
+        {
             r.slow_logged = true;
             tracing::warn!(
                 path = %self.dir.display(),
@@ -313,7 +338,9 @@ impl KeystoreHealth {
     fn wait_blocking(&self, seq: u64, since: Instant, patience: Duration) {
         let deadline = since + patience;
         loop {
-            let slice = deadline.saturating_duration_since(Instant::now()).min(PROBE_TIMEOUT);
+            let slice = deadline
+                .saturating_duration_since(Instant::now())
+                .min(PROBE_TIMEOUT);
             let s = self.lock();
             let (s, _) = self
                 .finished
@@ -376,14 +403,18 @@ impl KeystoreHealth {
             return;
         }
         let me = self.clone();
-        let spawned = std::thread::Builder::new().name("rutli-keystore-kick".into()).spawn(move || {
-            let patience = me.unresponsive_after.max(PROBE_TIMEOUT);
-            match me.start_with(true) {
-                Started::Cached(_) => {}
-                Started::InFlight { seq, since } | Started::Probing { seq, since } => me.wait_blocking(seq, since, patience),
-            }
-            me.kicking.store(false, Ordering::Release);
-        });
+        let spawned = std::thread::Builder::new()
+            .name("rutli-keystore-kick".into())
+            .spawn(move || {
+                let patience = me.unresponsive_after.max(PROBE_TIMEOUT);
+                match me.start_with(true) {
+                    Started::Cached(_) => {}
+                    Started::InFlight { seq, since } | Started::Probing { seq, since } => {
+                        me.wait_blocking(seq, since, patience)
+                    }
+                }
+                me.kicking.store(false, Ordering::Release);
+            });
         if let Err(e) = spawned {
             self.kicking.store(false, Ordering::Release);
             tracing::warn!(error = %e, "could not start a key-store probe for slow store work");
@@ -464,7 +495,11 @@ mod tests {
     /// Pretend a probe has been hung for `for_`; returns its sequence number.
     fn hang(h: &KeystoreHealth, for_: Duration) -> u64 {
         let seq = h.next_seq();
-        h.lock().running = Some(Running { seq, since: Instant::now() - for_, slow_logged: false });
+        h.lock().running = Some(Running {
+            seq,
+            since: Instant::now() - for_,
+            slow_logged: false,
+        });
         seq
     }
 
@@ -479,18 +514,32 @@ mod tests {
         let older = h.next_seq();
         h.report_definite("Read-only file system (os error 30)");
         assert!(h.is_down());
-        assert!(h.current().unwrap_err().contains("not writable"), "{:?}", h.current());
+        assert!(
+            h.current().unwrap_err().contains("not writable"),
+            "{:?}",
+            h.current()
+        );
         h.publish(older, None, false);
-        assert!(h.is_down(), "an older probe's success cannot clear a newer definite error");
+        assert!(
+            h.is_down(),
+            "an older probe's success cannot clear a newer definite error"
+        );
         // The next probe that starts after it, with the store working, clears it: no restart.
         h.check().unwrap();
         assert!(!h.is_down());
 
         let eio = DaemonError::Io(std::io::Error::from_raw_os_error(libc::EIO));
         assert!(is_definite_io(&eio).is_some());
-        let erofs = DaemonError::Core(rutli_frost_core::CoreError::Io(std::io::Error::from_raw_os_error(libc::EROFS)));
+        let erofs = DaemonError::Core(rutli_frost_core::CoreError::Io(
+            std::io::Error::from_raw_os_error(libc::EROFS),
+        ));
         assert!(is_definite_io(&erofs).is_some());
-        assert!(is_definite_io(&DaemonError::Io(std::io::Error::from_raw_os_error(libc::ENOENT))).is_none());
+        assert!(
+            is_definite_io(&DaemonError::Io(std::io::Error::from_raw_os_error(
+                libc::ENOENT
+            )))
+            .is_none()
+        );
         assert!(is_definite_io(&DaemonError::Io(std::io::Error::other("timed out"))).is_none());
     }
 
@@ -524,17 +573,26 @@ mod tests {
         assert_eq!(probe(&live).await, Ok(()));
 
         std::fs::remove_dir_all(&dir).unwrap(); // the store is gone
-        assert_eq!(probe(&cached).await, Ok(()), "a fresh verdict is served without probing");
+        assert_eq!(
+            probe(&cached).await,
+            Ok(()),
+            "a fresh verdict is served without probing"
+        );
 
         // A probe already in flight: callers get the current verdict rather than a second probe.
         hang(&live, Duration::ZERO);
         assert_eq!(probe(&live).await, Ok(()), "must not start a second probe");
         live.lock().running = None;
 
-        let detail = probe(&live).await.expect_err("an uncached probe sees the missing store");
+        let detail = probe(&live)
+            .await
+            .expect_err("an uncached probe sees the missing store");
         assert!(detail.contains("unreadable"), "{detail}");
         assert!(live.is_down());
-        assert!(live.lock().running.is_none(), "a finished probe frees the single-flight slot");
+        assert!(
+            live.lock().running.is_none(),
+            "a finished probe frees the single-flight slot"
+        );
     }
 
     #[tokio::test]
@@ -546,16 +604,26 @@ mod tests {
 
         // Hung for one timeout: logged, not a verdict — a short stall must not fail signing.
         hang(&h, PROBE_TIMEOUT);
-        assert_eq!(probe(&h).await, Ok(()), "one timeout must not fail the node");
+        assert_eq!(
+            probe(&h).await,
+            Ok(()),
+            "one timeout must not fail the node"
+        );
         assert!(!h.is_down());
-        assert!(h.lock().running.as_ref().unwrap().slow_logged, "the stall is logged");
+        assert!(
+            h.lock().running.as_ref().unwrap().slow_logged,
+            "the stall is logged"
+        );
 
         // Hung for the whole grace: unresponsive — from Health and from the monitor's path alike…
         h.lock().running = None;
         let seq = hang(&h, UNRESPONSIVE_AFTER);
         let detail = probe(&h).await.expect_err("two timeouts = unresponsive");
         assert!(detail.contains("unresponsive"), "{detail}");
-        assert!(detail.contains(&dir.display().to_string()), "must name the path: {detail}");
+        assert!(
+            detail.contains(&dir.display().to_string()),
+            "must name the path: {detail}"
+        );
         assert!(h.is_down());
         assert!(h.probe_blocking(PROBE_TIMEOUT).is_err());
         // …and the hung probe's real result, whenever it lands, replaces the placeholder.
@@ -566,7 +634,9 @@ mod tests {
         // The monitor waits out a hung probe someone else (Health) started, so "unresponsive" is
         // published when the grace runs out, not a whole monitor interval later.
         hang(&h, UNRESPONSIVE_AFTER - Duration::from_millis(100));
-        let detail = h.probe_blocking(UNRESPONSIVE_AFTER).expect_err("published at the grace");
+        let detail = h
+            .probe_blocking(UNRESPONSIVE_AFTER)
+            .expect_err("published at the grace");
         assert!(detail.contains("unresponsive"), "{detail}");
         h.lock().running = None;
         h.check().unwrap();
@@ -574,7 +644,9 @@ mod tests {
 
         // A definite error needs no grace: published by the probe the moment it returns.
         std::fs::remove_dir_all(&dir).unwrap();
-        let detail = h.probe_blocking(PROBE_TIMEOUT).expect_err("a missing store fails at once");
+        let detail = h
+            .probe_blocking(PROBE_TIMEOUT)
+            .expect_err("a missing store fails at once");
         assert!(detail.contains("unreadable"), "{detail}");
         assert!(h.is_down());
     }

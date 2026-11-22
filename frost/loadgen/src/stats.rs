@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! What one load run observed from the client side: outcomes by gRPC code, latency percentiles of
@@ -141,7 +141,11 @@ pub struct Recorder {
 
 /// `CODE: message`, digits masked, cut to 160 characters.
 fn message_key(code: &str, message: &str) -> String {
-    let masked: String = message.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).take(160).collect();
+    let masked: String = message
+        .chars()
+        .map(|c| if c.is_ascii_digit() { '#' } else { c })
+        .take(160)
+        .collect();
     format!("{code}: {masked}")
 }
 
@@ -150,7 +154,11 @@ impl Recorder {
         if let Some(m) = message {
             let key = message_key(outcome.code, &m);
             // 31 messages and `(other)`: at most 32 entries.
-            let key = if self.messages.contains_key(&key) || self.messages.len() < 31 { key } else { "(other)".into() };
+            let key = if self.messages.contains_key(&key) || self.messages.len() < 31 {
+                key
+            } else {
+                "(other)".into()
+            };
             *self.messages.entry(key).or_default() += 1;
             self.samples.entry(outcome.code.to_string()).or_insert(m);
         }
@@ -178,7 +186,10 @@ impl Recorder {
                     entry.0 += 1;
                 }
             }
-            let sec = timeline.entry(o.at.as_secs()).or_insert_with(|| Second { t: o.at.as_secs(), ..Default::default() });
+            let sec = timeline.entry(o.at.as_secs()).or_insert_with(|| Second {
+                t: o.at.as_secs(),
+                ..Default::default()
+            });
             if o.code == "OK" && !o.bad_answer {
                 ok_micros.push(o.latency.as_micros() as u64);
                 sec.ok += 1;
@@ -211,12 +222,23 @@ impl Recorder {
             error_messages: std::mem::take(&mut self.messages),
             latency: latency(&mut ok_micros),
             wall_seconds: round3(wall_seconds),
-            ok_per_second: if wall_seconds > 0.0 { round3(ok as f64 / wall_seconds) } else { 0.0 },
+            ok_per_second: if wall_seconds > 0.0 {
+                round3(ok as f64 / wall_seconds)
+            } else {
+                0.0
+            },
             timeline: timeline.into_values().collect(),
             by_leader: leaders
                 .into_iter()
                 .map(|(name, (errors, mut micros))| {
-                    (name, LeaderReport { ok: micros.len() as u64, errors, latency: latency(&mut micros) })
+                    (
+                        name,
+                        LeaderReport {
+                            ok: micros.len() as u64,
+                            errors,
+                            latency: latency(&mut micros),
+                        },
+                    )
                 })
                 .collect(),
             connect: None,
@@ -267,7 +289,14 @@ mod tests {
             code,
             failovers: Vec::new(),
             bad_answer: false,
-            leader: Some(if latency_ms.is_multiple_of(2) { "cosigner1" } else { "cosigner2" }.to_string()),
+            leader: Some(
+                if latency_ms.is_multiple_of(2) {
+                    "cosigner1"
+                } else {
+                    "cosigner2"
+                }
+                .to_string(),
+            ),
         }
     }
 
@@ -275,7 +304,10 @@ mod tests {
     fn percentiles_are_nearest_rank() {
         let mut micros: Vec<u64> = (1..=100).map(|ms| ms * 1000).collect();
         let l = latency(&mut micros);
-        assert_eq!((l.p50_ms, l.p95_ms, l.p99_ms, l.max_ms), (50.0, 95.0, 99.0, 100.0));
+        assert_eq!(
+            (l.p50_ms, l.p95_ms, l.p99_ms, l.max_ms),
+            (50.0, 95.0, 99.0, 100.0)
+        );
         assert_eq!(l.mean_ms, 50.5);
         // One sample is every percentile.
         let l = latency(&mut [7_000]);
@@ -288,9 +320,15 @@ mod tests {
         let mut r = Recorder::default();
         r.record(outcome(100, 10, "OK"), None);
         r.record(outcome(200, 30, "OK"), None);
-        r.record(outcome(1200, 5000, "UNAVAILABLE"), Some("could not reach signing threshold".into()));
+        r.record(
+            outcome(1200, 5000, "UNAVAILABLE"),
+            Some("could not reach signing threshold".into()),
+        );
         r.record(outcome(1300, 1, "RESOURCE_EXHAUSTED"), Some("first".into()));
-        r.record(outcome(1400, 1, "RESOURCE_EXHAUSTED"), Some("second".into()));
+        r.record(
+            outcome(1400, 1, "RESOURCE_EXHAUSTED"),
+            Some("second".into()),
+        );
         let mut failed_over = outcome(1500, 40, "OK");
         failed_over.failovers = vec!["UNAVAILABLE"];
         r.record(failed_over, None);
@@ -310,14 +348,34 @@ mod tests {
         assert_eq!(rep.error_samples["RESOURCE_EXHAUSTED"], "first");
         // Counted by message: the two rate-limit refusals have different texts.
         assert_eq!(rep.error_messages["RESOURCE_EXHAUSTED: first"], 1);
-        assert_eq!(rep.error_messages["UNAVAILABLE: could not reach signing threshold"], 1);
-        assert_eq!(message_key("UNAVAILABLE", "sign for k-12: 256 sessions"), "UNAVAILABLE: sign for k-##: ### sessions");
+        assert_eq!(
+            rep.error_messages["UNAVAILABLE: could not reach signing threshold"],
+            1
+        );
+        assert_eq!(
+            message_key("UNAVAILABLE", "sign for k-12: 256 sessions"),
+            "UNAVAILABLE: sign for k-##: ### sessions"
+        );
         assert_eq!(rep.latency.count, 3);
         assert_eq!(rep.latency.max_ms, 40.0);
         assert_eq!(rep.ok_per_second, 1.5);
         assert_eq!(rep.timeline.len(), 2);
-        assert_eq!((rep.timeline[0].ok, rep.timeline[0].errors, rep.timeline[0].max_ms), (2, 0, 30.0));
-        assert_eq!((rep.timeline[1].ok, rep.timeline[1].errors, rep.timeline[1].max_ms), (1, 4, 40.0));
+        assert_eq!(
+            (
+                rep.timeline[0].ok,
+                rep.timeline[0].errors,
+                rep.timeline[0].max_ms
+            ),
+            (2, 0, 30.0)
+        );
+        assert_eq!(
+            (
+                rep.timeline[1].ok,
+                rep.timeline[1].errors,
+                rep.timeline[1].max_ms
+            ),
+            (1, 4, 40.0)
+        );
         // Split by the cosigner that answered (even latencies cosigner1, odd cosigner2 here).
         let c1 = &rep.by_leader["cosigner1"];
         assert_eq!((c1.ok, c1.errors, c1.latency.max_ms), (3, 2, 40.0));

@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! tonic service implementations: the client-facing [`Signer`] and the mesh-internal [`Peer`].
@@ -72,7 +72,11 @@ impl SignerSvc {
     }
 
     /// [`SignerSvc::authorize`] plus the key ACL for the request's key.
-    fn authorize_key<T>(&self, req: &Request<T>, key_id: impl Fn(&T) -> &str) -> Result<(), Status> {
+    fn authorize_key<T>(
+        &self,
+        req: &Request<T>,
+        key_id: impl Fn(&T) -> &str,
+    ) -> Result<(), Status> {
         let caller = self.authorize(req)?;
         self.check_acl(caller.as_ref(), key_id(req.get_ref()))
     }
@@ -80,7 +84,11 @@ impl SignerSvc {
     /// For the operator-role RPCs (`KeyStatus`, `CeremonySignTest`): the driver role or the
     /// operator role.
     fn authorize_operator<T>(&self, req: &Request<T>) -> Result<(), Status> {
-        authorize_either(self.allowed_cns.as_deref(), self.operator_cns.as_deref(), req)?;
+        authorize_either(
+            self.allowed_cns.as_deref(),
+            self.operator_cns.as_deref(),
+            req,
+        )?;
         self.check_pin(req).map(|_| ())
     }
 
@@ -97,7 +105,10 @@ impl SignerSvc {
 
     /// `Refresh`: the refresher role, or the signer role while `signing_policy.signer_may_refresh`.
     fn authorize_refresh<T>(&self, req: &Request<T>, key_id: &str) -> Result<(), Status> {
-        let signer_may = self.sign_guard.as_ref().is_none_or(|g| g.verifier().policy().signer_may_refresh);
+        let signer_may = self
+            .sign_guard
+            .as_ref()
+            .is_none_or(|g| g.verifier().policy().signer_may_refresh);
         if self.allowed_cns.is_none() {
             return Ok(()); // plaintext dev: open
         }
@@ -110,7 +121,9 @@ impl SignerSvc {
             let caller = self.authorize(req)?;
             return self.check_acl(caller.as_ref(), key_id);
         }
-        let cn = req.peer_certs().and_then(|c| c.first().and_then(|l| cn_of(l.as_ref())));
+        let cn = req
+            .peer_certs()
+            .and_then(|c| c.first().and_then(|l| cn_of(l.as_ref())));
         Err(Status::from(crate::intent::refused(
             "role",
             format!(
@@ -122,11 +135,15 @@ impl SignerSvc {
 
     /// The caller's identity, and its SPKI pin if its CN is pinned.
     fn check_pin<T>(&self, req: &Request<T>) -> Result<Option<crate::intent::Caller>, Status> {
-        let caller = req
-            .peer_certs()
-            .and_then(|certs| certs.first().and_then(|leaf| crate::intent::Caller::from_leaf_der(leaf.as_ref())));
+        let caller = req.peer_certs().and_then(|certs| {
+            certs
+                .first()
+                .and_then(|leaf| crate::intent::Caller::from_leaf_der(leaf.as_ref()))
+        });
         if let (Some(g), Some(c)) = (&self.sign_guard, &caller) {
-            g.verifier().check_pin(&c.cn, &c.spki_sha256).map_err(Status::from)?;
+            g.verifier()
+                .check_pin(&c.cn, &c.spki_sha256)
+                .map_err(Status::from)?;
         }
         Ok(caller)
     }
@@ -142,20 +159,33 @@ impl SignerSvc {
         })?;
         let caller = req
             .peer_certs()
-            .and_then(|certs| certs.first().and_then(|leaf| crate::intent::Caller::from_leaf_der(leaf.as_ref())))
+            .and_then(|certs| {
+                certs
+                    .first()
+                    .and_then(|leaf| crate::intent::Caller::from_leaf_der(leaf.as_ref()))
+            })
             .ok_or_else(|| Status::unauthenticated("client certificate required for DeleteKey"))?;
         if !g.verifier().may_delete(&caller.cn) {
             return Err(Status::from(crate::intent::refused_delete(
                 "role",
-                format!("client {:?} may not delete hosted keys (not on hosted_keys.delete_allowlist)", caller.cn),
+                format!(
+                    "client {:?} may not delete hosted keys (not on hosted_keys.delete_allowlist)",
+                    caller.cn
+                ),
             )));
         }
-        g.verifier().check_pin(&caller.cn, &caller.spki_sha256).map_err(Status::from)?;
+        g.verifier()
+            .check_pin(&caller.cn, &caller.spki_sha256)
+            .map_err(Status::from)?;
         Ok(caller)
     }
 
     /// The key ACL for a signer-role caller.
-    fn check_acl(&self, caller: Option<&crate::intent::Caller>, key_id: &str) -> Result<(), Status> {
+    fn check_acl(
+        &self,
+        caller: Option<&crate::intent::Caller>,
+        key_id: &str,
+    ) -> Result<(), Status> {
         match (&self.sign_guard, caller) {
             (Some(g), Some(c)) => g.verifier().check_acl(&c.cn, key_id).map_err(Status::from),
             _ => Ok(()),
@@ -180,10 +210,12 @@ fn authorize_cn<T>(
     req: &Request<T>,
     api: &str,
 ) -> Result<Option<String>, Status> {
-    let Some(allowed) = allowed else { return Ok(None) };
-    let certs = req
-        .peer_certs()
-        .ok_or_else(|| Status::unauthenticated(format!("client certificate required for the {api} API")))?;
+    let Some(allowed) = allowed else {
+        return Ok(None);
+    };
+    let certs = req.peer_certs().ok_or_else(|| {
+        Status::unauthenticated(format!("client certificate required for the {api} API"))
+    })?;
     let cn = certs
         .first()
         .and_then(|leaf| cn_of(leaf.as_ref()))
@@ -242,8 +274,14 @@ impl Signer for SignerSvc {
         // Cached for a few seconds and single-flight (crate::health::probe), so a Health flood
         // cannot turn into a probe flood on slow storage.
         let reply = match crate::health::probe(self.node.keystore_health()).await {
-            Ok(()) => pb::HealthReply { ok: true, detail: "serving".into() },
-            Err(detail) => pb::HealthReply { ok: false, detail: format!("NOT_SERVING: {detail}") },
+            Ok(()) => pb::HealthReply {
+                ok: true,
+                detail: "serving".into(),
+            },
+            Err(detail) => pb::HealthReply {
+                ok: false,
+                detail: format!("NOT_SERVING: {detail}"),
+            },
         };
         Ok(Response::new(reply))
     }
@@ -255,8 +293,14 @@ impl Signer for SignerSvc {
         self.authorize_key(&req, |r| &r.key_id)?;
         self.refuse_if_keystore_down()?;
         let key_id = req.into_inner().key_id;
-        let key = self.node.blocking(move |n| n.group_key(&key_id)).await.map_err(Status::from)?;
-        Ok(Response::new(pb::GroupKeyReply { group_verifying_key: key.to_vec() }))
+        let key = self
+            .node
+            .blocking(move |n| n.group_key(&key_id))
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(pb::GroupKeyReply {
+            group_verifying_key: key.to_vec(),
+        }))
     }
 
     // Read-only and public values only, but allowlisted (driver or operator role): nothing outside
@@ -268,7 +312,11 @@ impl Signer for SignerSvc {
         self.authorize_status(&req)?;
         self.refuse_if_keystore_down()?;
         let key_id = req.into_inner().key_id;
-        let reply = self.node.blocking(move |n| n.key_status(&key_id)).await.map_err(Status::from)?;
+        let reply = self
+            .node
+            .blocking(move |n| n.key_status(&key_id))
+            .await
+            .map_err(Status::from)?;
         Ok(Response::new(reply))
     }
 
@@ -282,14 +330,18 @@ impl Signer for SignerSvc {
         self.refuse_if_keystore_down()?;
         let r = req.into_inner();
         // Before any work: every call that gets through burns a durable nonce marker per signer.
-        self.ceremony_test_limiter.check(&r.key_id).map_err(|limited| {
-            metrics::counter!(crate::metrics::CEREMONY_SIGN_TEST_RATE_LIMITED).increment(1);
-            Status::from(crate::DaemonError::RateLimited(limited.to_string()))
-        })?;
+        self.ceremony_test_limiter
+            .check(&r.key_id)
+            .map_err(|limited| {
+                metrics::counter!(crate::metrics::CEREMONY_SIGN_TEST_RATE_LIMITED).increment(1);
+                Status::from(crate::DaemonError::RateLimited(limited.to_string()))
+            })?;
         let signers: Vec<u16> = r
             .signers
             .iter()
-            .map(|&s| u16::try_from(s).map_err(|_| Status::invalid_argument("signer id out of range")))
+            .map(|&s| {
+                u16::try_from(s).map_err(|_| Status::invalid_argument("signer id out of range"))
+            })
             .collect::<Result<_, _>>()?;
         let (message, signature) =
             orchestrator::ceremony_sign_test(&self.node, &self.peers, &r.key_id, &signers)
@@ -308,7 +360,12 @@ impl Signer for SignerSvc {
         // The ceremony intent, checked here first for a clear refusal from the leader (and so an
         // intent cannot be replayed through another client's connection). Every node checks it
         // again before it takes the guard.
-        self.check_ceremony_intent(caller.as_ref(), crate::node::CeremonyKind::Dkg, &r.key_id, r.intent.as_ref())?;
+        self.check_ceremony_intent(
+            caller.as_ref(),
+            crate::node::CeremonyKind::Dkg,
+            &r.key_id,
+            r.intent.as_ref(),
+        )?;
         // A node whose key store failed its readiness probe declines to lead (UNAVAILABLE, so the
         // driver picks another leader) rather than start a ceremony it cannot persist.
         let result = match self.node.refuse_if_keystore_down() {
@@ -381,7 +438,9 @@ impl Signer for SignerSvc {
         metrics::histogram!(crate::metrics::SIGN_DURATION, "result" => outcome)
             .record(started.elapsed().as_secs_f64());
         let sig = result.map_err(Status::from)?;
-        Ok(Response::new(pb::SignReply { signature: sig.to_vec() }))
+        Ok(Response::new(pb::SignReply {
+            signature: sig.to_vec(),
+        }))
     }
 
     async fn refresh(
@@ -392,7 +451,12 @@ impl Signer for SignerSvc {
         self.authorize_refresh(&req, &key_id)?;
         let caller = caller_of(&req);
         let intent = req.into_inner().intent;
-        self.check_ceremony_intent(caller.as_ref(), crate::node::CeremonyKind::Refresh, &key_id, intent.as_ref())?;
+        self.check_ceremony_intent(
+            caller.as_ref(),
+            crate::node::CeremonyKind::Refresh,
+            &key_id,
+            intent.as_ref(),
+        )?;
         // The refresh interval, at this node before it contacts any peer: a refresh refused here
         // leaves nothing anywhere. Every node checks it again at its own fence, so this is not the
         // load-bearing check — a leader that skips it is still held to it by every other node.
@@ -405,7 +469,9 @@ impl Signer for SignerSvc {
         };
         record_ceremony("refresh", result.is_ok());
         let key = result.map_err(Status::from)?;
-        Ok(Response::new(pb::RefreshReply { group_verifying_key: key.to_vec() }))
+        Ok(Response::new(pb::RefreshReply {
+            group_verifying_key: key.to_vec(),
+        }))
     }
 
     // Read-only, public half only, and local: no read-repair, so `verify-hosted` sees which nodes
@@ -417,8 +483,11 @@ impl Signer for SignerSvc {
         self.authorize_operator(&req)?;
         self.refuse_if_keystore_down()?;
         let key_id = req.into_inner().key_id;
-        let reply =
-            self.node.blocking(move |n| n.hosted_key_status(&key_id)).await.map_err(Status::from)?;
+        let reply = self
+            .node
+            .blocking(move |n| n.hosted_key_status(&key_id))
+            .await
+            .map_err(Status::from)?;
         Ok(Response::new(reply))
     }
 
@@ -435,7 +504,11 @@ impl Signer for SignerSvc {
         Ok(Response::new(pb::CapabilitiesReply {
             hosted_key_specs: specs,
             hosted_keys_enabled: enabled,
-            cluster_id: self.sign_guard.as_ref().map(|g| g.verifier().cluster_id().to_string()).unwrap_or_default(),
+            cluster_id: self
+                .sign_guard
+                .as_ref()
+                .map(|g| g.verifier().cluster_id().to_string())
+                .unwrap_or_default(),
             // Public: the roster slot this endpoint serves, which a generate intent sent here names
             // as its leader.
             node_identifier: self.node.index().map(u32::from).unwrap_or(0),
@@ -453,7 +526,9 @@ impl Signer for SignerSvc {
         // The generate intent, checked here first for a clear refusal from the leader (and so an
         // intent cannot be replayed through another client's connection or another leader). Every
         // node checks it again at its fence, this one included, before anything is minted.
-        if let Err(refused) = self.check_generate_intent(caller.as_ref(), &r.key_id, spec.as_str(), r.intent.as_ref()) {
+        if let Err(refused) =
+            self.check_generate_intent(caller.as_ref(), &r.key_id, spec.as_str(), r.intent.as_ref())
+        {
             record_hosted_op("generate", false);
             tracing::warn!(
                 key_id = %r.key_id,
@@ -522,17 +597,25 @@ impl Signer for SignerSvc {
         // client can compare every node's commitment and public key after a generation.
         let loaded = if r.local_only {
             let id = key_id.clone();
-            self.node.blocking(move |n| n.hosted_load(&id)).await.map_err(|e| match e {
-                crate::DaemonError::UnknownKey(k) => Status::not_found(format!("no such key: {k}")),
-                other => Status::from(other),
-            })
+            self.node
+                .blocking(move |n| n.hosted_load(&id))
+                .await
+                .map_err(|e| match e {
+                    crate::DaemonError::UnknownKey(k) => {
+                        Status::not_found(format!("no such key: {k}"))
+                    }
+                    other => Status::from(other),
+                })
         } else {
             self.load_hosted_repairing(&key_id).await
         };
         match loaded {
             Ok(key) => {
-                let replicas =
-                    if r.local_only { 0 } else { orchestrator::hosted_replica_count(&self.peers, &key_id).await };
+                let replicas = if r.local_only {
+                    0
+                } else {
+                    orchestrator::hosted_replica_count(&self.peers, &key_id).await
+                };
                 Ok(Response::new(pb::KeyInfoReply {
                     exists: true,
                     spec: key.spec.as_str().to_string(),
@@ -587,7 +670,10 @@ impl Signer for SignerSvc {
         .await;
         record_hosted_op("delete", result.is_ok());
         let (deleted, tombstones) = result.map_err(Status::from)?;
-        Ok(Response::new(pb::DeleteKeyReply { deleted, tombstones: tombstones as u32 }))
+        Ok(Response::new(pb::DeleteKeyReply {
+            deleted,
+            tombstones: tombstones as u32,
+        }))
     }
 
     async fn decrypt(
@@ -603,9 +689,14 @@ impl Signer for SignerSvc {
         // read-repair it triggers is bounded by the node's own fan-out ceiling instead.
         self.load_hosted_repairing(&r.key_id).await?;
         self.charge_decrypt(&r.key_id)?;
-        let result = self.node.blocking(move |n| n.hosted_decrypt(&r.key_id, &r.ciphertext)).await;
+        let result = self
+            .node
+            .blocking(move |n| n.hosted_decrypt(&r.key_id, &r.ciphertext))
+            .await;
         record_hosted_op("decrypt", result.is_ok());
-        Ok(Response::new(pb::DecryptReply { plaintext: result.map_err(Status::from)? }))
+        Ok(Response::new(pb::DecryptReply {
+            plaintext: result.map_err(Status::from)?,
+        }))
     }
 
     // ECIES: the static ECDH only (docs/hosted-keys-design.md, "Where the trust boundary sits").
@@ -646,7 +737,9 @@ impl Signer for SignerSvc {
                 return Err(Status::from(e));
             }
         };
-        Ok(Response::new(pb::EcdhDeriveReply { shared_secret: z.to_vec() }))
+        Ok(Response::new(pb::EcdhDeriveReply {
+            shared_secret: z.to_vec(),
+        }))
     }
 
     async fn symmetric_encrypt(
@@ -657,9 +750,14 @@ impl Signer for SignerSvc {
         self.refuse_if_keystore_down()?;
         let r = req.into_inner();
         self.load_hosted_repairing(&r.key_id).await?;
-        let result = self.node.blocking(move |n| n.hosted_encrypt_symmetric(&r.key_id, &r.data)).await;
+        let result = self
+            .node
+            .blocking(move |n| n.hosted_encrypt_symmetric(&r.key_id, &r.data))
+            .await;
         record_hosted_op("symmetric_encrypt", result.is_ok());
-        Ok(Response::new(pb::SymmetricReply { data: result.map_err(Status::from)? }))
+        Ok(Response::new(pb::SymmetricReply {
+            data: result.map_err(Status::from)?,
+        }))
     }
 
     async fn symmetric_decrypt(
@@ -672,9 +770,14 @@ impl Signer for SignerSvc {
         // As for Decrypt: the key first, then the budget.
         self.load_hosted_repairing(&r.key_id).await?;
         self.charge_decrypt(&r.key_id)?;
-        let result = self.node.blocking(move |n| n.hosted_decrypt_symmetric(&r.key_id, &r.data)).await;
+        let result = self
+            .node
+            .blocking(move |n| n.hosted_decrypt_symmetric(&r.key_id, &r.data))
+            .await;
         record_hosted_op("symmetric_decrypt", result.is_ok());
-        Ok(Response::new(pb::SymmetricReply { data: result.map_err(Status::from)? }))
+        Ok(Response::new(pb::SymmetricReply {
+            data: result.map_err(Status::from)?,
+        }))
     }
 }
 
@@ -692,16 +795,22 @@ impl SignerSvc {
         &self,
         key_id: &str,
     ) -> Result<crate::hosted::HostedKey, Status> {
-        if !orchestrator::hosted_exists(&self.node, key_id).await.map_err(Status::from)? {
+        if !orchestrator::hosted_exists(&self.node, key_id)
+            .await
+            .map_err(Status::from)?
+        {
             orchestrator::read_repair(&self.node, &self.peers, key_id)
                 .await
                 .map_err(Status::from)?;
         }
         let id = key_id.to_owned();
-        self.node.blocking(move |n| n.hosted_load(&id)).await.map_err(|e| match e {
-            crate::DaemonError::UnknownKey(k) => Status::not_found(format!("no such key: {k}")),
-            other => Status::from(other),
-        })
+        self.node
+            .blocking(move |n| n.hosted_load(&id))
+            .await
+            .map_err(|e| match e {
+                crate::DaemonError::UnknownKey(k) => Status::not_found(format!("no such key: {k}")),
+                other => Status::from(other),
+            })
     }
 }
 
@@ -710,8 +819,14 @@ impl SignerSvc {
     /// and signed by the very client calling (CN and certificate key) — an intent cannot be
     /// replayed through another client's connection. No intent: refused when this node requires
     /// one; otherwise the members decide (each counts and logs the absence).
-    fn check_intent(&self, caller: Option<&crate::intent::Caller>, r: &pb::SignRequest) -> Result<(), Status> {
-        let Some(g) = &self.sign_guard else { return Ok(()) };
+    fn check_intent(
+        &self,
+        caller: Option<&crate::intent::Caller>,
+        r: &pb::SignRequest,
+    ) -> Result<(), Status> {
+        let Some(g) = &self.sign_guard else {
+            return Ok(());
+        };
         let Some(signed) = &r.intent else {
             if g.require_intent() {
                 return Err(Status::from(crate::intent::refused(
@@ -726,7 +841,10 @@ impl SignerSvc {
             }
             return Ok(());
         };
-        let v = g.verifier().verify(signed, &r.key_id, crate::intent::now_ms()).map_err(Status::from)?;
+        let v = g
+            .verifier()
+            .verify(signed, &r.key_id, crate::intent::now_ms())
+            .map_err(Status::from)?;
         if v.message != r.message {
             return Err(Status::from(crate::intent::refused(
                 "key",
@@ -761,7 +879,9 @@ impl SignerSvc {
         key_id: &str,
         intent: Option<&pb::SignedIntent>,
     ) -> Result<(), Status> {
-        let Some(g) = &self.sign_guard else { return Ok(()) };
+        let Some(g) = &self.sign_guard else {
+            return Ok(());
+        };
         let Some(signed) = intent else {
             if g.require_ceremony_intent() {
                 return Err(Status::from(crate::intent::refused_ceremony(
@@ -809,7 +929,9 @@ impl SignerSvc {
         spec: &str,
         intent: Option<&pb::SignedIntent>,
     ) -> Result<(), Status> {
-        let Some(g) = &self.sign_guard else { return Ok(()) };
+        let Some(g) = &self.sign_guard else {
+            return Ok(());
+        };
         let Some(signed) = intent else {
             if g.require_ceremony_intent() {
                 return Err(Status::from(crate::intent::refused_ceremony(
@@ -827,7 +949,14 @@ impl SignerSvc {
         let me = self.node.index().map_err(Status::from)?;
         let v = g
             .verifier()
-            .verify_generate(signed, key_id, spec, me, &ceremony_id, crate::intent::now_ms())
+            .verify_generate(
+                signed,
+                key_id,
+                spec,
+                me,
+                &ceremony_id,
+                crate::intent::now_ms(),
+            )
             .map_err(Status::from)?;
         if let Some(c) = caller {
             if c.cn != v.signer_cn || c.spki_sha256 != v.signer_spki_sha256 {
@@ -866,10 +995,26 @@ pub fn redact_cosigners(e: crate::DaemonError, authenticated: bool) -> crate::Da
     use crate::DaemonError::{AttemptsExhausted, NoQuorum};
     match e {
         _ if authenticated => e,
-        NoQuorum { needed, visible, .. } => NoQuorum { needed, visible, missing: Vec::new() },
-        AttemptsExhausted { needed, usable, attempts, out_of_time, .. } => {
-            AttemptsExhausted { needed, usable, attempts, excluded: Vec::new(), out_of_time }
-        }
+        NoQuorum {
+            needed, visible, ..
+        } => NoQuorum {
+            needed,
+            visible,
+            missing: Vec::new(),
+        },
+        AttemptsExhausted {
+            needed,
+            usable,
+            attempts,
+            out_of_time,
+            ..
+        } => AttemptsExhausted {
+            needed,
+            usable,
+            attempts,
+            excluded: Vec::new(),
+            out_of_time,
+        },
         other => other,
     }
 }
@@ -877,7 +1022,11 @@ pub fn redact_cosigners(e: crate::DaemonError, authenticated: bool) -> crate::Da
 /// When the caller of a Peer call stops waiting: now plus its `grpc-timeout`, on this node's clock;
 /// `None` without one (or one too large to add).
 fn caller_deadline<T>(req: &Request<T>) -> Option<tokio::time::Instant> {
-    let left = req.metadata().get(GRPC_TIMEOUT_HEADER).and_then(|v| v.to_str().ok()).and_then(parse_grpc_timeout)?;
+    let left = req
+        .metadata()
+        .get(GRPC_TIMEOUT_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_grpc_timeout)?;
     tokio::time::Instant::now().checked_add(left)
 }
 
@@ -886,7 +1035,10 @@ fn caller_deadline<T>(req: &Request<T>) -> Option<tokio::time::Instant> {
 /// and gone already — a round 1 opened now would hold nonces nobody frees before the TTL, a round
 /// 2 would release a share for an attempt the leader abandoned. Checked on the blocking thread,
 /// before the session is opened or taken.
-fn refuse_if_caller_gone(not_after: Option<tokio::time::Instant>, round: &'static str) -> crate::Result<()> {
+fn refuse_if_caller_gone(
+    not_after: Option<tokio::time::Instant>,
+    round: &'static str,
+) -> crate::Result<()> {
     match not_after {
         Some(at) if tokio::time::Instant::now() >= at => Err(crate::DaemonError::CallerGone(round)),
         _ => Ok(()),
@@ -934,7 +1086,11 @@ fn with_load<T>(node: &Node, result: crate::Result<T>) -> Result<Response<T>, St
 
 /// The mTLS identity of a request's caller, if it presented a certificate.
 fn caller_of<T>(req: &Request<T>) -> Option<crate::intent::Caller> {
-    req.peer_certs().and_then(|certs| certs.first().and_then(|leaf| crate::intent::Caller::from_leaf_der(leaf.as_ref())))
+    req.peer_certs().and_then(|certs| {
+        certs
+            .first()
+            .and_then(|leaf| crate::intent::Caller::from_leaf_der(leaf.as_ref()))
+    })
 }
 
 /// A DKG/refresh fence or part 1, or a hosted-key generation's fence, a mesh peer asked for and this
@@ -984,8 +1140,6 @@ fn record_hosted_op(op: &'static str, ok: bool) {
     metrics::counter!(crate::metrics::HOSTED_KEY_OPS, "op" => op, "result" => result).increment(1);
 }
 
-
-
 pub struct PeerSvc {
     pub node: Arc<Node>,
     /// Client-cert CNs allowed on the mesh Peer API — the other cosigners. `None` = open (dev
@@ -1020,7 +1174,8 @@ impl PeerPins {
     pub fn from_config(cfg: &crate::config::Config) -> crate::Result<Self> {
         let mut map = std::collections::HashMap::new();
         for p in &cfg.peers {
-            if let Some((other, _)) = map.insert(p.client_cn(), (p.identifier, p.tls_spki_pins()?)) {
+            if let Some((other, _)) = map.insert(p.client_cn(), (p.identifier, p.tls_spki_pins()?))
+            {
                 return Err(crate::DaemonError::Config(format!(
                     "peers[id={}] and peers[id={other}] have the same client CN {:?}",
                     p.identifier,
@@ -1034,8 +1189,12 @@ impl PeerPins {
     /// The caller of a Peer RPC, from its leaf certificate (DER): its CN must be exactly one roster
     /// node's client CN, and its key one of that node's pins (when it has any). Returns the CN.
     pub fn identify(&self, leaf: Option<&[u8]>) -> Result<String, Status> {
-        let leaf = leaf.ok_or_else(|| Status::unauthenticated("client certificate required for the Peer API"))?;
-        let cn = cn_of(leaf).ok_or_else(|| Status::unauthenticated("client certificate has no usable Common Name"))?;
+        let leaf = leaf.ok_or_else(|| {
+            Status::unauthenticated("client certificate required for the Peer API")
+        })?;
+        let cn = cn_of(leaf).ok_or_else(|| {
+            Status::unauthenticated("client certificate has no usable Common Name")
+        })?;
         if !self.0.contains_key(&cn) {
             return Err(Status::permission_denied(format!(
                 "client '{cn}' is not the configured client CN of any roster node"
@@ -1048,13 +1207,17 @@ impl PeerPins {
     /// Check the leaf certificate (DER) a caller with client CN `cn` presented. `Ok` when `cn`
     /// has no pins (and when it is no roster CN: [`PeerPins::identify`] refuses that).
     pub fn check(&self, cn: &str, leaf: Option<&[u8]>) -> Result<(), Status> {
-        let Some((id, Some(pins))) = self.0.get(cn) else { return Ok(()) };
+        let Some((id, Some(pins))) = self.0.get(cn) else {
+            return Ok(());
+        };
         let seen = leaf.and_then(crate::tls::spki_sha256);
         if seen.is_some_and(|h| pins.contains(&h)) {
             return Ok(());
         }
         metrics::counter!(crate::metrics::PEER_PIN_REFUSALS, "direction" => "inbound").increment(1);
-        let seen = seen.map(hex::encode).unwrap_or_else(|| "(unreadable certificate)".into());
+        let seen = seen
+            .map(hex::encode)
+            .unwrap_or_else(|| "(unreadable certificate)".into());
         tracing::error!(peer = id, %cn, spki_sha256 = %seen, "refused a peer's TLS key (inbound)");
         Err(Status::permission_denied(format!(
             "peer certificate '{cn}' carries TLS key sha256 {seen}, which is not pinned in \
@@ -1073,7 +1236,8 @@ impl PeerSvc {
         match &self.peer_pins {
             Some(pins) => {
                 let certs = req.peer_certs();
-                let found = pins.identify(certs.as_ref().and_then(|c| c.first()).map(|c| c.as_ref()))?;
+                let found =
+                    pins.identify(certs.as_ref().and_then(|c| c.first()).map(|c| c.as_ref()))?;
                 Ok(Some(found))
             }
             None => Ok(cn),
@@ -1091,14 +1255,17 @@ impl PeerSvc {
     /// or not, and every caller is the one owner [`SessionOwner::Unidentified`], as before sessions
     /// had owners. Never [`SessionOwner::Local`]: that is this node's own in-process leader.
     fn session_owner<T>(&self, req: &Request<T>) -> Result<SessionOwner, Status> {
-        Ok(self.authorize(req)?.map_or(SessionOwner::Unidentified, SessionOwner::Peer))
+        Ok(self
+            .authorize(req)?
+            .map_or(SessionOwner::Unidentified, SessionOwner::Peer))
     }
 
     /// The sender of a round-2 delivery: the caller's certificate identity, which must equal the
     /// `from` it claims (audit C1 — a node delivers only its own packages). With no peer allowlist
     /// (plaintext dev mode, where nothing on the mesh is authenticated) the claim is taken as is.
     fn delivery_sender<T>(&self, req: &Request<T>, claimed: u32) -> Result<u16, Status> {
-        let claimed = u16::try_from(claimed).map_err(|_| Status::invalid_argument("sender out of range"))?;
+        let claimed =
+            u16::try_from(claimed).map_err(|_| Status::invalid_argument("sender out of range"))?;
         if !self.identifies_callers() {
             self.authorize(req)?;
             return Ok(claimed);
@@ -1163,19 +1330,32 @@ impl Peer for PeerSvc {
         // An empty digest is a leader from before epochs: no sharing declared (see the proto).
         let leader_view = match r.pkp_digest.len() {
             0 => None,
-            32 => Some((r.epoch, <[u8; 32]>::try_from(r.pkp_digest.as_slice()).expect("32 bytes"))),
-            n => return Err(Status::invalid_argument(format!("pkp_digest must be 32 bytes, got {n}"))),
+            32 => Some((
+                r.epoch,
+                <[u8; 32]>::try_from(r.pkp_digest.as_slice()).expect("32 bytes"),
+            )),
+            n => {
+                return Err(Status::invalid_argument(format!(
+                    "pkp_digest must be 32 bytes, got {n}"
+                )))
+            }
         };
         // Empty message / signer set: a leader that predates session binding (not checked).
         let signers = r
             .signers
             .iter()
-            .map(|&s| u16::try_from(s).map_err(|_| Status::invalid_argument("signer id out of range")))
+            .map(|&s| {
+                u16::try_from(s).map_err(|_| Status::invalid_argument("signer id out of range"))
+            })
             .collect::<Result<Vec<u16>, _>>()?;
         let sign_test = match r.purpose.as_str() {
             "" | crate::intent::PURPOSE_SIGN => false,
             crate::intent::PURPOSE_SIGN_TEST => true,
-            other => return Err(Status::invalid_argument(format!("unknown sign purpose {other:?}"))),
+            other => {
+                return Err(Status::invalid_argument(format!(
+                    "unknown sign purpose {other:?}"
+                )))
+            }
         };
         let ctx = crate::node::Round1Ctx {
             leader_view,
@@ -1191,7 +1371,14 @@ impl Peer for PeerSvc {
                 n.sign_round1_as(&r.key_id, &r.session_id, &ctx, &opener)
             })
             .await;
-        with_load(&self.node, result.and_then(|c| Ok(pb::SignRound1Reply { commitments: serde_json::to_vec(&c)? })))
+        with_load(
+            &self.node,
+            result.and_then(|c| {
+                Ok(pb::SignRound1Reply {
+                    commitments: serde_json::to_vec(&c)?,
+                })
+            }),
+        )
     }
 
     async fn sign_round2(
@@ -1208,16 +1395,34 @@ impl Peer for PeerSvc {
         let intent_digest = match r.intent_digest.len() {
             0 => None,
             32 => Some(<[u8; 32]>::try_from(r.intent_digest.as_slice()).expect("32 bytes")),
-            n => return Err(Status::invalid_argument(format!("intent_digest must be 32 bytes, got {n}"))),
+            n => {
+                return Err(Status::invalid_argument(format!(
+                    "intent_digest must be 32 bytes, got {n}"
+                )))
+            }
         };
         let result = self
             .node
             .sign_op(crate::liveness::Round::Two, move |n| {
                 refuse_if_caller_gone(not_after, "round 2")?;
-                n.sign_round2_as(&r.key_id, &r.session_id, &r.message, &commitments, intent_digest, &caller)
+                n.sign_round2_as(
+                    &r.key_id,
+                    &r.session_id,
+                    &r.message,
+                    &commitments,
+                    intent_digest,
+                    &caller,
+                )
             })
             .await;
-        with_load(&self.node, result.and_then(|share| Ok(pb::SignRound2Reply { share: serde_json::to_vec(&share)? })))
+        with_load(
+            &self.node,
+            result.and_then(|share| {
+                Ok(pb::SignRound2Reply {
+                    share: serde_json::to_vec(&share)?,
+                })
+            }),
+        )
     }
 
     async fn abort_sign(
@@ -1261,15 +1466,30 @@ impl Peer for PeerSvc {
                 let kind = crate::node::CeremonyKind::parse(kind).map_err(Status::from)?;
                 let expect = match r.expected_pkp_digest.len() {
                     0 => None,
-                    32 => Some((r.expected_epoch, r.expected_pkp_digest.as_slice().try_into().expect("32"))),
-                    _ => return Err(Status::invalid_argument("expected_pkp_digest must be 32 bytes")),
+                    32 => Some((
+                        r.expected_epoch,
+                        r.expected_pkp_digest.as_slice().try_into().expect("32"),
+                    )),
+                    _ => {
+                        return Err(Status::invalid_argument(
+                            "expected_pkp_digest must be 32 bytes",
+                        ))
+                    }
                 };
-                let (ceremony_id, key_id, leader) = (r.ceremony_id.clone(), r.key_id.clone(), asker.clone());
+                let (ceremony_id, key_id, leader) =
+                    (r.ceremony_id.clone(), r.key_id.clone(), asker.clone());
                 // The guard binds the ceremony to this caller: only it may run parts 1–3 here.
                 let result = self
                     .node
                     .blocking(move |n| {
-                        n.ceremony_begin_from(&r.ceremony_id, &r.key_id, kind, expect, r.intent.as_ref(), leader.as_deref())
+                        n.ceremony_begin_from(
+                            &r.ceremony_id,
+                            &r.key_id,
+                            kind,
+                            expect,
+                            r.intent.as_ref(),
+                            leader.as_deref(),
+                        )
                     })
                     .await;
                 warn_if_intent_refused(&result, asker.as_deref(), "fence", &ceremony_id, &key_id);
@@ -1280,7 +1500,8 @@ impl Peer for PeerSvc {
             // the calling peer, which the intent must name as its leader.
             "genkey" => {
                 let leader_id = self.roster_id_of(asker.as_deref());
-                let (ceremony_id, key_id, leader) = (r.ceremony_id.clone(), r.key_id.clone(), asker.clone());
+                let (ceremony_id, key_id, leader) =
+                    (r.ceremony_id.clone(), r.key_id.clone(), asker.clone());
                 let result = self
                     .node
                     .blocking(move |n| {
@@ -1294,7 +1515,13 @@ impl Peer for PeerSvc {
                         )
                     })
                     .await;
-                warn_if_intent_refused(&result, asker.as_deref(), "genkey fence", &ceremony_id, &key_id);
+                warn_if_intent_refused(
+                    &result,
+                    asker.as_deref(),
+                    "genkey fence",
+                    &ceremony_id,
+                    &key_id,
+                );
                 result.map_err(Status::from)?;
             }
             // A delete's fence is not client-intent gated: every node verifies the delete intent
@@ -1304,9 +1531,10 @@ impl Peer for PeerSvc {
                     "a ceremony intent is only valid on a dkg, refresh or genkey fence, not {kind}"
                 )))
             }
-            _ => {
-                self.node.ceremony_fence_from(&r.ceremony_id, &r.key_id, kind, asker.as_deref()).map_err(Status::from)?
-            }
+            _ => self
+                .node
+                .ceremony_fence_from(&r.ceremony_id, &r.key_id, kind, asker.as_deref())
+                .map_err(Status::from)?,
         }
         Ok(Response::new(pb::CeremonyFenceReply {}))
     }
@@ -1317,23 +1545,33 @@ impl Peer for PeerSvc {
     ) -> Result<Response<pb::CeremonyReleaseReply>, Status> {
         let asker = self.authorize(&req)?;
         let r = req.into_inner();
-        self.node.ceremony_release_from(&r.ceremony_id, &r.key_id, asker.as_deref());
+        self.node
+            .ceremony_release_from(&r.ceremony_id, &r.key_id, asker.as_deref());
         Ok(Response::new(pb::CeremonyReleaseReply {}))
     }
 
     // Ceremony protocol 1 (leader-relayed round 2, audit C1): refused outright, so an older leader
     // can neither run a ceremony with this node nor obtain round-2 packages from it.
-    async fn dkg_part1(&self, req: Request<pb::DkgPart1Request>) -> Result<Response<pb::DkgPart1Reply>, Status> {
+    async fn dkg_part1(
+        &self,
+        req: Request<pb::DkgPart1Request>,
+    ) -> Result<Response<pb::DkgPart1Reply>, Status> {
         self.authorize(&req)?;
         Err(relay_refused())
     }
 
-    async fn dkg_part2(&self, req: Request<pb::DkgPart2Request>) -> Result<Response<pb::DkgPart2Reply>, Status> {
+    async fn dkg_part2(
+        &self,
+        req: Request<pb::DkgPart2Request>,
+    ) -> Result<Response<pb::DkgPart2Reply>, Status> {
         self.authorize(&req)?;
         Err(relay_refused())
     }
 
-    async fn dkg_part3(&self, req: Request<pb::DkgPart3Request>) -> Result<Response<pb::DkgPart3Reply>, Status> {
+    async fn dkg_part3(
+        &self,
+        req: Request<pb::DkgPart3Request>,
+    ) -> Result<Response<pb::DkgPart3Reply>, Status> {
         self.authorize(&req)?;
         Err(relay_refused())
     }
@@ -1346,12 +1584,18 @@ impl Peer for PeerSvc {
         Err(relay_refused())
     }
 
-    async fn refresh_part2(&self, req: Request<pb::DkgPart2Request>) -> Result<Response<pb::DkgPart2Reply>, Status> {
+    async fn refresh_part2(
+        &self,
+        req: Request<pb::DkgPart2Request>,
+    ) -> Result<Response<pb::DkgPart2Reply>, Status> {
         self.authorize(&req)?;
         Err(relay_refused())
     }
 
-    async fn refresh_part3(&self, req: Request<pb::DkgPart3Request>) -> Result<Response<pb::DkgPart3Reply>, Status> {
+    async fn refresh_part3(
+        &self,
+        req: Request<pb::DkgPart3Request>,
+    ) -> Result<Response<pb::DkgPart3Reply>, Status> {
         self.authorize(&req)?;
         Err(relay_refused())
     }
@@ -1369,18 +1613,31 @@ impl Peer for PeerSvc {
         let roster: Vec<u16> = r
             .roster
             .iter()
-            .map(|&i| u16::try_from(i).map_err(|_| Status::invalid_argument("roster identifier out of range")))
+            .map(|&i| {
+                u16::try_from(i)
+                    .map_err(|_| Status::invalid_argument("roster identifier out of range"))
+            })
             .collect::<Result<_, _>>()?;
-        let (ceremony_id, key_id, leader) = (r.ceremony_id.clone(), r.key_id.clone(), asker.clone());
+        let (ceremony_id, key_id, leader) =
+            (r.ceremony_id.clone(), r.key_id.clone(), asker.clone());
         let result = self
             .node
             .blocking(move |n| {
-                n.ceremony_part1_from(&r.ceremony_id, &r.key_id, kind, &roster, r.intent.as_ref(), leader.as_deref())
+                n.ceremony_part1_from(
+                    &r.ceremony_id,
+                    &r.key_id,
+                    kind,
+                    &roster,
+                    r.intent.as_ref(),
+                    leader.as_deref(),
+                )
             })
             .await;
         warn_if_intent_refused(&result, asker.as_deref(), "part 1", &ceremony_id, &key_id);
         let package = result.map_err(Status::from)?;
-        Ok(Response::new(pb::CeremonyPart1Reply { round1_package: json(&package)? }))
+        Ok(Response::new(pb::CeremonyPart1Reply {
+            round1_package: json(&package)?,
+        }))
     }
 
     async fn ceremony_part2(
@@ -1410,7 +1667,8 @@ impl Peer for PeerSvc {
     ) -> Result<Response<pb::CeremonyDeliverReply>, Status> {
         let from = self.delivery_sender(&req, req.get_ref().from)?;
         let r = req.into_inner();
-        let to = u16::try_from(r.to).map_err(|_| Status::invalid_argument("recipient out of range"))?;
+        let to =
+            u16::try_from(r.to).map_err(|_| Status::invalid_argument("recipient out of range"))?;
         let digest: [u8; 32] = r
             .round1_digest
             .as_slice()
@@ -1496,16 +1754,31 @@ impl Peer for PeerSvc {
         let r = req.into_inner();
         if r.include_tombstone {
             let id = r.key_id.clone();
-            if let Some(t) = self.node.blocking(move |n| n.hosted_tombstone_manifest(&id)).await.map_err(Status::from)? {
-                return Ok(Response::new(pb::FetchKeyReply { tombstone: Some(t), ..Default::default() }));
+            if let Some(t) = self
+                .node
+                .blocking(move |n| n.hosted_tombstone_manifest(&id))
+                .await
+                .map_err(Status::from)?
+            {
+                return Ok(Response::new(pb::FetchKeyReply {
+                    tombstone: Some(t),
+                    ..Default::default()
+                }));
             }
         }
         let key_id = r.key_id.clone();
-        let key = self.node.blocking(move |n| n.hosted_load(&key_id)).await.map_err(|e| match e {
-            crate::DaemonError::UnknownKey(k) => Status::not_found(format!("no such key: {k}")),
-            other => Status::from(other),
-        })?;
-        let recipient_pub = self.node.dist_public_key_for(recipient).map_err(Status::from)?;
+        let key = self
+            .node
+            .blocking(move |n| n.hosted_load(&key_id))
+            .await
+            .map_err(|e| match e {
+                crate::DaemonError::UnknownKey(k) => Status::not_found(format!("no such key: {k}")),
+                other => Status::from(other),
+            })?;
+        let recipient_pub = self
+            .node
+            .dist_public_key_for(recipient)
+            .map_err(Status::from)?;
         let wrapped = self
             .node
             .hosted_wrap_for(&r.key_id, &key, recipient, &recipient_pub)
@@ -1529,8 +1802,13 @@ impl Peer for PeerSvc {
     ) -> Result<Response<pb::ListKeysReply>, Status> {
         self.authorize(&req)?;
         self.node.refuse_if_keystore_down().map_err(Status::from)?;
-        let keys = self.node.blocking(|n| n.hosted_manifest()).await.map_err(Status::from)?;
-        metrics::gauge!(crate::metrics::HOSTED_KEYS).set(keys.iter().filter(|k| !k.tombstone).count() as f64);
+        let keys = self
+            .node
+            .blocking(|n| n.hosted_manifest())
+            .await
+            .map_err(Status::from)?;
+        metrics::gauge!(crate::metrics::HOSTED_KEYS)
+            .set(keys.iter().filter(|k| !k.tombstone).count() as f64);
         Ok(Response::new(pb::ListKeysReply { keys }))
     }
 
@@ -1562,15 +1840,20 @@ impl Peer for PeerSvc {
         self.authorize(&req)?;
         // In memory only, inline on the async runtime: it answers while the blocking pool is
         // jammed, which is what lets a leader's probe tell a stalled store from a dead node.
-        let reply = crate::hosted::identifier_index(self.node.identifier).map(|id| pb::NodeInfoReply {
-            identifier: id as u32,
-            // Empty with hosted keys off: the reply also carries the ceremony protocol, which every
-            // node must report.
-            dist_public_key: self.node.dist_public_key().map(|k| k.to_vec()).unwrap_or_default(),
-            hosted_key_specs: self.node.hosted_specs(),
-            ceremony_protocol: crate::ceremony::CEREMONY_PROTOCOL,
-            hosted_protocol: crate::orchestrator::HOSTED_PROTOCOL,
-        });
+        let reply =
+            crate::hosted::identifier_index(self.node.identifier).map(|id| pb::NodeInfoReply {
+                identifier: id as u32,
+                // Empty with hosted keys off: the reply also carries the ceremony protocol, which every
+                // node must report.
+                dist_public_key: self
+                    .node
+                    .dist_public_key()
+                    .map(|k| k.to_vec())
+                    .unwrap_or_default(),
+                hosted_key_specs: self.node.hosted_specs(),
+                ceremony_protocol: crate::ceremony::CEREMONY_PROTOCOL,
+                hosted_protocol: crate::orchestrator::HOSTED_PROTOCOL,
+            });
         with_load(&self.node, reply)
     }
 
@@ -1581,7 +1864,11 @@ impl Peer for PeerSvc {
         self.authorize(&req)?;
         self.node.refuse_if_keystore_down().map_err(Status::from)?;
         let key_id = req.into_inner().key_id;
-        let reply = self.node.blocking(move |n| n.key_epoch(&key_id)).await.map_err(Status::from)?;
+        let reply = self
+            .node
+            .blocking(move |n| n.key_epoch(&key_id))
+            .await
+            .map_err(Status::from)?;
         Ok(Response::new(reply))
     }
 
@@ -1594,9 +1881,11 @@ impl Peer for PeerSvc {
         // Detached: a caller that stops waiting must not cut a commit between the promotion and
         // the record (the startup repair would finish it, but there is no need to rely on that).
         let node = self.node.clone();
-        let info = crate::ceremony::detach(async move { crate::ceremony::resolve_from(&node, &id, asker).await })
-            .await
-            .map_err(Status::from)?;
+        let info = crate::ceremony::detach(async move {
+            crate::ceremony::resolve_from(&node, &id, asker).await
+        })
+        .await
+        .map_err(Status::from)?;
         Ok(Response::new(crate::peer::status_to_pb(&info)))
     }
 
@@ -1661,15 +1950,30 @@ mod tests {
     #[test]
     fn only_an_authenticated_client_sees_which_cosigners_were_missing_or_excluded() {
         use crate::DaemonError::{AttemptsExhausted, NoQuorum};
-        let nq = || NoQuorum { needed: 2, visible: 1, missing: vec![2, 3] };
-        let ex = || AttemptsExhausted { needed: 2, usable: 1, attempts: 2, excluded: vec![2, 3], out_of_time: false };
+        let nq = || NoQuorum {
+            needed: 2,
+            visible: 1,
+            missing: vec![2, 3],
+        };
+        let ex = || AttemptsExhausted {
+            needed: 2,
+            usable: 1,
+            attempts: 2,
+            excluded: vec![2, 3],
+            out_of_time: false,
+        };
         for e in [nq(), ex()] {
-            assert!(super::redact_cosigners(e, true).to_string().contains("[2, 3]"));
+            assert!(super::redact_cosigners(e, true)
+                .to_string()
+                .contains("[2, 3]"));
         }
         for e in [nq(), ex()] {
             let shown = super::redact_cosigners(e, false);
             assert!(!shown.to_string().contains('3'), "{shown}");
-            assert!(tonic::Status::from(shown).metadata().get(crate::error::ERROR_TRAILER).is_some());
+            assert!(tonic::Status::from(shown)
+                .metadata()
+                .get(crate::error::ERROR_TRAILER)
+                .is_some());
         }
     }
 
@@ -1693,7 +1997,9 @@ mod tests {
     fn cn_of_extracts_common_name() {
         let key = rcgen::KeyPair::generate().unwrap();
         let mut params = rcgen::CertificateParams::new(vec!["rutli-cosigner".to_string()]).unwrap();
-        params.distinguished_name.push(rcgen::DnType::CommonName, "driver");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "driver");
         let cert = params.self_signed(&key).unwrap();
         assert_eq!(cn_of(cert.der()).as_deref(), Some("driver"));
     }
@@ -1708,12 +2014,16 @@ mod tests {
         // The same rule the split ceremony's request check uses (tls::subject_cn).
         let key = rcgen::KeyPair::generate().unwrap();
         let mut two = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
-        two.distinguished_name.push(rcgen::DnType::CommonName, "driver");
-        two.distinguished_name.push(rcgen::DnType::CustomDnType(vec![2, 5, 4, 3]), "cosigner1");
+        two.distinguished_name
+            .push(rcgen::DnType::CommonName, "driver");
+        two.distinguished_name
+            .push(rcgen::DnType::CustomDnType(vec![2, 5, 4, 3]), "cosigner1");
         assert_eq!(cn_of(two.self_signed(&key).unwrap().der()), None);
         let mut bmp = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
-        bmp.distinguished_name
-            .push(rcgen::DnType::CommonName, rcgen::DnValue::BmpString("driver".try_into().unwrap()));
+        bmp.distinguished_name.push(
+            rcgen::DnType::CommonName,
+            rcgen::DnValue::BmpString("driver".try_into().unwrap()),
+        );
         assert_eq!(cn_of(bmp.self_signed(&key).unwrap().der()), None);
     }
 
@@ -1737,7 +2047,10 @@ mod tests {
         pins.check("cosigner2", Some(real.der())).unwrap();
         let e = pins.check("cosigner2", Some(old.der())).unwrap_err();
         assert_eq!(e.code(), tonic::Code::PermissionDenied);
-        assert!(e.message().contains("'cosigner2'") && e.message().contains(&hex::encode(pin(&old))), "{e:?}");
+        assert!(
+            e.message().contains("'cosigner2'") && e.message().contains(&hex::encode(pin(&old))),
+            "{e:?}"
+        );
         assert!(e.message().contains("peers[id=2].tls_spki_sha256"), "{e:?}");
         // No certificate to read, or garbage: refused, never waved through.
         assert!(pins.check("cosigner2", None).is_err());
@@ -1746,12 +2059,26 @@ mod tests {
         pins.check("cosigner3", Some(old.der())).unwrap();
         // Identification needs a roster CN, whatever the allowlist says.
         assert_eq!(pins.identify(Some(real.der())).unwrap(), "cosigner2");
-        assert_eq!(pins.identify(Some(old.der())).unwrap_err().code(), tonic::Code::PermissionDenied);
-        assert_eq!(pins.identify(Some(leaf("driver").der())).unwrap_err().code(), tonic::Code::PermissionDenied);
-        assert_eq!(pins.identify(None).unwrap_err().code(), tonic::Code::Unauthenticated);
+        assert_eq!(
+            pins.identify(Some(old.der())).unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            pins.identify(Some(leaf("driver").der()))
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            pins.identify(None).unwrap_err().code(),
+            tonic::Code::Unauthenticated
+        );
         // Two roster entries with one client CN: refused, never one of them kept.
         cfg.peers[2].tls_client_cn = Some("cosigner2".into());
-        assert!(super::PeerPins::from_config(&cfg).unwrap_err().to_string().contains("same client CN"));
+        assert!(super::PeerPins::from_config(&cfg)
+            .unwrap_err()
+            .to_string()
+            .contains("same client CN"));
     }
 
     #[test]

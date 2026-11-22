@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
@@ -132,7 +132,11 @@ pub struct KeyFileConfig {
 
 impl Default for KeyFileConfig {
     fn default() -> Self {
-        Self { write_version: default_keyfile_write_version(), cluster_uuid: None, accept_v1: true }
+        Self {
+            write_version: default_keyfile_write_version(),
+            cluster_uuid: None,
+            accept_v1: true,
+        }
     }
 }
 
@@ -144,10 +148,15 @@ impl KeyFileConfig {
     pub fn validate(&self, sealed: bool) -> crate::Result<()> {
         use crate::DaemonError::Config;
         if !matches!(self.write_version, 1 | 2) {
-            return Err(Config(format!("keyfile.write_version must be 1 or 2, got {}", self.write_version)));
+            return Err(Config(format!(
+                "keyfile.write_version must be 1 or 2, got {}",
+                self.write_version
+            )));
         }
         if let Some(u) = &self.cluster_uuid {
-            let canonical = uuid::Uuid::parse_str(u).ok().map(|p| p.hyphenated().to_string());
+            let canonical = uuid::Uuid::parse_str(u)
+                .ok()
+                .map(|p| p.hyphenated().to_string());
             if canonical.as_deref() != Some(u.as_str()) {
                 return Err(Config(format!(
                     "keyfile.cluster_uuid must be a lowercase hyphenated UUID (uuidgen | tr A-Z a-z), got {u:?}"
@@ -155,13 +164,19 @@ impl KeyFileConfig {
             }
         }
         if self.write_version == 2 && self.cluster_uuid.is_none() {
-            return Err(Config("keyfile.write_version 2 needs keyfile.cluster_uuid".into()));
+            return Err(Config(
+                "keyfile.write_version 2 needs keyfile.cluster_uuid".into(),
+            ));
         }
         if self.write_version == 2 && !sealed {
-            return Err(Config("keyfile.write_version 2 needs share_seal (v2 is a sealed format)".into()));
+            return Err(Config(
+                "keyfile.write_version 2 needs share_seal (v2 is a sealed format)".into(),
+            ));
         }
         if !self.accept_v1 && self.write_version != 2 {
-            return Err(Config("keyfile.accept_v1 false needs keyfile.write_version 2".into()));
+            return Err(Config(
+                "keyfile.accept_v1 false needs keyfile.write_version 2".into(),
+            ));
         }
         Ok(())
     }
@@ -410,7 +425,11 @@ fn default_journal_max_mib_per_key() -> u32 {
 impl SigningPolicyConfig {
     /// The (per minute, per day) ceiling for `key_id`.
     pub fn rate_limit_for(&self, key_id: &str) -> (u32, u32) {
-        match self.rate_limits.iter().find(|r| key_id.starts_with(&r.key_id_prefix)) {
+        match self
+            .rate_limits
+            .iter()
+            .find(|r| key_id.starts_with(&r.key_id_prefix))
+        {
             Some(r) => (r.per_min, r.per_day),
             None => (self.sign_rate_limit_per_min, self.sign_rate_limit_per_day),
         }
@@ -428,14 +447,18 @@ impl SigningPolicyConfig {
     /// The pins of `cn`, decoded; `None` when the CN is not pinned.
     pub fn pins_for(&self, cn: &str) -> Option<Vec<[u8; 32]>> {
         self.signer_pins.get(cn).map(|list| {
-            list.iter().filter_map(|h| hex32("signer_pins", h).ok()).collect()
+            list.iter()
+                .filter_map(|h| hex32("signer_pins", h).ok())
+                .collect()
         })
     }
 
     /// `refresh_interval_waived_at` in Unix milliseconds (`None`: unset or unparsable; `validate`
     /// refuses the latter).
     pub fn refresh_waiver_ms(&self) -> Option<u64> {
-        self.refresh_interval_waived_at.as_deref().and_then(crate::audit_check::parse_instant_ms)
+        self.refresh_interval_waived_at
+            .as_deref()
+            .and_then(crate::audit_check::parse_instant_ms)
     }
 
     /// `require_intent` as it applies on a node with (`tls`) or without TLS: as set, else on with
@@ -473,13 +496,19 @@ impl SigningPolicyConfig {
             ));
         }
         if self.intent_max_lifetime_secs == 0 || self.intent_max_lifetime_secs > 3600 {
-            return Err(Config("signing_policy.intent_max_lifetime_secs must be 1..=3600".into()));
+            return Err(Config(
+                "signing_policy.intent_max_lifetime_secs must be 1..=3600".into(),
+            ));
         }
         if self.clock_skew_secs > 3600 {
-            return Err(Config("signing_policy.clock_skew_secs must be at most 3600".into()));
+            return Err(Config(
+                "signing_policy.clock_skew_secs must be at most 3600".into(),
+            ));
         }
         if self.max_shares_per_request == 0 {
-            return Err(Config("signing_policy.max_shares_per_request must be at least 1".into()));
+            return Err(Config(
+                "signing_policy.max_shares_per_request must be at least 1".into(),
+            ));
         }
         if self.refresh_min_interval_secs > MAX_REFRESH_MIN_INTERVAL_SECS {
             return Err(Config(format!(
@@ -503,10 +532,14 @@ impl SigningPolicyConfig {
             }
         }
         if self.journal_max_mib_per_key < 4 {
-            return Err(Config("signing_policy.journal_max_mib_per_key must be at least 4".into()));
+            return Err(Config(
+                "signing_policy.journal_max_mib_per_key must be at least 4".into(),
+            ));
         }
         if self.journal_retention_days == 0 {
-            return Err(Config("signing_policy.journal_retention_days must be at least 1".into()));
+            return Err(Config(
+                "signing_policy.journal_retention_days must be at least 1".into(),
+            ));
         }
         for cn in self.signer_acl.keys() {
             if !signers.contains(cn) {
@@ -525,7 +558,9 @@ impl SigningPolicyConfig {
         }
         for (cn, pins) in &self.signer_pins {
             if pins.is_empty() {
-                return Err(Config(format!("signing_policy.signer_pins.{cn} is empty — omit the CN or pin a key")));
+                return Err(Config(format!(
+                    "signing_policy.signer_pins.{cn} is empty — omit the CN or pin a key"
+                )));
             }
             for h in pins {
                 hex32(&format!("signing_policy.signer_pins.{cn}"), h)?;
@@ -534,10 +569,16 @@ impl SigningPolicyConfig {
         let mut ids = std::collections::HashSet::new();
         for a in &self.approvers {
             if !ids.insert(a.id.as_str()) {
-                return Err(Config(format!("signing_policy.approvers lists {:?} twice", a.id)));
+                return Err(Config(format!(
+                    "signing_policy.approvers lists {:?} twice",
+                    a.id
+                )));
             }
             crate::intent::ed25519_key_from_spki_b64(&a.public_key_spki_b64).map_err(|e| {
-                Config(format!("signing_policy.approvers[{}].public_key_spki_b64: {e}", a.id))
+                Config(format!(
+                    "signing_policy.approvers[{}].public_key_spki_b64: {e}",
+                    a.id
+                ))
             })?;
         }
         for r in &self.rules {
@@ -640,7 +681,10 @@ fn default_delete_grace_secs() -> u64 {
 
 impl HostedKeysConfig {
     pub fn commitment_key_bytes(&self) -> crate::Result<Option<[u8; 32]>> {
-        self.commitment_key.as_deref().map(|h| hex32("hosted_keys.commitment_key", h)).transpose()
+        self.commitment_key
+            .as_deref()
+            .map(|h| hex32("hosted_keys.commitment_key", h))
+            .transpose()
     }
 }
 
@@ -649,7 +693,9 @@ fn hex32(field: &str, value: &str) -> crate::Result<[u8; 32]> {
     hex::decode(value.trim())
         .ok()
         .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
-        .ok_or_else(|| crate::DaemonError::Config(format!("{field} must be 64 hex chars (32 bytes)")))
+        .ok_or_else(|| {
+            crate::DaemonError::Config(format!("{field} must be 64 hex chars (32 bytes)"))
+        })
 }
 
 /// Room for one `verify-key --sign-test` of a cluster up to 3-of-5 per minute, and little else.
@@ -796,12 +842,16 @@ impl PeerConfig {
 
     /// The server name to verify when dialling this peer.
     pub fn server_name(&self) -> String {
-        self.tls_server_name.clone().unwrap_or_else(|| format!("cosigner{}", self.identifier))
+        self.tls_server_name
+            .clone()
+            .unwrap_or_else(|| format!("cosigner{}", self.identifier))
     }
 
     /// The client-certificate CN this peer calls with.
     pub fn client_cn(&self) -> String {
-        self.tls_client_cn.clone().unwrap_or_else(|| format!("cosigner{}", self.identifier))
+        self.tls_client_cn
+            .clone()
+            .unwrap_or_else(|| format!("cosigner{}", self.identifier))
     }
 
     pub fn dist_public_key_bytes(&self) -> crate::Result<Option<[u8; 32]>> {
@@ -852,13 +902,19 @@ impl Config {
         use crate::DaemonError::Config;
         let mut owner: std::collections::HashMap<[u8; 32], u16> = std::collections::HashMap::new();
         for p in &self.peers {
-            let Some(list) = &p.tls_spki_sha256 else { continue };
+            let Some(list) = &p.tls_spki_sha256 else {
+                continue;
+            };
             let field = format!("peers[id={}].tls_spki_sha256", p.identifier);
             if self.tls.is_none() {
-                return Err(Config(format!("{field} needs tls: the pins are checked on the mesh's TLS certificates")));
+                return Err(Config(format!(
+                    "{field} needs tls: the pins are checked on the mesh's TLS certificates"
+                )));
             }
             if list.is_empty() {
-                return Err(Config(format!("{field} is empty — pin the peer's key, or omit the field")));
+                return Err(Config(format!(
+                    "{field} is empty — pin the peer's key, or omit the field"
+                )));
             }
             if list.len() > MAX_PEER_PINS {
                 return Err(Config(format!(
@@ -891,8 +947,12 @@ impl Config {
         if !tls.peer_pins_required() {
             return Ok(());
         }
-        let mut missing: Vec<u16> =
-            self.peers.iter().filter(|p| p.tls_spki_sha256.is_none()).map(|p| p.identifier).collect();
+        let mut missing: Vec<u16> = self
+            .peers
+            .iter()
+            .filter(|p| p.tls_spki_sha256.is_none())
+            .map(|p| p.identifier)
+            .collect();
         missing.sort_unstable();
         match missing.first() {
             None => Ok(()),
@@ -909,8 +969,12 @@ impl Config {
     /// of them. Reads `tls.cert`.
     pub fn check_own_peer_pin(&self) -> crate::Result<()> {
         let Some(tls) = &self.tls else { return Ok(()) };
-        let Some(me) = self.peers.iter().find(|p| p.identifier == self.identifier) else { return Ok(()) };
-        let Some(pins) = me.tls_spki_pins()? else { return Ok(()) };
+        let Some(me) = self.peers.iter().find(|p| p.identifier == self.identifier) else {
+            return Ok(());
+        };
+        let Some(pins) = me.tls_spki_pins()? else {
+            return Ok(());
+        };
         let mine = crate::tls::spki_sha256_of_pem_file(&tls.cert)?;
         if pins.contains(&mine) {
             return Ok(());
@@ -926,7 +990,10 @@ impl Config {
 
     /// Mesh caller identity: client-certificate CN → roster identifier, exact match only.
     pub fn peer_identities(&self) -> std::collections::HashMap<String, u16> {
-        self.peers.iter().map(|p| (p.client_cn(), p.identifier)).collect()
+        self.peers
+            .iter()
+            .map(|p| (p.client_cn(), p.identifier))
+            .collect()
     }
 
     /// Read, parse and validate the config file at `path`. A key this release does not know (a
@@ -964,9 +1031,15 @@ impl Config {
         for p in &self.peers {
             if !seen_ids.insert(p.identifier) {
                 return Err(Config(if p.identifier == self.identifier {
-                    format!("this node's identifier {} is listed more than once in the peer roster", p.identifier)
+                    format!(
+                        "this node's identifier {} is listed more than once in the peer roster",
+                        p.identifier
+                    )
                 } else {
-                    format!("peer identifier {} is listed more than once in the peer roster", p.identifier)
+                    format!(
+                        "peer identifier {} is listed more than once in the peer roster",
+                        p.identifier
+                    )
                 }));
             }
         }
@@ -998,7 +1071,11 @@ impl Config {
         // signer_allowlist (the driver cert CN) is mandatory — otherwise a cosigner cert could
         // request arbitrary signatures. Plaintext (dev) may omit it.
         if self.tls.is_some()
-            && self.signer_allowlist.as_ref().map(|a| a.is_empty()).unwrap_or(true)
+            && self
+                .signer_allowlist
+                .as_ref()
+                .map(|a| a.is_empty())
+                .unwrap_or(true)
         {
             return Err(Config(
                 "signer_allowlist must be set (non-empty) when tls is enabled — list the driver \
@@ -1011,7 +1088,11 @@ impl Config {
         // a namespace signature over an arbitrary message. Require the cosigner CN allowlist under
         // TLS. Plaintext (dev) may omit it.
         if self.tls.is_some()
-            && self.peer_allowlist.as_ref().map(|a| a.is_empty()).unwrap_or(true)
+            && self
+                .peer_allowlist
+                .as_ref()
+                .map(|a| a.is_empty())
+                .unwrap_or(true)
         {
             return Err(Config(
                 "peer_allowlist must be set (non-empty) when tls is enabled — list the cosigner \
@@ -1100,8 +1181,12 @@ impl Config {
                     "refresh_allowlist is empty — omit it, or list the refresher cert CN(s)".into(),
                 ));
             }
-            let other: Vec<&String> =
-                self.signer_allowlist.iter().chain(self.peer_allowlist.iter()).flatten().collect();
+            let other: Vec<&String> = self
+                .signer_allowlist
+                .iter()
+                .chain(self.peer_allowlist.iter())
+                .flatten()
+                .collect();
             if let Some(cn) = refresh.iter().find(|cn| other.contains(cn)) {
                 return Err(Config(format!(
                     "refresh_allowlist CN {cn:?} is also in signer_allowlist or peer_allowlist — the \
@@ -1133,11 +1218,18 @@ impl Config {
                 }
             }
         }
-        let hosted_on = self.hosted_keys.as_ref().map(|h| h.enabled).unwrap_or(false);
+        let hosted_on = self
+            .hosted_keys
+            .as_ref()
+            .map(|h| h.enabled)
+            .unwrap_or(false);
         if let Some(h) = &self.hosted_keys {
             h.commitment_key_bytes()?;
         }
-        let on_bundle = self.share_seal.as_ref().is_some_and(|s| s.secret_file.is_some());
+        let on_bundle = self
+            .share_seal
+            .as_ref()
+            .is_some_and(|s| s.secret_file.is_some());
         if hosted_on && on_bundle {
             if let Some(p) = self.peers.iter().find(|p| p.dist_public_key.is_none()) {
                 return Err(Config(format!(
@@ -1147,7 +1239,12 @@ impl Config {
                     p.identifier
                 )));
             }
-            if self.hosted_keys.as_ref().and_then(|h| h.commitment_key.as_ref()).is_none() {
+            if self
+                .hosted_keys
+                .as_ref()
+                .and_then(|h| h.commitment_key.as_ref())
+                .is_none()
+            {
                 return Err(Config(
                     "hosted_keys.commitment_key is required with share_seal.secret_file".into(),
                 ));
@@ -1164,7 +1261,11 @@ impl Config {
                         .into(),
                 ));
             }
-            let q = self.hosted_keys.as_ref().map(|h| h.write_quorum).unwrap_or(2);
+            let q = self
+                .hosted_keys
+                .as_ref()
+                .map(|h| h.write_quorum)
+                .unwrap_or(2);
             if q < 1 || q > self.max_signers() as usize {
                 return Err(Config(format!(
                     "hosted_keys.write_quorum {q} out of range 1..={}",
@@ -1172,7 +1273,11 @@ impl Config {
                 )));
             }
         }
-        if let Some(h) = self.hosted_keys.as_ref().filter(|h| !h.delete_allowlist.is_empty()) {
+        if let Some(h) = self
+            .hosted_keys
+            .as_ref()
+            .filter(|h| !h.delete_allowlist.is_empty())
+        {
             if self.tls.is_none() {
                 return Err(Config(
                     "hosted_keys.delete_allowlist needs TLS: delete intents are verified against the cluster CA".into(),
@@ -1190,8 +1295,14 @@ impl Config {
                     "hosted_keys.delete_allowlist CN {cn:?} is a cosigner — a cosigner certificate must never be able to delete"
                 )));
             }
-            if let Some(cn) = h.delete_acl.keys().find(|cn| !h.delete_allowlist.contains(cn)) {
-                return Err(Config(format!("hosted_keys.delete_acl names {cn:?}, which is not on delete_allowlist")));
+            if let Some(cn) = h
+                .delete_acl
+                .keys()
+                .find(|cn| !h.delete_allowlist.contains(cn))
+            {
+                return Err(Config(format!(
+                    "hosted_keys.delete_acl names {cn:?}, which is not on delete_allowlist"
+                )));
             }
             if h.delete_approval_threshold as usize > self.signing_policy.approvers.len() {
                 return Err(Config(format!(
@@ -1264,7 +1375,11 @@ mod tests {
     #[test]
     fn tls_with_allowlist_is_ok() {
         let mut c = base(Some(tls()), Some(vec!["driver".into()]));
-        c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into()]);
+        c.peer_allowlist = Some(vec![
+            "cosigner1".into(),
+            "cosigner2".into(),
+            "cosigner3".into(),
+        ]);
         c.validate().unwrap();
     }
 
@@ -1278,16 +1393,30 @@ mod tests {
         // signer_allowlist present but peer_allowlist missing/empty is rejected under TLS.
         let mut c = base(Some(tls()), Some(vec!["driver".into()]));
         c.peer_allowlist = None;
-        assert!(c.validate().is_err(), "missing peer_allowlist under TLS must fail");
+        assert!(
+            c.validate().is_err(),
+            "missing peer_allowlist under TLS must fail"
+        );
         c.peer_allowlist = Some(vec![]);
-        assert!(c.validate().is_err(), "empty peer_allowlist under TLS must fail");
-        c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into()]);
+        assert!(
+            c.validate().is_err(),
+            "empty peer_allowlist under TLS must fail"
+        );
+        c.peer_allowlist = Some(vec![
+            "cosigner1".into(),
+            "cosigner2".into(),
+            "cosigner3".into(),
+        ]);
         c.validate().unwrap();
     }
 
     fn mesh_ok() -> Config {
         let mut c = base(Some(tls()), Some(vec!["driver".into()]));
-        c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into()]);
+        c.peer_allowlist = Some(vec![
+            "cosigner1".into(),
+            "cosigner2".into(),
+            "cosigner3".into(),
+        ]);
         c
     }
 
@@ -1298,7 +1427,11 @@ mod tests {
         assert_eq!(c.peers[1].server_name(), "cosigner2");
         assert_eq!(c.peers[1].client_cn(), "cosigner2");
         assert_eq!(c.peer_identities().get("cosigner3"), Some(&3));
-        assert_eq!(c.peer_identities().get("cosigner03"), None, "exact match only");
+        assert_eq!(
+            c.peer_identities().get("cosigner03"),
+            None,
+            "exact match only"
+        );
         // The legacy tls.domain is not a mesh name.
         assert_ne!(c.peers[0].server_name(), "rutli-cosigner");
     }
@@ -1312,9 +1445,17 @@ mod tests {
         c.refresh_allowlist = Some(vec!["operator".into()]);
         c.validate().unwrap();
         c.refresh_allowlist = Some(vec!["driver".into()]);
-        assert!(c.validate().unwrap_err().to_string().contains("refresh_allowlist"));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("refresh_allowlist"));
         c.refresh_allowlist = Some(vec!["cosigner2".into()]);
-        assert!(c.validate().unwrap_err().to_string().contains("refresh_allowlist"));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("refresh_allowlist"));
         c.refresh_allowlist = Some(vec![]);
         assert!(c.validate().is_err());
     }
@@ -1325,7 +1466,10 @@ mod tests {
         // Defaults: lenient switches but the two intent switches, the documented limits.
         let d = SigningPolicyConfig::default();
         assert!(!d.signer_acl_required && d.signer_may_refresh && !d.require_epoch_match);
-        assert_eq!((d.sign_rate_limit_per_min, d.sign_rate_limit_per_day), (300, 20_000));
+        assert_eq!(
+            (d.sign_rate_limit_per_min, d.sign_rate_limit_per_day),
+            (300, 20_000)
+        );
         let parsed: SigningPolicyConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed.max_shares_per_request, d.max_shares_per_request);
         assert!(parsed.signer_may_refresh, "absent = on, like Default");
@@ -1335,36 +1479,53 @@ mod tests {
             assert_eq!(p.require_ceremony_intent, None);
             assert!(p.ceremony_intent_required(true) && !p.ceremony_intent_required(false));
         }
-        let opt_out: SigningPolicyConfig = serde_json::from_str(r#"{"require_ceremony_intent": false}"#).unwrap();
+        let opt_out: SigningPolicyConfig =
+            serde_json::from_str(r#"{"require_ceremony_intent": false}"#).unwrap();
         assert!(!opt_out.ceremony_intent_required(true));
-        let on: SigningPolicyConfig = serde_json::from_str(r#"{"require_ceremony_intent": true}"#).unwrap();
+        let on: SigningPolicyConfig =
+            serde_json::from_str(r#"{"require_ceremony_intent": true}"#).unwrap();
         assert!(on.ceremony_intent_required(true));
         // require_intent: the same (0.5.0).
         for p in [&d, &parsed] {
             assert_eq!(p.require_intent, None);
             assert!(p.intent_required(true) && !p.intent_required(false));
         }
-        let opt_out: SigningPolicyConfig = serde_json::from_str(r#"{"require_intent": false}"#).unwrap();
+        let opt_out: SigningPolicyConfig =
+            serde_json::from_str(r#"{"require_intent": false}"#).unwrap();
         assert!(!opt_out.intent_required(true));
         let on: SigningPolicyConfig = serde_json::from_str(r#"{"require_intent": true}"#).unwrap();
         assert!(on.intent_required(true) && on.intent_required(false));
         // What the daemon hands to the sign guard: both switches settled, on with TLS, off without,
         // an explicit opt-out kept.
         let s = d.clone().settled(true);
-        assert_eq!((s.require_intent, s.require_ceremony_intent), (Some(true), Some(true)));
+        assert_eq!(
+            (s.require_intent, s.require_ceremony_intent),
+            (Some(true), Some(true))
+        );
         let s = d.clone().settled(false);
-        assert_eq!((s.require_intent, s.require_ceremony_intent), (Some(false), Some(false)));
+        assert_eq!(
+            (s.require_intent, s.require_ceremony_intent),
+            (Some(false), Some(false))
+        );
         assert_eq!(opt_out.clone().settled(true).require_intent, Some(false));
         // Unset stays unset when written back (no `null`, no settled value).
-        assert!(!serde_json::to_string(&d).unwrap().contains("require_intent"));
-        assert!(serde_json::to_string(&opt_out).unwrap().contains(r#""require_intent":false"#));
+        assert!(!serde_json::to_string(&d)
+            .unwrap()
+            .contains("require_intent"));
+        assert!(serde_json::to_string(&opt_out)
+            .unwrap()
+            .contains(r#""require_intent":false"#));
         base(None, None).validate().unwrap();
         mesh_ok().validate().unwrap();
 
         // require_intent needs TLS.
         let mut plain = base(None, None);
         plain.signing_policy.require_intent = Some(true);
-        assert!(plain.validate().unwrap_err().to_string().contains("require_intent"));
+        assert!(plain
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("require_intent"));
         // Unset and the explicit opt-out are fine without TLS.
         let mut plain = base(None, None);
         plain.signing_policy.require_intent = Some(false);
@@ -1375,60 +1536,125 @@ mod tests {
         // So does require_ceremony_intent.
         let mut plain = base(None, None);
         plain.signing_policy.require_ceremony_intent = Some(true);
-        assert!(plain.validate().unwrap_err().to_string().contains("require_ceremony_intent"));
+        assert!(plain
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("require_ceremony_intent"));
         let mut c = mesh_ok();
         c.signing_policy.require_ceremony_intent = Some(true);
         c.validate().unwrap();
 
         // The refresh interval: a real limit by default (72 h), 0 = off, at most the record
         // retention; the waiver is a past UTC time.
-        assert_eq!((d.refresh_min_interval_secs, parsed.refresh_min_interval_secs), (72 * 3600, 72 * 3600));
-        assert_eq!((d.refresh_interval_waived_at.as_deref(), d.refresh_waiver_ms()), (None, None));
-        assert!(!serde_json::to_string(&d).unwrap().contains("refresh_interval_waived_at"));
+        assert_eq!(
+            (
+                d.refresh_min_interval_secs,
+                parsed.refresh_min_interval_secs
+            ),
+            (72 * 3600, 72 * 3600)
+        );
+        assert_eq!(
+            (
+                d.refresh_interval_waived_at.as_deref(),
+                d.refresh_waiver_ms()
+            ),
+            (None, None)
+        );
+        assert!(!serde_json::to_string(&d)
+            .unwrap()
+            .contains("refresh_interval_waived_at"));
         let mut c = mesh_ok();
         c.signing_policy.refresh_min_interval_secs = 0;
         c.validate().unwrap();
         c.signing_policy.refresh_min_interval_secs = 30 * 24 * 3600 + 1;
-        assert!(c.validate().unwrap_err().to_string().contains("refresh_min_interval_secs"));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("refresh_min_interval_secs"));
         let mut c = mesh_ok();
         c.signing_policy.refresh_interval_waived_at = Some("2026-11-01T14:00:00Z".into());
         c.validate().unwrap();
-        assert_eq!(c.signing_policy.refresh_waiver_ms(), Some(1_793_541_600_000));
+        assert_eq!(
+            c.signing_policy.refresh_waiver_ms(),
+            Some(1_793_541_600_000)
+        );
         for bad in ["yesterday", "2026-11-19 14:00:00", "1795615200"] {
             c.signing_policy.refresh_interval_waived_at = Some(bad.into());
-            assert!(c.validate().unwrap_err().to_string().contains("not a UTC time"), "{bad}");
+            assert!(
+                c.validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("not a UTC time"),
+                "{bad}"
+            );
         }
-        c.signing_policy.refresh_interval_waived_at = Some(crate::audit_check::fmt_ms(crate::intent::now_ms() + 3_600_000));
-        assert!(c.validate().unwrap_err().to_string().contains("ahead of this node's clock"));
+        c.signing_policy.refresh_interval_waived_at = Some(crate::audit_check::fmt_ms(
+            crate::intent::now_ms() + 3_600_000,
+        ));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("ahead of this node's clock"));
         // Within the clock skew ahead is accepted (an operator's clock and a node's differ).
-        c.signing_policy.refresh_interval_waived_at = Some(crate::audit_check::fmt_ms(crate::intent::now_ms() + 60_000));
+        c.signing_policy.refresh_interval_waived_at =
+            Some(crate::audit_check::fmt_ms(crate::intent::now_ms() + 60_000));
         c.validate().unwrap();
-        let typo: std::result::Result<SigningPolicyConfig, _> = serde_json::from_str(r#"{"refresh_interval_secs": 0}"#);
+        let typo: std::result::Result<SigningPolicyConfig, _> =
+            serde_json::from_str(r#"{"refresh_interval_secs": 0}"#);
         assert!(typo.is_err(), "a misspelt key is refused, not ignored");
 
         let mut c = mesh_ok();
-        c.signing_policy.signer_acl.insert("nobody".into(), vec!["".into()]);
-        assert!(c.validate().unwrap_err().to_string().contains("not in signer_allowlist"));
+        c.signing_policy
+            .signer_acl
+            .insert("nobody".into(), vec!["".into()]);
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("not in signer_allowlist"));
         let mut c = mesh_ok();
         c.signing_policy.signer_acl_required = true;
-        assert!(c.validate().unwrap_err().to_string().contains("no signer_acl"));
-        c.signing_policy.signer_acl.insert("driver".into(), vec!["participant1-".into()]);
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("no signer_acl"));
+        c.signing_policy
+            .signer_acl
+            .insert("driver".into(), vec!["participant1-".into()]);
         c.validate().unwrap();
 
         let mut c = mesh_ok();
-        c.signing_policy.signer_pins.insert("driver".into(), vec!["zz".into()]);
+        c.signing_policy
+            .signer_pins
+            .insert("driver".into(), vec!["zz".into()]);
         assert!(c.validate().is_err());
 
         let key = "MCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=";
         let mut c = mesh_ok();
-        c.signing_policy.approvers = vec![ApproverConfig { id: "alice".into(), public_key_spki_b64: key.into() }];
-        c.signing_policy.rules =
-            vec![ApprovalRuleConfig { key_id_prefix: "p1-".into(), mode: "quorum".into(), threshold: 2 }];
+        c.signing_policy.approvers = vec![ApproverConfig {
+            id: "alice".into(),
+            public_key_spki_b64: key.into(),
+        }];
+        c.signing_policy.rules = vec![ApprovalRuleConfig {
+            key_id_prefix: "p1-".into(),
+            mode: "quorum".into(),
+            threshold: 2,
+        }];
         assert!(c.validate().unwrap_err().to_string().contains("threshold"));
         c.signing_policy.rules[0].threshold = 1;
         c.validate().unwrap();
-        assert_eq!(c.signing_policy.approval_threshold_for("p1-namespace"), Some(1));
-        assert_eq!(c.signing_policy.approval_threshold_for("p2-namespace"), None);
+        assert_eq!(
+            c.signing_policy.approval_threshold_for("p1-namespace"),
+            Some(1)
+        );
+        assert_eq!(
+            c.signing_policy.approval_threshold_for("p2-namespace"),
+            None
+        );
         c.signing_policy.approvers[0].public_key_spki_b64 = "not a key".into();
         assert!(c.validate().is_err());
     }
@@ -1437,14 +1663,25 @@ mod tests {
     fn mesh_names_must_be_unique() {
         let mut c = mesh_ok();
         c.peers[2].tls_server_name = Some("cosigner2".into());
-        assert!(c.validate().unwrap_err().to_string().contains("tls_server_name"));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("tls_server_name"));
         let mut c = mesh_ok();
         c.peers[0].tls_server_name = Some("rutli-cosigner".into());
         c.peers[1].tls_server_name = Some("rutli-cosigner".into());
-        assert!(c.validate().is_err(), "one shared name for two peers is exactly M3");
+        assert!(
+            c.validate().is_err(),
+            "one shared name for two peers is exactly M3"
+        );
         let mut c = mesh_ok();
         c.peers[2].tls_client_cn = Some("cosigner2".into());
-        assert!(c.validate().unwrap_err().to_string().contains("tls_client_cn"));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("tls_client_cn"));
     }
 
     #[test]
@@ -1453,15 +1690,23 @@ mod tests {
         c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into()]);
         let e = c.validate().unwrap_err().to_string();
         assert!(e.contains("missing") && e.contains("cosigner3"), "{e}");
-        c.peer_allowlist =
-            Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into(), "cosigner4".into()]);
+        c.peer_allowlist = Some(vec![
+            "cosigner1".into(),
+            "cosigner2".into(),
+            "cosigner3".into(),
+            "cosigner4".into(),
+        ]);
         let e = c.validate().unwrap_err().to_string();
         assert!(e.contains("cosigner4"), "{e}");
         // A custom client CN must be what the allowlist names.
         let mut c = mesh_ok();
         c.peers[2].tls_client_cn = Some("node-c.example".into());
         assert!(c.validate().is_err());
-        c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "node-c.example".into()]);
+        c.peer_allowlist = Some(vec![
+            "cosigner1".into(),
+            "cosigner2".into(),
+            "node-c.example".into(),
+        ]);
         c.validate().unwrap();
     }
 
@@ -1469,9 +1714,23 @@ mod tests {
     fn a_pinned_cluster_id_overrides_the_ca_derived_one() {
         let dir = tempfile::tempdir().unwrap();
         let ca = dir.path().join("ca.crt");
-        std::fs::write(&ca, b"-----BEGIN CERTIFICATE-----\nold\n-----END CERTIFICATE-----\n").unwrap();
-        let mut c = base(Some(TlsConfig { ca_cert: ca.clone(), ..tls() }), Some(vec!["driver".into()]));
-        c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into()]);
+        std::fs::write(
+            &ca,
+            b"-----BEGIN CERTIFICATE-----\nold\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let mut c = base(
+            Some(TlsConfig {
+                ca_cert: ca.clone(),
+                ..tls()
+            }),
+            Some(vec!["driver".into()]),
+        );
+        c.peer_allowlist = Some(vec![
+            "cosigner1".into(),
+            "cosigner2".into(),
+            "cosigner3".into(),
+        ]);
 
         // Unset: derived from the CA file's bytes, as before.
         let derived = crate::wrap::cluster_id_from_ca(&std::fs::read(&ca).unwrap());
@@ -1485,7 +1744,11 @@ mod tests {
         bundle.extend_from_slice(b"-----BEGIN CERTIFICATE-----\nnew\n-----END CERTIFICATE-----\n");
         std::fs::write(&ca, &bundle).unwrap();
         assert_eq!(c.cluster_id().unwrap(), derived);
-        assert_ne!(c.derived_cluster_id().unwrap(), derived, "the file changed, the pin did not");
+        assert_ne!(
+            c.derived_cluster_id().unwrap(),
+            derived,
+            "the file changed, the pin did not"
+        );
 
         // Without TLS, a pin wins over plaintext-dev too.
         let mut p = base(None, None);
@@ -1497,13 +1760,26 @@ mod tests {
     #[test]
     fn a_malformed_cluster_id_pin_is_rejected() {
         let mut c = base(Some(tls()), Some(vec!["driver".into()]));
-        c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into()]);
+        c.peer_allowlist = Some(vec![
+            "cosigner1".into(),
+            "cosigner2".into(),
+            "cosigner3".into(),
+        ]);
         c.cluster_id = Some("453bb4aea2088bb5".into());
         c.validate().unwrap();
-        for bad in ["453BB4AEA2088BB5", "453bb4aea2088bb", "453bb4aea2088bb5a", "453bb4aea2088bbz", ""] {
+        for bad in [
+            "453BB4AEA2088BB5",
+            "453bb4aea2088bb",
+            "453bb4aea2088bb5a",
+            "453bb4aea2088bbz",
+            "",
+        ] {
             c.cluster_id = Some(bad.into());
             let e = c.validate().unwrap_err().to_string();
-            assert!(e.contains("cluster_id") && e.contains("shasum -a 256 ca.crt | cut -c1-16"), "{bad:?}: {e}");
+            assert!(
+                e.contains("cluster_id") && e.contains("shasum -a 256 ca.crt | cut -c1-16"),
+                "{bad:?}: {e}"
+            );
         }
     }
 
@@ -1515,7 +1791,8 @@ mod tests {
         assert_eq!(c.cluster_id, None);
         assert!(!serde_json::to_string(&c).unwrap().contains("cluster_id"));
         let pinned: Config =
-            serde_json::from_str(&json.replacen('{', r#"{"cluster_id":"453bb4aea2088bb5","#, 1)).unwrap();
+            serde_json::from_str(&json.replacen('{', r#"{"cluster_id":"453bb4aea2088bb5","#, 1))
+                .unwrap();
         assert_eq!(pinned.cluster_id().unwrap(), "453bb4aea2088bb5");
     }
 
@@ -1524,7 +1801,10 @@ mod tests {
         let mut c = base(None, None);
         c.peers[2].identifier = 2;
         let e = c.validate().unwrap_err().to_string();
-        assert!(e.contains("peer identifier 2") && e.contains("more than once"), "{e}");
+        assert!(
+            e.contains("peer identifier 2") && e.contains("more than once"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -1540,7 +1820,10 @@ mod tests {
         let mut c = base(None, None);
         c.peers[2].endpoint = "https://b:9101".into();
         let e = c.validate().unwrap_err().to_string();
-        assert!(e.contains("endpoint") && e.contains("more than once"), "{e}");
+        assert!(
+            e.contains("endpoint") && e.contains("more than once"),
+            "{e}"
+        );
         // Trivial respellings of one address count as the same endpoint.
         c.peers[2].endpoint = "HTTPS://B:9101/".into();
         assert!(c.validate().is_err());
@@ -1549,23 +1832,43 @@ mod tests {
     #[test]
     fn signer_and_peer_allowlists_must_not_overlap() {
         let mut c = base(Some(tls()), Some(vec!["driver".into()]));
-        c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into()]);
+        c.peer_allowlist = Some(vec![
+            "cosigner1".into(),
+            "cosigner2".into(),
+            "cosigner3".into(),
+        ]);
         c.validate().unwrap();
         c.signer_allowlist = Some(vec!["driver".into(), "cosigner2".into()]);
         let e = c.validate().unwrap_err().to_string();
-        assert!(e.contains("cosigner2") && e.contains("signer_allowlist") && e.contains("peer_allowlist"), "{e}");
+        assert!(
+            e.contains("cosigner2")
+                && e.contains("signer_allowlist")
+                && e.contains("peer_allowlist"),
+            "{e}"
+        );
         c.signer_allowlist = Some(vec!["driver".into()]);
         c.peer_allowlist = Some(vec!["driver".into(), "cosigner1".into()]);
-        assert!(c.validate().is_err(), "the driver must not be a mesh peer either");
+        assert!(
+            c.validate().is_err(),
+            "the driver must not be a mesh peer either"
+        );
     }
 
     #[test]
     fn the_operator_role_must_be_its_own_identity() {
         let mut c = base(Some(tls()), Some(vec!["driver".into()]));
-        c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into()]);
+        c.peer_allowlist = Some(vec![
+            "cosigner1".into(),
+            "cosigner2".into(),
+            "cosigner3".into(),
+        ]);
         c.operator_allowlist = Some(vec!["operator".into()]);
         c.validate().unwrap();
-        for bad in [vec![], vec!["driver".to_string()], vec!["operator".into(), "cosigner2".into()]] {
+        for bad in [
+            vec![],
+            vec!["driver".to_string()],
+            vec!["operator".into(), "cosigner2".into()],
+        ] {
             c.operator_allowlist = Some(bad.clone());
             assert!(c.validate().is_err(), "{bad:?}");
         }
@@ -1633,8 +1936,14 @@ mod hosted_config_tests {
 
     #[test]
     fn write_quorum_must_be_reachable() {
-        assert!(cfg(Some(hosted(true, 0)), true).validate().is_err(), "quorum 0 is meaningless");
-        assert!(cfg(Some(hosted(true, 4)), true).validate().is_err(), "quorum > cluster size");
+        assert!(
+            cfg(Some(hosted(true, 0)), true).validate().is_err(),
+            "quorum 0 is meaningless"
+        );
+        assert!(
+            cfg(Some(hosted(true, 4)), true).validate().is_err(),
+            "quorum > cluster size"
+        );
         cfg(Some(hosted(true, 3)), true).validate().unwrap();
     }
 
@@ -1659,7 +1968,10 @@ mod hosted_config_tests {
     const K3: &str = "3333333333333333333333333333333333333333333333333333333333333333";
 
     fn on_bundle(mut c: Config) -> Config {
-        c.share_seal = Some(ShareSealConfig { secret_env: None, secret_file: Some("/run/rutli/seal/node.json".into()) });
+        c.share_seal = Some(ShareSealConfig {
+            secret_env: None,
+            secret_file: Some("/run/rutli/seal/node.json".into()),
+        });
         c
     }
 
@@ -1668,7 +1980,11 @@ mod hosted_config_tests {
         let mut c = cfg(None, true);
         c.validate().unwrap();
         c.share_seal = Some(ShareSealConfig::default());
-        assert!(c.validate().unwrap_err().to_string().contains("exactly one"));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("exactly one"));
         c.share_seal = Some(ShareSealConfig {
             secret_env: Some("S".into()),
             secret_file: Some("/f".into()),
@@ -1702,9 +2018,13 @@ mod hosted_config_tests {
         with(&|h| h.delete_allowlist = vec!["operator".into()], true).unwrap();
         // The driver may be opted in; a cosigner never.
         with(&|h| h.delete_allowlist = vec!["driver".into()], true).unwrap();
-        let e = with(&|h| h.delete_allowlist = vec!["cosigner2".into()], true).unwrap_err().to_string();
+        let e = with(&|h| h.delete_allowlist = vec!["cosigner2".into()], true)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("is a cosigner"), "{e}");
-        let e = with(&|h| h.delete_allowlist = vec!["operator".into()], false).unwrap_err().to_string();
+        let e = with(&|h| h.delete_allowlist = vec!["operator".into()], false)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("needs TLS"), "{e}");
         let e = with(
             &|h| {
@@ -1739,9 +2059,17 @@ mod hosted_config_tests {
         assert_eq!(c.keyfile, KeyFileConfig::default());
         assert_eq!((c.keyfile.write_version, c.keyfile.accept_v1), (1, true));
         c.keyfile.write_version = 2;
-        assert!(c.validate().unwrap_err().to_string().contains("needs keyfile.cluster_uuid"));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("needs keyfile.cluster_uuid"));
         c.keyfile.cluster_uuid = Some(uuid.to_uppercase());
-        assert!(c.validate().unwrap_err().to_string().contains("lowercase hyphenated UUID"));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("lowercase hyphenated UUID"));
         c.keyfile.cluster_uuid = Some("not-a-uuid".into());
         assert!(c.validate().is_err());
         c.keyfile.cluster_uuid = Some(uuid.into());
@@ -1750,13 +2078,28 @@ mod hosted_config_tests {
         assert!(c.validate().is_err());
         c.keyfile.write_version = 1;
         c.keyfile.accept_v1 = false;
-        assert!(c.validate().unwrap_err().to_string().contains("accept_v1 false needs"));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("accept_v1 false needs"));
         let mut unsealed = cfg(None, false);
         unsealed.share_seal = None;
-        unsealed.keyfile = KeyFileConfig { write_version: 2, cluster_uuid: Some(uuid.into()), accept_v1: true };
-        assert!(unsealed.validate().unwrap_err().to_string().contains("needs share_seal"));
+        unsealed.keyfile = KeyFileConfig {
+            write_version: 2,
+            cluster_uuid: Some(uuid.into()),
+            accept_v1: true,
+        };
+        assert!(unsealed
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("needs share_seal"));
         // Unknown fields are refused rather than ignored.
-        assert!(serde_json::from_str::<KeyFileConfig>(r#"{"write_version":2,"clusteruuid":"x"}"#).is_err());
+        assert!(
+            serde_json::from_str::<KeyFileConfig>(r#"{"write_version":2,"clusteruuid":"x"}"#)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1770,7 +2113,10 @@ mod hosted_config_tests {
                 "hosted_keys":{"enabled":true}}"#,
         )
         .unwrap();
-        assert_eq!(c.share_seal.as_ref().unwrap().secret_env.as_deref(), Some("RUTLI_SEAL_SECRET"));
+        assert_eq!(
+            c.share_seal.as_ref().unwrap().secret_env.as_deref(),
+            Some("RUTLI_SEAL_SECRET")
+        );
         c.validate().unwrap();
     }
 
@@ -1797,7 +2143,11 @@ mod hosted_config_tests {
         assert!(c.validate().is_err(), "short key");
         c.peers[0].dist_public_key = Some(K1.into());
         c.peers[1].dist_public_key = Some(K1.into());
-        assert!(c.validate().unwrap_err().to_string().contains("same dist_public_key"));
+        assert!(c
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("same dist_public_key"));
         c.peers[1].dist_public_key = Some(K2.into());
         c.validate().unwrap();
         c.hosted_keys.as_mut().unwrap().commitment_key = Some("zz".into());
@@ -1815,9 +2165,15 @@ mod hosted_config_tests {
         )
         .unwrap();
         let h = c.hosted_keys.as_ref().unwrap();
-        assert_eq!(h.write_quorum, 2, "quorum defaults to the cluster fault model, not all-nodes");
+        assert_eq!(
+            h.write_quorum, 2,
+            "quorum defaults to the cluster fault model, not all-nodes"
+        );
         assert_eq!(h.anti_entropy_interval_secs, 300);
-        assert_eq!(h.decrypt_rate_limit_per_min, DEFAULT_DECRYPT_RATE_LIMIT_PER_MIN);
+        assert_eq!(
+            h.decrypt_rate_limit_per_min,
+            DEFAULT_DECRYPT_RATE_LIMIT_PER_MIN
+        );
         c.validate().unwrap();
     }
 }
@@ -1845,30 +2201,89 @@ mod strict_parse_tests {
         load_text(tmp.path(), "ok.json", &ok).unwrap();
         for (name, extra, key) in [
             ("top.json", r#","require_intent":true"#, "require_intent"),
-            ("policy.json", r#","signing_policy":{"require_intnet":true}"#, "require_intnet"),
-            ("camel.json", r#","signing_policy":{"requireIntent":true}"#, "requireIntent"),
-            ("rule.json", r#","signing_policy":{"rate_limits":[{"key_id_prefix":"k","per_min":1,"per_day":1,"burst":2}]}"#, "burst"),
-            ("approval.json", r#","signing_policy":{"rules":[{"key_id_prefix":"k","mode":"auto","treshold":1}]}"#, "treshold"),
-            ("approver.json", r#","signing_policy":{"approvers":[{"id":"a","public_key_spki_b64":"x","name":"A"}]}"#, "name"),
-            ("hosted.json", r#","hosted_keys":{"enabled":false,"write_qourum":2}"#, "write_qourum"),
-            ("seal.json", r#","share_seal":{"secret_env":"S","secret":"x"}"#, "secret"),
-            ("tls.json", r#","tls":{"ca_cert":"/ca","cert":"/c","key":"/k","server_name":"x"}"#, "server_name"),
-            ("keyfile.json", r#","keyfile":{"write_versoin":2}"#, "write_versoin"),
+            (
+                "policy.json",
+                r#","signing_policy":{"require_intnet":true}"#,
+                "require_intnet",
+            ),
+            (
+                "camel.json",
+                r#","signing_policy":{"requireIntent":true}"#,
+                "requireIntent",
+            ),
+            (
+                "rule.json",
+                r#","signing_policy":{"rate_limits":[{"key_id_prefix":"k","per_min":1,"per_day":1,"burst":2}]}"#,
+                "burst",
+            ),
+            (
+                "approval.json",
+                r#","signing_policy":{"rules":[{"key_id_prefix":"k","mode":"auto","treshold":1}]}"#,
+                "treshold",
+            ),
+            (
+                "approver.json",
+                r#","signing_policy":{"approvers":[{"id":"a","public_key_spki_b64":"x","name":"A"}]}"#,
+                "name",
+            ),
+            (
+                "hosted.json",
+                r#","hosted_keys":{"enabled":false,"write_qourum":2}"#,
+                "write_qourum",
+            ),
+            (
+                "seal.json",
+                r#","share_seal":{"secret_env":"S","secret":"x"}"#,
+                "secret",
+            ),
+            (
+                "tls.json",
+                r#","tls":{"ca_cert":"/ca","cert":"/c","key":"/k","server_name":"x"}"#,
+                "server_name",
+            ),
+            (
+                "keyfile.json",
+                r#","keyfile":{"write_versoin":2}"#,
+                "write_versoin",
+            ),
         ] {
-            let err = load_text(tmp.path(), name, &format!("{MINIMAL}{extra}}}")).unwrap_err().to_string();
-            assert!(err.contains(&format!("unknown field `{key}`")), "{name}: {err}");
-            assert!(err.contains(&tmp.path().join(name).display().to_string()), "{name}: {err}");
+            let err = load_text(tmp.path(), name, &format!("{MINIMAL}{extra}}}"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains(&format!("unknown field `{key}`")),
+                "{name}: {err}"
+            );
+            assert!(
+                err.contains(&tmp.path().join(name).display().to_string()),
+                "{name}: {err}"
+            );
         }
         // A peer entry too.
-        let peer = MINIMAL.replace(r#""endpoint":"http://b:9101""#, r#""endpoint":"http://b:9101","tls_name":"x""#);
-        let err = load_text(tmp.path(), "peer.json", &format!("{peer}}}")).unwrap_err().to_string();
+        let peer = MINIMAL.replace(
+            r#""endpoint":"http://b:9101""#,
+            r#""endpoint":"http://b:9101","tls_name":"x""#,
+        );
+        let err = load_text(tmp.path(), "peer.json", &format!("{peer}}}"))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("unknown field `tls_name`"), "{err}");
         // A missing file and a validation error name the file as well.
-        let err = Config::load(&tmp.path().join("absent.json")).unwrap_err().to_string();
+        let err = Config::load(&tmp.path().join("absent.json"))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("absent.json"), "{err}");
-        let bad = format!("{}}}", MINIMAL.replace(r#""threshold":2"#, r#""threshold":9"#));
-        let err = load_text(tmp.path(), "bad.json", &bad).unwrap_err().to_string();
-        assert!(err.contains("bad.json") && err.contains("threshold 9"), "{err}");
+        let bad = format!(
+            "{}}}",
+            MINIMAL.replace(r#""threshold":2"#, r#""threshold":9"#)
+        );
+        let err = load_text(tmp.path(), "bad.json", &bad)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("bad.json") && err.contains("threshold 9"),
+            "{err}"
+        );
     }
 
     /// Every cosigner config the repository ships loads under the strict parser: the compose
@@ -1883,14 +2298,24 @@ mod strict_parse_tests {
             for entry in std::fs::read_dir(repo.join(dir)).unwrap() {
                 let path = entry.unwrap().path();
                 if path.extension().is_some_and(|e| e == "json") {
-                    let cfg = Config::load(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-                    assert_eq!(cfg.profile, Some(crate::profile::Profile::Lab), "{}: compose examples say lab", path.display());
+                    let cfg =
+                        Config::load(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                    assert_eq!(
+                        cfg.profile,
+                        Some(crate::profile::Profile::Lab),
+                        "{}: compose examples say lab",
+                        path.display()
+                    );
                     // The compose TLS cluster's certificates are made per checkout, so its configs
                     // ship without pins and the node refuses to start until they are added
                     // (deploy/frost/README.md: gen-frost-certs.sh with RUTLI_PIN_CONFIGS).
                     if cfg.tls.is_some() {
                         let e = cfg.check_peer_pins_required().unwrap_err().to_string();
-                        assert!(e.contains("tls_spki_sha256 is missing"), "{}: {e}", path.display());
+                        assert!(
+                            e.contains("tls_spki_sha256 is missing"),
+                            "{}: {e}",
+                            path.display()
+                        );
                     }
                     seen += 1;
                 }
@@ -1902,7 +2327,10 @@ mod strict_parse_tests {
             let mut lines = text.lines().peekable();
             while let Some(line) = lines.next() {
                 let trimmed = line.trim_start();
-                let Some(name) = trimmed.strip_suffix(": |").filter(|n| n.ends_with(".json")) else { continue };
+                let Some(name) = trimmed.strip_suffix(": |").filter(|n| n.ends_with(".json"))
+                else {
+                    continue;
+                };
                 let indent = line.len() - trimmed.len();
                 let mut json = String::new();
                 while let Some(next) = lines.peek() {
@@ -1912,15 +2340,21 @@ mod strict_parse_tests {
                     json.push_str(lines.next().unwrap());
                     json.push('\n');
                 }
-                let parsed: Config = serde_json::from_str(&json).unwrap_or_else(|e| panic!("{file} {name}: {e}"));
+                let parsed: Config =
+                    serde_json::from_str(&json).unwrap_or_else(|e| panic!("{file} {name}: {e}"));
                 let cfg = if parsed.profile == Some(crate::profile::Profile::Production) {
                     // The rendered manifests ship with the production profile on. What is left for
                     // the operator is only what a checked-in manifest cannot know: the per-cluster
                     // values (deploy/k8s/values.yaml says which). Everything else must already be on.
                     let mut as_lab = parsed.clone();
                     as_lab.profile = Some(crate::profile::Profile::Lab);
-                    as_lab.validate().unwrap_or_else(|e| panic!("{file} {name}: {e}"));
-                    let left: Vec<_> = crate::profile::required(&parsed).iter().map(|f| f.setting).collect();
+                    as_lab
+                        .validate()
+                        .unwrap_or_else(|e| panic!("{file} {name}: {e}"));
+                    let left: Vec<_> = crate::profile::required(&parsed)
+                        .iter()
+                        .map(|f| f.setting)
+                        .collect();
                     let per_cluster = [
                         "cluster_id",
                         "keyfile.write_version",
@@ -1928,23 +2362,31 @@ mod strict_parse_tests {
                         "keyfile.accept_v1",
                         "signing_policy.signer_pins",
                     ];
-                    assert!(left.iter().all(|s| per_cluster.contains(s)), "{file} {name}: {left:?}");
+                    assert!(
+                        left.iter().all(|s| per_cluster.contains(s)),
+                        "{file} {name}: {left:?}"
+                    );
                     production += 1;
                     as_lab
                 } else {
-                    load_text(tmp.path(), name, &json).unwrap_or_else(|e| panic!("{file} {name}: {e}"))
+                    load_text(tmp.path(), name, &json)
+                        .unwrap_or_else(|e| panic!("{file} {name}: {e}"))
                 };
                 // The rendered node configs carry a pin for every node (placeholders in
                 // deploy/k8s/values.yaml until the operator sets the real ones).
                 if name.starts_with("cosigner-") {
-                    cfg.check_peer_pins_required().unwrap_or_else(|e| panic!("{file} {name}: {e}"));
+                    cfg.check_peer_pins_required()
+                        .unwrap_or_else(|e| panic!("{file} {name}: {e}"));
                 }
                 seen += 1;
             }
         }
         // 3 + 3 compose configs, 3 client configs, 3 rendered node configs.
         assert_eq!(seen, 12, "a shipped config was not found");
-        assert_eq!(production, 3, "the rendered node configs ship with the production profile");
+        assert_eq!(
+            production, 3,
+            "the rendered node configs ship with the production profile"
+        );
     }
 
     use super::tests::{base, tls};
@@ -1979,9 +2421,14 @@ mod strict_parse_tests {
         let c = pinned(mesh_tls(), &[(1, &[PIN_A]), (3, &[PIN_C])]);
         c.validate().unwrap();
         let e = c.check_peer_pins_required().unwrap_err().to_string();
-        assert!(e.contains("peers[id=2].tls_spki_sha256 is missing") && e.contains("require_peer_pins"), "{e}");
+        assert!(
+            e.contains("peers[id=2].tls_spki_sha256 is missing") && e.contains("require_peer_pins"),
+            "{e}"
+        );
         // Every node pinned: fine.
-        pinned(c.clone(), &[(2, &[PIN_B])]).check_peer_pins_required().unwrap();
+        pinned(c.clone(), &[(2, &[PIN_B])])
+            .check_peer_pins_required()
+            .unwrap();
         // The explicit opt-out.
         let mut out = c.clone();
         out.tls.as_mut().unwrap().require_peer_pins = Some(false);
@@ -1993,14 +2440,25 @@ mod strict_parse_tests {
         // Plaintext: nothing to pin.
         base(None, None).check_peer_pins_required().unwrap();
         // The key round-trips; unset is not written.
-        let t: TlsConfig = serde_json::from_str(r#"{"ca_cert":"a","cert":"b","key":"c","require_peer_pins":false}"#).unwrap();
+        let t: TlsConfig = serde_json::from_str(
+            r#"{"ca_cert":"a","cert":"b","key":"c","require_peer_pins":false}"#,
+        )
+        .unwrap();
         assert_eq!(t.require_peer_pins, Some(false));
-        assert!(!tls().peer_pins_required() || !serde_json::to_string(&tls()).unwrap().contains("require_peer_pins"));
+        assert!(
+            !tls().peer_pins_required()
+                || !serde_json::to_string(&tls())
+                    .unwrap()
+                    .contains("require_peer_pins")
+        );
     }
 
     #[test]
     fn peer_pins_have_the_right_shape() {
-        let ok = pinned(mesh_tls(), &[(1, &[PIN_A]), (2, &[PIN_B, PIN_D]), (3, &[PIN_C])]);
+        let ok = pinned(
+            mesh_tls(),
+            &[(1, &[PIN_A]), (2, &[PIN_B, PIN_D]), (3, &[PIN_C])],
+        );
         ok.validate().unwrap();
         assert_eq!(ok.peers[1].tls_spki_pins().unwrap().unwrap().len(), 2);
         assert_eq!(ok.peers[0].tls_spki_pins().unwrap().unwrap()[0], [0xaa; 32]);
@@ -2010,12 +2468,18 @@ mod strict_parse_tests {
         let e = err(pinned(mesh_tls(), &[(2, &[PIN_A, PIN_B, PIN_C])]));
         assert!(e.contains("at most 2"), "{e}");
         let e = err(pinned(mesh_tls(), &[(2, &["abcd"])]));
-        assert!(e.contains("peers[id=2].tls_spki_sha256 must be 64 hex"), "{e}");
+        assert!(
+            e.contains("peers[id=2].tls_spki_sha256 must be 64 hex"),
+            "{e}"
+        );
         let e = err(pinned(mesh_tls(), &[(2, &[PIN_B, PIN_B])]));
         assert!(e.contains("twice"), "{e}");
         // One key cannot be two nodes.
         let e = err(pinned(mesh_tls(), &[(1, &[PIN_A]), (3, &[PIN_C, PIN_A])]));
-        assert!(e.contains("peers[id=3]") && e.contains("peers[id=1] pins too"), "{e}");
+        assert!(
+            e.contains("peers[id=3]") && e.contains("peers[id=1] pins too"),
+            "{e}"
+        );
         // Pins need TLS.
         let e = err(pinned(base(None, None), &[(1, &[PIN_A])]));
         assert!(e.contains("needs tls"), "{e}");
@@ -2030,25 +2494,42 @@ mod strict_parse_tests {
         let tmp = tempfile::tempdir().unwrap();
         let key = rcgen::KeyPair::generate().unwrap();
         let mut params = rcgen::CertificateParams::new(vec!["cosigner1".to_string()]).unwrap();
-        params.distinguished_name.push(rcgen::DnType::CommonName, "cosigner1");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "cosigner1");
         let cert = params.self_signed(&key).unwrap();
         let path = tmp.path().join("cosigner1.crt");
         std::fs::write(&path, cert.pem()).unwrap();
         let mine = hex::encode(crate::tls::spki_sha256(cert.der()).unwrap());
-        assert_eq!(hex::encode(crate::tls::spki_sha256_of_pem_file(&path).unwrap()), mine);
+        assert_eq!(
+            hex::encode(crate::tls::spki_sha256_of_pem_file(&path).unwrap()),
+            mine
+        );
 
         let mut c = mesh_tls();
         c.tls.as_mut().unwrap().cert = path;
         // No pins on its own entry (opted out): nothing to compare.
         c.check_own_peer_pin().unwrap();
         // Its own key among its pins (also during a roll, next to the next key).
-        pinned(c.clone(), &[(1, &[mine.as_str()])]).check_own_peer_pin().unwrap();
-        pinned(c.clone(), &[(1, &[PIN_A, mine.as_str()])]).check_own_peer_pin().unwrap();
+        pinned(c.clone(), &[(1, &[mine.as_str()])])
+            .check_own_peer_pin()
+            .unwrap();
+        pinned(c.clone(), &[(1, &[PIN_A, mine.as_str()])])
+            .check_own_peer_pin()
+            .unwrap();
         // Another node's pins do not matter here.
-        pinned(c.clone(), &[(1, &[mine.as_str()]), (2, &[PIN_B])]).check_own_peer_pin().unwrap();
+        pinned(c.clone(), &[(1, &[mine.as_str()]), (2, &[PIN_B])])
+            .check_own_peer_pin()
+            .unwrap();
         // A leaf swapped before its pin was rolled out.
-        let e = pinned(c, &[(1, &[PIN_A])]).check_own_peer_pin().unwrap_err().to_string();
-        assert!(e.contains(&mine) && e.contains("peers[id=1].tls_spki_sha256"), "{e}");
+        let e = pinned(c, &[(1, &[PIN_A])])
+            .check_own_peer_pin()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains(&mine) && e.contains("peers[id=1].tls_spki_sha256"),
+            "{e}"
+        );
     }
 
     #[test]

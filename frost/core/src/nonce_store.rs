@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Crash-safe single-use guard for FROST signing nonces.
@@ -114,7 +114,9 @@ impl NonceStore {
         for entry in fs::read_dir(&self.dir)? {
             let entry = entry?;
             let name = entry.file_name();
-            let Some(session) = name.to_str().and_then(|n| n.strip_suffix(".used")) else { continue };
+            let Some(session) = name.to_str().and_then(|n| n.strip_suffix(".used")) else {
+                continue;
+            };
             if self.marker_path(session).is_err() {
                 continue; // not one of ours
             }
@@ -162,9 +164,13 @@ impl NonceStore {
     fn marker_path(&self, session_id: &str) -> Result<PathBuf> {
         // Session ids are cosigner-generated UUIDs; reject anything path-unsafe defensively.
         if session_id.is_empty()
-            || !session_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            || !session_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         {
-            return Err(CoreError::NonceStore(format!("invalid session id: {session_id:?}")));
+            return Err(CoreError::NonceStore(format!(
+                "invalid session id: {session_id:?}"
+            )));
         }
         Ok(self.dir.join(format!("{session_id}.used")))
     }
@@ -176,7 +182,10 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn age(store: &NonceStore, session: &str, by: Duration) {
-        let f = File::options().write(true).open(store.dir.join(format!("{session}.used"))).unwrap();
+        let f = File::options()
+            .write(true)
+            .open(store.dir.join(format!("{session}.used")))
+            .unwrap();
         f.set_modified(SystemTime::now() - by).unwrap();
     }
 
@@ -191,21 +200,48 @@ mod tests {
             age(&store, s, Duration::from_secs(3600));
         }
         // A marker from the future (clock went back) is never pruned.
-        let f = File::options().write(true).open(store.dir.join("young.used")).unwrap();
-        f.set_modified(SystemTime::now() + Duration::from_secs(3600)).unwrap();
+        let f = File::options()
+            .write(true)
+            .open(store.dir.join("young.used"))
+            .unwrap();
+        f.set_modified(SystemTime::now() + Duration::from_secs(3600))
+            .unwrap();
         fs::write(store.dir.join("not-a-marker"), b"x").unwrap();
         let horizon = Duration::from_secs(900);
 
         // Bounded: two per pass.
         let r = store.prune_older_than(horizon, 2).unwrap();
-        assert_eq!(r, PruneReport { removed: 2, kept: 2, truncated: true });
+        assert_eq!(
+            r,
+            PruneReport {
+                removed: 2,
+                kept: 2,
+                truncated: true
+            }
+        );
         let r = store.prune_older_than(horizon, 2).unwrap();
-        assert_eq!(r, PruneReport { removed: 1, kept: 1, truncated: false });
+        assert_eq!(
+            r,
+            PruneReport {
+                removed: 1,
+                kept: 1,
+                truncated: false
+            }
+        );
         assert!(store.is_consumed("young").unwrap());
         assert!(!store.is_consumed("old-1").unwrap());
-        assert!(store.dir.join(PRUNED_SENTINEL).exists() && store.dir.join("not-a-marker").exists());
+        assert!(
+            store.dir.join(PRUNED_SENTINEL).exists() && store.dir.join("not-a-marker").exists()
+        );
         // Nothing old left: a no-op that does not touch the sentinel.
-        assert_eq!(store.prune_older_than(horizon, 2).unwrap(), PruneReport { removed: 0, kept: 1, truncated: false });
+        assert_eq!(
+            store.prune_older_than(horizon, 2).unwrap(),
+            PruneReport {
+                removed: 0,
+                kept: 1,
+                truncated: false
+            }
+        );
     }
 
     #[test]
@@ -244,8 +280,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = NonceStore::open(tmp.path().join("k.nonces")).unwrap();
         for bad in ["", "../x", "a/b", "a.b", "a b", "ü"] {
-            assert!(matches!(store.consume(bad), Err(CoreError::NonceStore(_))), "{bad:?}");
-            assert!(matches!(store.is_consumed(bad), Err(CoreError::NonceStore(_))), "{bad:?}");
+            assert!(
+                matches!(store.consume(bad), Err(CoreError::NonceStore(_))),
+                "{bad:?}"
+            );
+            assert!(
+                matches!(store.is_consumed(bad), Err(CoreError::NonceStore(_))),
+                "{bad:?}"
+            );
         }
         for good in ["a", "A-9_z", "123e4567-e89b-12d3-a456-426614174000"] {
             store.consume(good).unwrap();
@@ -268,6 +310,9 @@ mod tests {
         }
         let verdict = store.is_consumed("s1");
         set(0o700); // restore BEFORE asserting, or a failure leaves an undeletable tempdir
-        assert!(verdict.is_err(), "an unreadable store must not report a session as unburned");
+        assert!(
+            verdict.is_err(),
+            "an unreadable store must not report a session as unburned"
+        );
     }
 }

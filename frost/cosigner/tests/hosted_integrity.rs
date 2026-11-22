@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Hosted-key replication integrity: a node never makes hosted material servable on one peer's
@@ -129,7 +129,14 @@ impl PeerApi for Switch {
         self.check()?;
         self.inner.hosted_specs().await
     }
-    async fn replicate_key(&self, c: &str, k: &str, s: &str, p: &[u8], w: &Wrapped) -> Result<Vec<u8>> {
+    async fn replicate_key(
+        &self,
+        c: &str,
+        k: &str,
+        s: &str,
+        p: &[u8],
+        w: &Wrapped,
+    ) -> Result<Vec<u8>> {
         self.check()?;
         if let Some(f) = &self.hooks.before_replicate {
             f();
@@ -205,16 +212,28 @@ impl Cluster {
 
     /// `n` nodes with an orphan timeout for ceremony guards, and the hooks of node `me`'s mesh
     /// handle on node `j` (`mesh_hooks(nodes, me, j)`).
-    fn build(n: u16, orphan: std::time::Duration, mesh_hooks: impl Fn(&[Arc<Node>], usize, usize) -> Hooks) -> Self {
+    fn build(
+        n: u16,
+        orphan: std::time::Duration,
+        mesh_hooks: impl Fn(&[Arc<Node>], usize, usize) -> Hooks,
+    ) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let nodes: Vec<Arc<Node>> = (1..=n)
             .map(|i| {
                 let sealer = Arc::new(Sealer::from_master_secret(MASTER, i));
-                let ks = KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(sealer)).unwrap();
+                let ks =
+                    KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(sealer))
+                        .unwrap();
                 Arc::new(
-                    Node::new_with_ceremony_timeout(Identifier::try_from(i).unwrap(), n, T, ks, orphan)
-                        .with_hosted_keys(MASTER, CLUSTER.to_string())
-                        .unwrap(),
+                    Node::new_with_ceremony_timeout(
+                        Identifier::try_from(i).unwrap(),
+                        n,
+                        T,
+                        ks,
+                        orphan,
+                    )
+                    .with_hosted_keys(MASTER, CLUSTER.to_string())
+                    .unwrap(),
                 )
             })
             .collect();
@@ -226,7 +245,8 @@ impl Cluster {
         };
         // Each node's mesh: the others, through the switches, as the daemon dials them.
         for (me, node) in c.nodes.iter().enumerate() {
-            node.set_mesh(c.view_with(me, |j| mesh_hooks(&c.nodes, me, j))).unwrap();
+            node.set_mesh(c.view_with(me, |j| mesh_hooks(&c.nodes, me, j)))
+                .unwrap();
         }
         c
     }
@@ -243,7 +263,8 @@ impl Cluster {
                     return Arc::new(LocalPeer::new(self.nodes[j].clone())) as Arc<dyn PeerApi>;
                 }
                 Arc::new(Switch {
-                    inner: LocalPeer::new(self.nodes[j].clone()).on_behalf_of(self.nodes[me].clone()),
+                    inner: LocalPeer::new(self.nodes[j].clone())
+                        .on_behalf_of(self.nodes[me].clone()),
                     down: self.down[j].clone(),
                     fetches: self.fetches[j].clone(),
                     hooks: Arc::new(hooks(j)),
@@ -263,7 +284,9 @@ impl Cluster {
 
     fn commitment(&self, i: usize, key_id: &str) -> Option<Vec<u8>> {
         let n = &self.nodes[i];
-        n.hosted_load(key_id).ok().map(|k| n.hosted_commitment(&k).unwrap())
+        n.hosted_load(key_id)
+            .ok()
+            .map(|k| n.hosted_commitment(&k).unwrap())
     }
 
     fn signer(&self, i: usize) -> SignerSvc {
@@ -288,11 +311,16 @@ fn aes() -> HostedKey {
 /// `key` wrapped by node `from` for node `to` under `key_id`: what a peer pushes or serves.
 fn wrapped(c: &Cluster, from: usize, to: usize, key_id: &str, key: &HostedKey) -> Wrapped {
     let to_id = rutli_cosigner::hosted::identifier_index(c.nodes[to].identifier).unwrap();
-    c.nodes[from].hosted_wrap_for(key_id, key, to_id, &c.nodes[to].dist_public_key().unwrap()).unwrap()
+    c.nodes[from]
+        .hosted_wrap_for(key_id, key, to_id, &c.nodes[to].dist_public_key().unwrap())
+        .unwrap()
 }
 
 fn unconfirmed(r: Result<bool>) {
-    assert!(matches!(r, Err(DaemonError::HostedUnconfirmed { .. })), "{r:?}");
+    assert!(
+        matches!(r, Err(DaemonError::HostedUnconfirmed { .. })),
+        "{r:?}"
+    );
 }
 
 // ── pull: two peers must agree ──────────────────────────────────────────────────────────────────
@@ -303,7 +331,9 @@ async fn read_repair_stores_a_key_only_when_two_peers_agree() {
     let id = "rutli-sym-two";
     let key = aes();
     // Nobody holds it: NOT_FOUND (Ok(false)), as before.
-    assert!(!repair_hosted_key(&c.nodes[1], &c.view(1), id).await.unwrap());
+    assert!(!repair_hosted_key(&c.nodes[1], &c.view(1), id)
+        .await
+        .unwrap());
 
     // One peer holds it: refused, UNAVAILABLE — one peer's word is not enough.
     c.nodes[0].hosted_store(id, &key).unwrap();
@@ -312,7 +342,9 @@ async fn read_repair_stores_a_key_only_when_two_peers_agree() {
 
     // Two peers hold the same copy: stored.
     c.nodes[2].hosted_store(id, &key).unwrap();
-    assert!(repair_hosted_key(&c.nodes[1], &c.view(1), id).await.unwrap());
+    assert!(repair_hosted_key(&c.nodes[1], &c.view(1), id)
+        .await
+        .unwrap());
     assert_eq!(c.commitment(1, id), c.commitment(0, id));
 }
 
@@ -340,7 +372,8 @@ async fn a_peer_serving_other_material_makes_read_repair_refuse_not_store() {
 async fn every_signer_read_path_serves_only_confirmed_material() {
     let c = Cluster::new();
     let (rsa, sym) = ("rutli-enc-paths", "rutli-sym-paths");
-    let rsa_key = HostedKey::generate(HostedSpec::Rsa2048, rutli_cosigner::hosted::now_secs()).unwrap();
+    let rsa_key =
+        HostedKey::generate(HostedSpec::Rsa2048, rutli_cosigner::hosted::now_secs()).unwrap();
     let sym_key = aes();
     c.nodes[0].hosted_store(rsa, &rsa_key).unwrap();
     c.nodes[0].hosted_store(sym, &sym_key).unwrap();
@@ -351,49 +384,103 @@ async fn every_signer_read_path_serves_only_confirmed_material() {
     let check = |r: std::result::Result<(), tonic::Status>, what: &str| {
         let e = r.expect_err(what);
         assert_eq!(e.code(), Code::Unavailable, "{what}: {e:?}");
-        assert_eq!(e.metadata().get("rutli-error").and_then(|v| v.to_str().ok()), Some("hosted-unconfirmed"), "{what}");
+        assert_eq!(
+            e.metadata()
+                .get("rutli-error")
+                .and_then(|v| v.to_str().ok()),
+            Some("hosted-unconfirmed"),
+            "{what}"
+        );
     };
-    check(svc.public_key(Request::new(pb::PublicKeyRequest { key_id: rsa.into() })).await.map(|_| ()), "PublicKey");
     check(
-        svc.key_info(Request::new(pb::KeyInfoRequest { key_id: rsa.into(), ..Default::default() })).await.map(|_| ()),
+        svc.public_key(Request::new(pb::PublicKeyRequest { key_id: rsa.into() }))
+            .await
+            .map(|_| ()),
+        "PublicKey",
+    );
+    check(
+        svc.key_info(Request::new(pb::KeyInfoRequest {
+            key_id: rsa.into(),
+            ..Default::default()
+        }))
+        .await
+        .map(|_| ()),
         "KeyInfo",
     );
     check(
-        svc.decrypt(Request::new(pb::DecryptRequest { key_id: rsa.into(), ciphertext: ct.clone() })).await.map(|_| ()),
+        svc.decrypt(Request::new(pb::DecryptRequest {
+            key_id: rsa.into(),
+            ciphertext: ct.clone(),
+        }))
+        .await
+        .map(|_| ()),
         "Decrypt",
     );
     check(
-        svc.symmetric_encrypt(Request::new(pb::SymmetricRequest { key_id: sym.into(), data: b"x".to_vec() }))
-            .await
-            .map(|_| ()),
+        svc.symmetric_encrypt(Request::new(pb::SymmetricRequest {
+            key_id: sym.into(),
+            data: b"x".to_vec(),
+        }))
+        .await
+        .map(|_| ()),
         "SymmetricEncrypt",
     );
     check(
-        svc.symmetric_decrypt(Request::new(pb::SymmetricRequest { key_id: sym.into(), data: blob.clone() }))
-            .await
-            .map(|_| ()),
+        svc.symmetric_decrypt(Request::new(pb::SymmetricRequest {
+            key_id: sym.into(),
+            data: blob.clone(),
+        }))
+        .await
+        .map(|_| ()),
         "SymmetricDecrypt",
     );
-    assert!(!c.nodes[1].hosted_exists(rsa) && !c.nodes[1].hosted_exists(sym), "nothing unconfirmed is stored");
+    assert!(
+        !c.nodes[1].hosted_exists(rsa) && !c.nodes[1].hosted_exists(sym),
+        "nothing unconfirmed is stored"
+    );
 
     // A key nobody holds is still NOT_FOUND / exists = false.
     let info = svc
-        .key_info(Request::new(pb::KeyInfoRequest { key_id: "rutli-sym-nobody".into(), ..Default::default() }))
+        .key_info(Request::new(pb::KeyInfoRequest {
+            key_id: "rutli-sym-nobody".into(),
+            ..Default::default()
+        }))
         .await
         .unwrap()
         .into_inner();
     assert!(!info.exists);
-    let e = svc.public_key(Request::new(pb::PublicKeyRequest { key_id: "rutli-enc-nobody".into() })).await.unwrap_err();
+    let e = svc
+        .public_key(Request::new(pb::PublicKeyRequest {
+            key_id: "rutli-enc-nobody".into(),
+        }))
+        .await
+        .unwrap_err();
     assert_eq!(e.code(), Code::NotFound);
 
     // Confirmed by a second holder: served.
     c.nodes[2].hosted_store(rsa, &rsa_key).unwrap();
     c.nodes[2].hosted_store(sym, &sym_key).unwrap();
-    let pk = svc.public_key(Request::new(pb::PublicKeyRequest { key_id: rsa.into() })).await.unwrap().into_inner();
+    let pk = svc
+        .public_key(Request::new(pb::PublicKeyRequest { key_id: rsa.into() }))
+        .await
+        .unwrap()
+        .into_inner();
     assert_eq!(pk.public_key_der, rsa_key.public_key_der().unwrap());
-    let plain = svc.decrypt(Request::new(pb::DecryptRequest { key_id: rsa.into(), ciphertext: ct })).await.unwrap();
+    let plain = svc
+        .decrypt(Request::new(pb::DecryptRequest {
+            key_id: rsa.into(),
+            ciphertext: ct,
+        }))
+        .await
+        .unwrap();
     assert_eq!(plain.into_inner().plaintext, b"m");
-    let out = svc.symmetric_decrypt(Request::new(pb::SymmetricRequest { key_id: sym.into(), data: blob })).await.unwrap();
+    let out = svc
+        .symmetric_decrypt(Request::new(pb::SymmetricRequest {
+            key_id: sym.into(),
+            data: blob,
+        }))
+        .await
+        .unwrap();
     assert_eq!(out.into_inner().data, b"m");
 }
 
@@ -412,8 +499,13 @@ async fn a_pull_takes_the_latest_times_and_refuses_future_ones() {
     zero.created_at = 0;
     c.nodes[0].hosted_store(id, &key).unwrap();
     c.nodes[2].hosted_store(id, &zero).unwrap();
-    assert!(repair_hosted_key(&c.nodes[1], &c.view(1), id).await.unwrap());
-    assert_eq!(c.nodes[1].hosted_load(id).unwrap().created_at, key.created_at);
+    assert!(repair_hosted_key(&c.nodes[1], &c.view(1), id)
+        .await
+        .unwrap());
+    assert_eq!(
+        c.nodes[1].hosted_load(id).unwrap().created_at,
+        key.created_at
+    );
 
     // Undelete times on both sides: the later one.
     let id = "rutli-sym-undeleted-both";
@@ -422,15 +514,25 @@ async fn a_pull_takes_the_latest_times_and_refuses_future_ones() {
     b.undeleted_at_ms = Some(now_ms - 1_000);
     c.nodes[0].hosted_store(id, &a).unwrap();
     c.nodes[2].hosted_store(id, &b).unwrap();
-    assert!(repair_hosted_key(&c.nodes[1], &c.view(1), id).await.unwrap());
-    assert_eq!(c.nodes[1].hosted_load(id).unwrap().undeleted_at_ms, Some(now_ms - 1_000));
+    assert!(repair_hosted_key(&c.nodes[1], &c.view(1), id)
+        .await
+        .unwrap());
+    assert_eq!(
+        c.nodes[1].hosted_load(id).unwrap().undeleted_at_ms,
+        Some(now_ms - 1_000)
+    );
 
     // One side without an undelete time does not erase the other's.
     let id = "rutli-sym-undeleted-one";
     c.nodes[0].hosted_store(id, &a).unwrap();
     c.nodes[2].hosted_store(id, &key).unwrap();
-    assert!(repair_hosted_key(&c.nodes[1], &c.view(1), id).await.unwrap());
-    assert_eq!(c.nodes[1].hosted_load(id).unwrap().undeleted_at_ms, Some(now_ms - 5_000));
+    assert!(repair_hosted_key(&c.nodes[1], &c.view(1), id)
+        .await
+        .unwrap());
+    assert_eq!(
+        c.nodes[1].hosted_load(id).unwrap().undeleted_at_ms,
+        Some(now_ms - 5_000)
+    );
 
     // A copy carrying a creation time an hour ahead is refused at unwrap: unusable, no confirmation.
     let id = "rutli-sym-future";
@@ -463,11 +565,19 @@ async fn silent_holders_never_make_a_key_not_found() {
     c.set_down(0, true);
     c.set_down(2, true);
     unconfirmed(repair_hosted_key(&c.nodes[1], &c.view(1), id).await);
-    let e = c.signer(1).public_key(Request::new(pb::PublicKeyRequest { key_id: id.into() })).await.unwrap_err();
+    let e = c
+        .signer(1)
+        .public_key(Request::new(pb::PublicKeyRequest { key_id: id.into() }))
+        .await
+        .unwrap_err();
     assert_eq!(e.code(), Code::Unavailable);
     // One node down, a key nobody holds: two of three answered "not held" — NOT_FOUND.
     c.set_down(2, false);
-    assert!(!repair_hosted_key(&c.nodes[1], &c.view(1), "rutli-sym-nobody").await.unwrap());
+    assert!(
+        !repair_hosted_key(&c.nodes[1], &c.view(1), "rutli-sym-nobody")
+            .await
+            .unwrap()
+    );
 }
 
 /// Five nodes: two agree, and a third holder with other material is silent. The pull does not
@@ -491,7 +601,11 @@ async fn a_silent_peer_blocks_a_pull_confirmation() {
     c.set_down(1, true);
     unconfirmed(repair_hosted_key(&c.nodes[3], &c.view(3), "rutli-sym-five-nobody").await);
     c.set_down(1, false);
-    assert!(!repair_hosted_key(&c.nodes[3], &c.view(3), "rutli-sym-five-nobody").await.unwrap());
+    assert!(
+        !repair_hosted_key(&c.nodes[3], &c.view(3), "rutli-sym-five-nobody")
+            .await
+            .unwrap()
+    );
 }
 
 /// A push is refused while another peer answers with a copy the receiver cannot check (here a
@@ -504,9 +618,23 @@ async fn a_push_is_refused_while_a_peer_holds_a_copy_that_cannot_be_checked() {
     ahead.created_at = rutli_cosigner::hosted::now_secs() + 3600;
     c.nodes[2].hosted_store(id, &ahead).unwrap();
     let leader = c.as_peer(0, 1);
-    leader.ceremony_fence("genkey-u", id, "genkey").await.unwrap();
-    let e = leader.replicate_key("genkey-u", id, "aes-256-gcm", &[], &wrapped(&c, 0, 1, id, &aes())).await;
-    assert!(matches!(e, Err(DaemonError::HostedUnconfirmed { .. })), "{e:?}");
+    leader
+        .ceremony_fence("genkey-u", id, "genkey")
+        .await
+        .unwrap();
+    let e = leader
+        .replicate_key(
+            "genkey-u",
+            id,
+            "aes-256-gcm",
+            &[],
+            &wrapped(&c, 0, 1, id, &aes()),
+        )
+        .await;
+    assert!(
+        matches!(e, Err(DaemonError::HostedUnconfirmed { .. })),
+        "{e:?}"
+    );
     assert!(!c.nodes[1].hosted_exists(id));
 }
 
@@ -534,15 +662,27 @@ async fn read_repair_fan_out_is_bounded_and_never_answers_not_found_when_throttl
     let svc = c.signer(1);
     let mut throttled = 0;
     for i in 0..200 {
-        let r = svc.public_key(Request::new(pb::PublicKeyRequest { key_id: format!("rutli-enc-madeup-{i}") })).await;
+        let r = svc
+            .public_key(Request::new(pb::PublicKeyRequest {
+                key_id: format!("rutli-enc-madeup-{i}"),
+            }))
+            .await;
         match r.unwrap_err() {
             e if e.code() == Code::Unavailable => throttled += 1,
             e => assert_eq!(e.code(), Code::NotFound, "{e:?}"),
         }
-        assert!(svc.public_key(Request::new(pb::PublicKeyRequest { key_id: held.into() })).await.is_ok());
+        assert!(svc
+            .public_key(Request::new(pb::PublicKeyRequest {
+                key_id: held.into()
+            }))
+            .await
+            .is_ok());
     }
     assert!(throttled > 0, "the ceiling never applied");
-    assert!(c.fetches[0].load(Ordering::SeqCst) < 200, "throttled lookups asked no peer");
+    assert!(
+        c.fetches[0].load(Ordering::SeqCst) < 200,
+        "throttled lookups asked no peer"
+    );
 }
 
 /// One hung peer does not stall the sweep: it goes on with the peers that answered.
@@ -553,10 +693,17 @@ async fn a_hung_peer_does_not_stall_the_sweep() {
     let key = aes();
     c.nodes[0].hosted_store(id, &key).unwrap();
     c.nodes[2].hosted_store(id, &key).unwrap();
-    let view = c.view_with(1, |j| Hooks { hang_list: j == 2, ..Hooks::default() });
+    let view = c.view_with(1, |j| Hooks {
+        hang_list: j == 2,
+        ..Hooks::default()
+    });
     let started = std::time::Instant::now();
     assert_eq!(anti_entropy_sweep(&c.nodes[1], &view).await.unwrap(), 1);
-    assert!(started.elapsed() < std::time::Duration::from_secs(30), "{:?}", started.elapsed());
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
     assert!(c.nodes[1].hosted_exists(id));
 }
 
@@ -571,13 +718,24 @@ async fn a_poisoned_replica_does_not_spread_through_the_sweep() {
     c.nodes[0].hosted_store(id, &aes()).unwrap();
     c.nodes[2].hosted_store(id, &aes()).unwrap();
     for (i, node) in c.nodes.iter().enumerate() {
-        assert_eq!(anti_entropy_sweep(node, &c.view(i)).await.unwrap(), 0, "node {}", i + 1);
+        assert_eq!(
+            anti_entropy_sweep(node, &c.view(i)).await.unwrap(),
+            0,
+            "node {}",
+            i + 1
+        );
     }
     assert!(!c.nodes[1].hosted_exists(id));
     // Each holder keeps what it had: nothing is merged or replaced automatically.
     assert_ne!(c.commitment(0, id), c.commitment(2, id));
     // Node 2 answers UNAVAILABLE for the id, so the driver goes to a node that holds a copy.
-    let e = c.signer(1).symmetric_encrypt(Request::new(pb::SymmetricRequest { key_id: id.into(), data: b"x".to_vec() })).await;
+    let e = c
+        .signer(1)
+        .symmetric_encrypt(Request::new(pb::SymmetricRequest {
+            key_id: id.into(),
+            data: b"x".to_vec(),
+        }))
+        .await;
     assert_eq!(e.unwrap_err().code(), Code::Unavailable);
 }
 
@@ -589,7 +747,10 @@ async fn the_sweep_pulls_each_missing_key_once() {
     let key = aes();
     c.nodes[0].hosted_store("rutli-sym-once", &key).unwrap();
     c.nodes[2].hosted_store("rutli-sym-once", &key).unwrap();
-    assert_eq!(anti_entropy_sweep(&c.nodes[1], &c.view(1)).await.unwrap(), 1);
+    assert_eq!(
+        anti_entropy_sweep(&c.nodes[1], &c.view(1)).await.unwrap(),
+        1
+    );
     assert_eq!(c.fetches[0].load(Ordering::SeqCst), 1);
     assert_eq!(c.fetches[2].load(Ordering::SeqCst), 1);
 }
@@ -604,17 +765,32 @@ async fn a_push_racing_an_honest_generation_is_refused() {
     let c = Cluster::new();
     let (id, cid) = ("rutli-sym-race", "genkey-honest");
     // Node 1 (honest leader) has fenced node 3.
-    c.as_peer(0, 2).ceremony_fence(cid, id, "genkey").await.unwrap();
+    c.as_peer(0, 2)
+        .ceremony_fence(cid, id, "genkey")
+        .await
+        .unwrap();
     // Node 2 (compromised) pushes under the leader's ceremony id, and under its own.
     let planted = aes();
     for ceremony in [cid, "genkey-mine"] {
-        let e = c.as_peer(1, 2).replicate_key(ceremony, id, "aes-256-gcm", &[], &wrapped(&c, 1, 2, id, &planted)).await;
+        let e = c
+            .as_peer(1, 2)
+            .replicate_key(
+                ceremony,
+                id,
+                "aes-256-gcm",
+                &[],
+                &wrapped(&c, 1, 2, id, &planted),
+            )
+            .await;
         assert!(matches!(e, Err(DaemonError::HostedPushRefused(_))), "{e:?}");
     }
     assert!(!c.nodes[2].hosted_exists(id));
     c.as_peer(0, 2).ceremony_release(cid, id).await.unwrap();
 
-    let (_, created, replicas) = generate_hosted_key(&c.nodes[0], &c.view(0), id, HostedSpec::Aes256Gcm, 2).await.unwrap();
+    let (_, created, replicas) =
+        generate_hosted_key(&c.nodes[0], &c.view(0), id, HostedSpec::Aes256Gcm, 2)
+            .await
+            .unwrap();
     assert!(created);
     assert_eq!(replicas, 3);
     assert_eq!(c.commitment(2, id), c.commitment(0, id));
@@ -630,9 +806,22 @@ async fn a_peer_that_fences_a_generation_itself_cannot_plant_over_another_copy()
     let id = "rutli-sym-self-fence";
     c.nodes[0].hosted_store(id, &aes()).unwrap();
     let evil = c.as_peer(1, 2);
-    evil.ceremony_fence("genkey-evil", id, "genkey").await.unwrap();
-    let e = evil.replicate_key("genkey-evil", id, "aes-256-gcm", &[], &wrapped(&c, 1, 2, id, &aes())).await;
-    assert!(matches!(e, Err(DaemonError::HostedConflict { .. })), "{e:?}");
+    evil.ceremony_fence("genkey-evil", id, "genkey")
+        .await
+        .unwrap();
+    let e = evil
+        .replicate_key(
+            "genkey-evil",
+            id,
+            "aes-256-gcm",
+            &[],
+            &wrapped(&c, 1, 2, id, &aes()),
+        )
+        .await;
+    assert!(
+        matches!(e, Err(DaemonError::HostedConflict { .. })),
+        "{e:?}"
+    );
     assert!(!c.nodes[2].hosted_exists(id));
 }
 
@@ -647,23 +836,44 @@ async fn a_fenced_push_into_an_id_nobody_holds_spreads_when_the_attacker_keeps_a
     let id = "rutli-sym-unrequested";
     let planted = aes();
     let evil = c.as_peer(1, 2);
-    evil.ceremony_fence("genkey-squat", id, "genkey").await.unwrap();
-    evil.replicate_key("genkey-squat", id, "aes-256-gcm", &[], &wrapped(&c, 1, 2, id, &planted)).await.unwrap();
+    evil.ceremony_fence("genkey-squat", id, "genkey")
+        .await
+        .unwrap();
+    evil.replicate_key(
+        "genkey-squat",
+        id,
+        "aes-256-gcm",
+        &[],
+        &wrapped(&c, 1, 2, id, &planted),
+    )
+    .await
+    .unwrap();
     evil.ceremony_release("genkey-squat", id).await.unwrap();
     assert!(c.nodes[2].hosted_exists(id));
 
     // With the planted copy alone, an honest generation refuses (UNAVAILABLE) rather than adopt it
     // or mint a second key.
     let e = generate_hosted_key(&c.nodes[0], &c.view(0), id, HostedSpec::Aes256Gcm, 2).await;
-    assert!(matches!(e, Err(DaemonError::HostedUnconfirmed { .. })), "{e:?}");
+    assert!(
+        matches!(e, Err(DaemonError::HostedUnconfirmed { .. })),
+        "{e:?}"
+    );
     assert!(!c.nodes[0].hosted_exists(id));
 
     // The attacker keeps the same material itself: two agreeing peers. The honest node pulls it,
     // and a generation adopts it.
     c.nodes[1].hosted_store(id, &planted).unwrap();
-    assert!(repair_hosted_key(&c.nodes[0], &c.view(0), id).await.unwrap());
-    assert_eq!(c.nodes[0].hosted_load(id).unwrap().private_der, planted.private_der);
-    let (got, created, _) = generate_hosted_key(&c.nodes[0], &c.view(0), id, HostedSpec::Aes256Gcm, 2).await.unwrap();
+    assert!(repair_hosted_key(&c.nodes[0], &c.view(0), id)
+        .await
+        .unwrap());
+    assert_eq!(
+        c.nodes[0].hosted_load(id).unwrap().private_der,
+        planted.private_der
+    );
+    let (got, created, _) =
+        generate_hosted_key(&c.nodes[0], &c.view(0), id, HostedSpec::Aes256Gcm, 2)
+            .await
+            .unwrap();
     assert!(!created);
     assert_eq!(got.private_der, planted.private_der);
 }
@@ -676,11 +886,17 @@ async fn a_rollback_purge_never_removes_a_key_that_was_there_before() {
     let id = "rutli-sym-preexisting";
     c.nodes[1].hosted_store(id, &aes()).unwrap();
     let leader = c.as_peer(0, 1);
-    leader.ceremony_fence("genkey-p", id, "genkey").await.unwrap();
+    leader
+        .ceremony_fence("genkey-p", id, "genkey")
+        .await
+        .unwrap();
     assert!(leader.purge_key("genkey-p", id).await.is_err());
     assert!(c.nodes[1].hosted_exists(id));
     let empty = c.as_peer(0, 2);
-    empty.ceremony_fence("genkey-p", id, "genkey").await.unwrap();
+    empty
+        .ceremony_fence("genkey-p", id, "genkey")
+        .await
+        .unwrap();
     assert!(!empty.purge_key("genkey-p", id).await.unwrap());
 }
 
@@ -696,23 +912,43 @@ async fn the_leader_writes_a_new_key_only_after_the_quorum_holds_it() {
     let view = c.view_with(0, move |_| {
         let (n, s) = (leader_node.clone(), s2.clone());
         Hooks {
-            before_replicate: Some(Box::new(move || s.lock().unwrap().push(n.hosted_exists("rutli-sym-late-write")))),
+            before_replicate: Some(Box::new(move || {
+                s.lock()
+                    .unwrap()
+                    .push(n.hosted_exists("rutli-sym-late-write"))
+            })),
             ..Hooks::default()
         }
     });
-    generate_hosted_key(&c.nodes[0], &view, id, HostedSpec::Aes256Gcm, 2).await.unwrap();
-    assert_eq!(*seen.lock().unwrap(), vec![false, false], "no leader copy while replicas are pushed");
+    generate_hosted_key(&c.nodes[0], &view, id, HostedSpec::Aes256Gcm, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![false, false],
+        "no leader copy while replicas are pushed"
+    );
     assert!(c.nodes[0].hosted_exists(id));
 
     // Row 1: every push fails (the leader "dies" before any replica lands). Nothing is on any disk,
     // and a retry mints cleanly.
     let id = "rutli-sym-no-replica";
-    let failing = c.view_with(0, |_| Hooks { on_replicate: Some(Box::new(|| Err(down()))), ..Hooks::default() });
-    assert!(generate_hosted_key(&c.nodes[0], &failing, id, HostedSpec::Aes256Gcm, 2).await.is_err());
+    let failing = c.view_with(0, |_| Hooks {
+        on_replicate: Some(Box::new(|| Err(down()))),
+        ..Hooks::default()
+    });
+    assert!(
+        generate_hosted_key(&c.nodes[0], &failing, id, HostedSpec::Aes256Gcm, 2)
+            .await
+            .is_err()
+    );
     for (i, node) in c.nodes.iter().enumerate() {
         assert!(!node.hosted_exists(id), "node {}", i + 1);
     }
-    let (_, created, replicas) = generate_hosted_key(&c.nodes[2], &c.view(2), id, HostedSpec::Aes256Gcm, 2).await.unwrap();
+    let (_, created, replicas) =
+        generate_hosted_key(&c.nodes[2], &c.view(2), id, HostedSpec::Aes256Gcm, 2)
+            .await
+            .unwrap();
     assert!(created);
     assert_eq!(replicas, 3);
 }
@@ -732,7 +968,10 @@ async fn an_unreachable_node_keeps_its_copy_after_a_rollback() {
         Hooks {
             on_replicate: Some(Box::new(move || {
                 d.store(true, Ordering::SeqCst); // node 2 drops off after taking its replica
-                Err(DaemonError::HostedConflict { key_id: "rutli-sym-left-behind".into(), detail: "x".into() })
+                Err(DaemonError::HostedConflict {
+                    key_id: "rutli-sym-left-behind".into(),
+                    detail: "x".into(),
+                })
             })),
             ..Hooks::default()
         }
@@ -742,7 +981,10 @@ async fn an_unreachable_node_keeps_its_copy_after_a_rollback() {
         Err(DaemonError::HostedConflict { .. })
     ));
     assert!(!c.nodes[0].hosted_exists(id));
-    assert!(c.nodes[1].hosted_exists(id), "the purge did not reach node 2");
+    assert!(
+        c.nodes[1].hosted_exists(id),
+        "the purge did not reach node 2"
+    );
 }
 
 /// Mixed versions, emulated with the calls a 0.4.0 node makes (its RPCs are unchanged): a 0.4.0
@@ -758,7 +1000,15 @@ async fn mixed_version_sequences() {
     for j in [1, 2] {
         let to = c.as_peer(0, j);
         to.ceremony_fence("genkey-old", id, "genkey").await.unwrap();
-        to.replicate_key("genkey-old", id, "aes-256-gcm", &[], &wrapped(&c, 0, j, id, &key)).await.unwrap();
+        to.replicate_key(
+            "genkey-old",
+            id,
+            "aes-256-gcm",
+            &[],
+            &wrapped(&c, 0, j, id, &key),
+        )
+        .await
+        .unwrap();
         to.ceremony_release("genkey-old", id).await.unwrap();
     }
     assert_eq!(c.commitment(2, id), c.commitment(0, id));
@@ -766,16 +1016,30 @@ async fn mixed_version_sequences() {
     // Its sweep pushes a key node 3 lacks: refused; node 3 pulls it once two nodes hold it.
     let id = "rutli-sym-old-sweep";
     c.nodes[0].hosted_store(id, &key).unwrap();
-    let e = c.as_peer(0, 2).replicate_key("repair-1", id, "aes-256-gcm", &[], &wrapped(&c, 0, 2, id, &key)).await;
+    let e = c
+        .as_peer(0, 2)
+        .replicate_key(
+            "repair-1",
+            id,
+            "aes-256-gcm",
+            &[],
+            &wrapped(&c, 0, 2, id, &key),
+        )
+        .await;
     assert!(matches!(e, Err(DaemonError::HostedPushRefused(_))), "{e:?}");
     c.nodes[1].hosted_store(id, &key).unwrap();
-    assert_eq!(anti_entropy_sweep(&c.nodes[2], &c.view(2)).await.unwrap(), 1);
+    assert_eq!(
+        anti_entropy_sweep(&c.nodes[2], &c.view(2)).await.unwrap(),
+        1
+    );
 
     // A 0.4.0 node that lacks a key takes it from the first peer that serves it (old FetchKey).
     let id = "rutli-sym-old-pull";
     c.nodes[1].hosted_store(id, &key).unwrap();
     let (spec, _, w) = c.as_peer(0, 1).fetch_key(id).await.unwrap();
-    let pulled = c.nodes[0].hosted_unwrap(id, HostedSpec::parse(&spec).unwrap(), &w).unwrap();
+    let pulled = c.nodes[0]
+        .hosted_unwrap(id, HostedSpec::parse(&spec).unwrap(), &w)
+        .unwrap();
     c.nodes[0].hosted_store(id, &pulled).unwrap();
     assert_eq!(c.commitment(0, id), c.commitment(1, id));
 }
@@ -783,10 +1047,21 @@ async fn mixed_version_sequences() {
 /// The refusals are counted under their reasons, and a rollback that missed a node is counted.
 #[tokio::test]
 async fn refusals_and_incomplete_rollbacks_are_counted() {
-    let handle = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder().expect("one recorder per test binary");
+    let handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .install_recorder()
+        .expect("one recorder per test binary");
     let c = Cluster::new();
     let id = "rutli-sym-counted";
-    let _ = c.as_peer(0, 1).replicate_key("repair-x", id, "aes-256-gcm", &[], &wrapped(&c, 0, 1, id, &aes())).await;
+    let _ = c
+        .as_peer(0, 1)
+        .replicate_key(
+            "repair-x",
+            id,
+            "aes-256-gcm",
+            &[],
+            &wrapped(&c, 0, 1, id, &aes()),
+        )
+        .await;
     let down2 = c.down[1].clone();
     let view = c.view_with(0, move |j| {
         if j != 2 {
@@ -796,19 +1071,41 @@ async fn refusals_and_incomplete_rollbacks_are_counted() {
         Hooks {
             on_replicate: Some(Box::new(move || {
                 d.store(true, Ordering::SeqCst);
-                Err(DaemonError::HostedConflict { key_id: "rutli-sym-counted-2".into(), detail: "x".into() })
+                Err(DaemonError::HostedConflict {
+                    key_id: "rutli-sym-counted-2".into(),
+                    detail: "x".into(),
+                })
             })),
             ..Hooks::default()
         }
     });
-    let _ = generate_hosted_key(&c.nodes[0], &view, "rutli-sym-counted-2", HostedSpec::Aes256Gcm, 2).await;
+    let _ = generate_hosted_key(
+        &c.nodes[0],
+        &view,
+        "rutli-sym-counted-2",
+        HostedSpec::Aes256Gcm,
+        2,
+    )
+    .await;
     let out = handle.render();
     let value = |prefix: &str| -> f64 {
-        out.lines().find_map(|l| l.strip_prefix(prefix)).and_then(|v| v.trim().parse().ok()).unwrap_or(0.0)
+        out.lines()
+            .find_map(|l| l.strip_prefix(prefix))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0.0)
     };
-    assert!(value(r#"rutli_hosted_replication_refusals_total{reason="unfenced"} "#) >= 1.0, "{out}");
-    assert!(value(r#"rutli_hosted_replication_refusals_total{reason="generate-conflict"} "#) >= 1.0, "{out}");
-    assert!(value("rutli_hosted_rollback_incomplete_total ") >= 1.0, "{out}");
+    assert!(
+        value(r#"rutli_hosted_replication_refusals_total{reason="unfenced"} "#) >= 1.0,
+        "{out}"
+    );
+    assert!(
+        value(r#"rutli_hosted_replication_refusals_total{reason="generate-conflict"} "#) >= 1.0,
+        "{out}"
+    );
+    assert!(
+        value("rutli_hosted_rollback_incomplete_total ") >= 1.0,
+        "{out}"
+    );
 }
 
 /// A 0.4.0 node's anti-entropy push (a fresh "repair-…" ceremony id, no fence) is refused; an
@@ -818,20 +1115,56 @@ async fn unfenced_identical_and_conflicting_pushes() {
     let c = Cluster::new();
     let id = "rutli-sym-push";
     let key = aes();
-    let e = c.as_peer(0, 1).replicate_key("repair-0d6b9a3e", id, "aes-256-gcm", &[], &wrapped(&c, 0, 1, id, &key)).await;
+    let e = c
+        .as_peer(0, 1)
+        .replicate_key(
+            "repair-0d6b9a3e",
+            id,
+            "aes-256-gcm",
+            &[],
+            &wrapped(&c, 0, 1, id, &key),
+        )
+        .await;
     assert!(matches!(e, Err(DaemonError::HostedPushRefused(_))), "{e:?}");
-    assert_eq!(tonic::Status::from(e.unwrap_err()).code(), Code::FailedPrecondition);
+    assert_eq!(
+        tonic::Status::from(e.unwrap_err()).code(),
+        Code::FailedPrecondition
+    );
 
     c.nodes[1].hosted_store(id, &key).unwrap();
-    let same = c.as_peer(0, 1).replicate_key("repair-1", id, "aes-256-gcm", &[], &wrapped(&c, 0, 1, id, &key)).await.unwrap();
+    let same = c
+        .as_peer(0, 1)
+        .replicate_key(
+            "repair-1",
+            id,
+            "aes-256-gcm",
+            &[],
+            &wrapped(&c, 0, 1, id, &key),
+        )
+        .await
+        .unwrap();
     assert_eq!(Some(same), c.commitment(1, id));
 
-    let e = c.as_peer(0, 1).replicate_key("repair-2", id, "aes-256-gcm", &[], &wrapped(&c, 0, 1, id, &aes())).await;
+    let e = c
+        .as_peer(0, 1)
+        .replicate_key(
+            "repair-2",
+            id,
+            "aes-256-gcm",
+            &[],
+            &wrapped(&c, 0, 1, id, &aes()),
+        )
+        .await;
     let e = e.unwrap_err();
     assert!(matches!(e, DaemonError::HostedConflict { .. }), "{e:?}");
     let s = tonic::Status::from(e);
     assert_eq!(s.code(), Code::Aborted);
-    assert_eq!(s.metadata().get("rutli-error").and_then(|v| v.to_str().ok()), Some("hosted-conflict"));
+    assert_eq!(
+        s.metadata()
+            .get("rutli-error")
+            .and_then(|v| v.to_str().ok()),
+        Some("hosted-conflict")
+    );
 }
 
 /// Timestamps in the future are refused on a push too (they would make the key refuse every
@@ -843,14 +1176,34 @@ async fn a_push_with_a_future_time_or_a_mismatched_rsa_key_is_refused() {
     let id = "rutli-sym-future-push";
     let mut key = aes();
     key.created_at = u64::MAX / 2000;
-    leader.ceremony_fence("genkey-f", id, "genkey").await.unwrap();
-    let e = leader.replicate_key("genkey-f", id, "aes-256-gcm", &[], &wrapped(&c, 0, 1, id, &key)).await.unwrap_err();
+    leader
+        .ceremony_fence("genkey-f", id, "genkey")
+        .await
+        .unwrap();
+    let e = leader
+        .replicate_key(
+            "genkey-f",
+            id,
+            "aes-256-gcm",
+            &[],
+            &wrapped(&c, 0, 1, id, &key),
+        )
+        .await
+        .unwrap_err();
     assert!(matches!(e, DaemonError::HostedInvalid(_)), "{e:?}");
     assert_eq!(tonic::Status::from(e).code(), Code::InvalidArgument);
     let mut key = aes();
     key.undeleted_at_ms = Some(rutli_cosigner::intent::now_ms() + 3_600_000);
     assert!(matches!(
-        leader.replicate_key("genkey-f", id, "aes-256-gcm", &[], &wrapped(&c, 0, 1, id, &key)).await,
+        leader
+            .replicate_key(
+                "genkey-f",
+                id,
+                "aes-256-gcm",
+                &[],
+                &wrapped(&c, 0, 1, id, &key)
+            )
+            .await,
         Err(DaemonError::HostedInvalid(_))
     ));
     assert!(!c.nodes[1].hosted_exists(id));
@@ -862,8 +1215,19 @@ async fn a_push_with_a_future_time_or_a_mismatched_rsa_key_is_refused() {
     mixed.public_der = b.public_der.clone();
     assert!(mixed.validate().is_err());
     assert!(a.validate().is_ok());
-    leader.ceremony_fence("genkey-r", id, "genkey").await.unwrap();
-    let e = leader.replicate_key("genkey-r", id, "rsa-2048-oaep-sha256", &[], &wrapped(&c, 0, 1, id, &mixed)).await;
+    leader
+        .ceremony_fence("genkey-r", id, "genkey")
+        .await
+        .unwrap();
+    let e = leader
+        .replicate_key(
+            "genkey-r",
+            id,
+            "rsa-2048-oaep-sha256",
+            &[],
+            &wrapped(&c, 0, 1, id, &mixed),
+        )
+        .await;
     assert!(e.is_err(), "{e:?}");
     assert!(!c.nodes[1].hosted_exists(id));
 }
@@ -897,12 +1261,23 @@ async fn a_conflict_aborts_the_generation_even_with_the_quorum_met() {
             ..Hooks::default()
         }
     });
-    let e = generate_hosted_key(&c.nodes[0], &view, id, HostedSpec::Aes256Gcm, 2).await.unwrap_err();
+    let e = generate_hosted_key(&c.nodes[0], &view, id, HostedSpec::Aes256Gcm, 2)
+        .await
+        .unwrap_err();
     assert!(matches!(e, DaemonError::HostedConflict { .. }), "{e:?}");
     assert_eq!(tonic::Status::from(e).code(), Code::Aborted);
-    assert!(!c.nodes[0].hosted_exists(id), "the leader's copy is rolled back");
-    assert!(!c.nodes[1].hosted_exists(id), "node 2's copy from this generation is rolled back");
-    assert!(c.nodes[2].hosted_exists(id), "a copy the generation did not create stays");
+    assert!(
+        !c.nodes[0].hosted_exists(id),
+        "the leader's copy is rolled back"
+    );
+    assert!(
+        !c.nodes[1].hosted_exists(id),
+        "node 2's copy from this generation is rolled back"
+    );
+    assert!(
+        c.nodes[2].hosted_exists(id),
+        "a copy the generation did not create stays"
+    );
 
     // Node 2 refuses: it asks node 3 before it stores, and node 3 holds other material.
     let c = Cluster::new();
@@ -921,7 +1296,9 @@ async fn a_conflict_aborts_the_generation_even_with_the_quorum_met() {
             ..Hooks::default()
         }
     });
-    let e = generate_hosted_key(&c.nodes[0], &view, id, HostedSpec::Aes256Gcm, 2).await.unwrap_err();
+    let e = generate_hosted_key(&c.nodes[0], &view, id, HostedSpec::Aes256Gcm, 2)
+        .await
+        .unwrap_err();
     assert!(matches!(e, DaemonError::HostedConflict { .. }), "{e:?}");
     assert!(!c.nodes[0].hosted_exists(id) && !c.nodes[1].hosted_exists(id));
 }
@@ -947,11 +1324,20 @@ async fn a_04_conflict_text_and_a_lying_ack_both_abort() {
                 return Hooks::default();
             }
             let case = case.clone();
-            Hooks { on_replicate: Some(Box::new(move || (*case)())), ..Hooks::default() }
+            Hooks {
+                on_replicate: Some(Box::new(move || (*case)())),
+                ..Hooks::default()
+            }
         });
         let e = generate_hosted_key(&c.nodes[0], &view, &id, HostedSpec::Aes256Gcm, 2).await;
-        assert!(matches!(e, Err(DaemonError::HostedConflict { .. })), "case {n}: {e:?}");
-        assert!(!c.nodes[0].hosted_exists(&id) && !c.nodes[1].hosted_exists(&id), "case {n}: rolled back");
+        assert!(
+            matches!(e, Err(DaemonError::HostedConflict { .. })),
+            "case {n}: {e:?}"
+        );
+        assert!(
+            !c.nodes[0].hosted_exists(&id) && !c.nodes[1].hosted_exists(&id),
+            "case {n}: rolled back"
+        );
     }
 }
 
@@ -967,17 +1353,25 @@ async fn a_retry_after_a_leader_died_mid_generation_adopts_or_refuses_never_fork
     c.nodes[0].hosted_store(id, &key).unwrap();
     let dead = c.as_peer(0, 1);
     dead.ceremony_fence(cid, id, "genkey").await.unwrap();
-    dead.replicate_key(cid, id, "aes-256-gcm", &[], &wrapped(&c, 0, 1, id, &key)).await.unwrap();
+    dead.replicate_key(cid, id, "aes-256-gcm", &[], &wrapped(&c, 0, 1, id, &key))
+        .await
+        .unwrap();
     // Its fence on node 2 lapses (the orphan timeout); modelled by the release.
     dead.ceremony_release(cid, id).await.unwrap();
     c.set_down(0, true);
 
     // Retry on node 3 with node 1 down: one copy reachable — refused, nothing minted.
     let e = generate_hosted_key(&c.nodes[2], &c.view(2), id, HostedSpec::Aes256Gcm, 2).await;
-    assert!(matches!(e, Err(DaemonError::HostedUnconfirmed { .. })), "{e:?}");
+    assert!(
+        matches!(e, Err(DaemonError::HostedUnconfirmed { .. })),
+        "{e:?}"
+    );
     assert!(!c.nodes[2].hosted_exists(id));
     // The driver fails over to node 2, which holds it: the existing key, replicated to node 3.
-    let (got, created, replicas) = generate_hosted_key(&c.nodes[1], &c.view(1), id, HostedSpec::Aes256Gcm, 2).await.unwrap();
+    let (got, created, replicas) =
+        generate_hosted_key(&c.nodes[1], &c.view(1), id, HostedSpec::Aes256Gcm, 2)
+            .await
+            .unwrap();
     assert!(!created);
     assert_eq!(replicas, 2);
     assert_eq!(got.private_der, key.private_der);
@@ -989,7 +1383,10 @@ async fn a_retry_after_a_leader_died_mid_generation_adopts_or_refuses_never_fork
     let key2 = aes();
     c.nodes[0].hosted_store(id2, &key2).unwrap();
     c.nodes[1].hosted_store(id2, &key2).unwrap();
-    let (got, created, replicas) = generate_hosted_key(&c.nodes[2], &c.view(2), id2, HostedSpec::Aes256Gcm, 2).await.unwrap();
+    let (got, created, replicas) =
+        generate_hosted_key(&c.nodes[2], &c.view(2), id2, HostedSpec::Aes256Gcm, 2)
+            .await
+            .unwrap();
     assert!(!created);
     assert_eq!(replicas, 3);
     assert_eq!(got.private_der, key2.private_der);
@@ -1007,7 +1404,10 @@ async fn a_degraded_cluster_keeps_serving_and_heals_when_the_node_returns() {
     let c = Cluster::new();
     let id = "rutli-sym-degraded";
     c.set_down(2, true);
-    let (key, created, replicas) = generate_hosted_key(&c.nodes[0], &c.view(0), id, HostedSpec::Aes256Gcm, 2).await.unwrap();
+    let (key, created, replicas) =
+        generate_hosted_key(&c.nodes[0], &c.view(0), id, HostedSpec::Aes256Gcm, 2)
+            .await
+            .unwrap();
     assert!(created);
     assert_eq!(replicas, 2);
     let blob = key.encrypt_symmetric(b"degraded").unwrap();
@@ -1016,31 +1416,75 @@ async fn a_degraded_cluster_keeps_serving_and_heals_when_the_node_returns() {
     c.set_down(2, false);
     c.set_down(0, true);
     unconfirmed(repair_hosted_key(&c.nodes[2], &c.view(2), id).await);
-    assert_eq!(anti_entropy_sweep(&c.nodes[2], &c.view(2)).await.unwrap(), 0);
+    assert_eq!(
+        anti_entropy_sweep(&c.nodes[2], &c.view(2)).await.unwrap(),
+        0
+    );
     assert!(!c.nodes[2].hosted_exists(id));
-    let e = c.signer(2).symmetric_decrypt(Request::new(pb::SymmetricRequest { key_id: id.into(), data: blob.clone() })).await;
-    assert_eq!(e.unwrap_err().code(), Code::Unavailable, "the driver fails over to node 2");
+    let e = c
+        .signer(2)
+        .symmetric_decrypt(Request::new(pb::SymmetricRequest {
+            key_id: id.into(),
+            data: blob.clone(),
+        }))
+        .await;
+    assert_eq!(
+        e.unwrap_err().code(),
+        Code::Unavailable,
+        "the driver fails over to node 2"
+    );
     // Node 2 never loses or stops serving what it holds, and its sweep changes nothing.
-    assert_eq!(anti_entropy_sweep(&c.nodes[1], &c.view(1)).await.unwrap(), 0);
-    let out = c.signer(1).symmetric_decrypt(Request::new(pb::SymmetricRequest { key_id: id.into(), data: blob.clone() })).await;
+    assert_eq!(
+        anti_entropy_sweep(&c.nodes[1], &c.view(1)).await.unwrap(),
+        0
+    );
+    let out = c
+        .signer(1)
+        .symmetric_decrypt(Request::new(pb::SymmetricRequest {
+            key_id: id.into(),
+            data: blob.clone(),
+        }))
+        .await;
     assert_eq!(out.unwrap().into_inner().data, b"degraded");
 
     // A generation of a new key with only node 2 reachable from node 3 still commits (2 of 3).
-    let (_, created, replicas) =
-        generate_hosted_key(&c.nodes[2], &c.view(2), "rutli-sym-degraded-2", HostedSpec::Aes256Gcm, 2).await.unwrap();
+    let (_, created, replicas) = generate_hosted_key(
+        &c.nodes[2],
+        &c.view(2),
+        "rutli-sym-degraded-2",
+        HostedSpec::Aes256Gcm,
+        2,
+    )
+    .await
+    .unwrap();
     assert!(created);
     assert_eq!(replicas, 2);
 
     // Node 1 back: node 3 pulls the first key, node 1 the second; converged.
     c.set_down(0, false);
-    assert_eq!(anti_entropy_sweep(&c.nodes[2], &c.view(2)).await.unwrap(), 1);
-    assert_eq!(anti_entropy_sweep(&c.nodes[0], &c.view(0)).await.unwrap(), 1);
+    assert_eq!(
+        anti_entropy_sweep(&c.nodes[2], &c.view(2)).await.unwrap(),
+        1
+    );
+    assert_eq!(
+        anti_entropy_sweep(&c.nodes[0], &c.view(0)).await.unwrap(),
+        1
+    );
     for (i, node) in c.nodes.iter().enumerate() {
         assert_eq!(anti_entropy_sweep(node, &c.view(i)).await.unwrap(), 0);
         assert_eq!(c.commitment(i, id), c.commitment(1, id));
-        assert_eq!(c.commitment(i, "rutli-sym-degraded-2"), c.commitment(1, "rutli-sym-degraded-2"));
+        assert_eq!(
+            c.commitment(i, "rutli-sym-degraded-2"),
+            c.commitment(1, "rutli-sym-degraded-2")
+        );
     }
-    let out = c.signer(2).symmetric_decrypt(Request::new(pb::SymmetricRequest { key_id: id.into(), data: blob })).await;
+    let out = c
+        .signer(2)
+        .symmetric_decrypt(Request::new(pb::SymmetricRequest {
+            key_id: id.into(),
+            data: blob,
+        }))
+        .await;
     assert_eq!(out.unwrap().into_inner().data, b"degraded");
 }
 
@@ -1050,19 +1494,33 @@ async fn a_degraded_cluster_keeps_serving_and_heals_when_the_node_returns() {
 #[tokio::test]
 async fn a_fenced_push_is_accepted_with_the_third_node_unreachable() {
     let c = Cluster::new();
-    c.nodes[2].hosted_store("rutli-sym-elsewhere", &aes()).unwrap(); // node 3 holds other material...
+    c.nodes[2]
+        .hosted_store("rutli-sym-elsewhere", &aes())
+        .unwrap(); // node 3 holds other material...
     c.set_down(2, true); // ...and is down
     let leader = c.as_peer(0, 1);
     let key = aes();
-    leader.ceremony_fence("genkey-d", "rutli-sym-elsewhere", "genkey").await.unwrap();
     leader
-        .replicate_key("genkey-d", "rutli-sym-elsewhere", "aes-256-gcm", &[], &wrapped(&c, 0, 1, "rutli-sym-elsewhere", &key))
+        .ceremony_fence("genkey-d", "rutli-sym-elsewhere", "genkey")
+        .await
+        .unwrap();
+    leader
+        .replicate_key(
+            "genkey-d",
+            "rutli-sym-elsewhere",
+            "aes-256-gcm",
+            &[],
+            &wrapped(&c, 0, 1, "rutli-sym-elsewhere", &key),
+        )
         .await
         .unwrap();
     // When node 3 returns, the sweeps report the conflict and change nothing.
     c.set_down(2, false);
     anti_entropy_sweep(&c.nodes[1], &c.view(1)).await.unwrap();
-    assert_ne!(c.commitment(1, "rutli-sym-elsewhere"), c.commitment(2, "rutli-sym-elsewhere"));
+    assert_ne!(
+        c.commitment(1, "rutli-sym-elsewhere"),
+        c.commitment(2, "rutli-sym-elsewhere")
+    );
 }
 
 // ── what the driver will compare after a generation ─────────────────────────────────────────────
@@ -1074,15 +1532,25 @@ async fn generate_reports_the_commitment_and_key_info_local_only_does_not_repair
     let c = Cluster::new();
     let svc = c.signer(0);
     let reply = svc
-        .generate_key(Request::new(pb::GenerateKeyRequest { key_id: "rutli-enc-cmp".into(), spec: "rsa-2048-oaep-sha256".into(), intent: None }))
+        .generate_key(Request::new(pb::GenerateKeyRequest {
+            key_id: "rutli-enc-cmp".into(),
+            spec: "rsa-2048-oaep-sha256".into(),
+            intent: None,
+        }))
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(Some(reply.commitment.clone()), c.commitment(0, "rutli-enc-cmp"));
+    assert_eq!(
+        Some(reply.commitment.clone()),
+        c.commitment(0, "rutli-enc-cmp")
+    );
     for i in (0..c.nodes.len()).rev() {
         let info = c
             .signer(i)
-            .key_info(Request::new(pb::KeyInfoRequest { key_id: "rutli-enc-cmp".into(), local_only: true }))
+            .key_info(Request::new(pb::KeyInfoRequest {
+                key_id: "rutli-enc-cmp".into(),
+                local_only: true,
+            }))
             .await
             .unwrap()
             .into_inner();
@@ -1098,19 +1566,28 @@ async fn generate_reports_the_commitment_and_key_info_local_only_does_not_repair
     c.nodes[2].hosted_store("rutli-sym-cmp", &key).unwrap();
     let svc1 = c.signer(1);
     let local = svc1
-        .key_info(Request::new(pb::KeyInfoRequest { key_id: "rutli-sym-cmp".into(), local_only: true }))
+        .key_info(Request::new(pb::KeyInfoRequest {
+            key_id: "rutli-sym-cmp".into(),
+            local_only: true,
+        }))
         .await
         .unwrap()
         .into_inner();
     assert!(!local.exists);
     assert!(!c.nodes[1].hosted_exists("rutli-sym-cmp"));
     let repaired = svc1
-        .key_info(Request::new(pb::KeyInfoRequest { key_id: "rutli-sym-cmp".into(), local_only: false }))
+        .key_info(Request::new(pb::KeyInfoRequest {
+            key_id: "rutli-sym-cmp".into(),
+            local_only: false,
+        }))
         .await
         .unwrap()
         .into_inner();
     assert!(repaired.exists);
-    assert!(repaired.public_key_der.is_empty(), "a symmetric key has no public half");
+    assert!(
+        repaired.public_key_der.is_empty(),
+        "a symmetric key has no public half"
+    );
     assert_eq!(Some(repaired.commitment), c.commitment(0, "rutli-sym-cmp"));
 }
 
@@ -1136,17 +1613,26 @@ async fn a_held_key_with_a_future_time_is_reported() {
 async fn a_completed_generation_cannot_be_purged_by_re_fencing_its_ceremony_id() {
     let c = Cluster::build(3, std::time::Duration::ZERO, |_, _, _| Hooks::default());
     let key = aes();
-    for (id, released) in [("rutli-sym-refence-a", true), ("rutli-sym-refence-b", false)] {
+    for (id, released) in [
+        ("rutli-sym-refence-a", true),
+        ("rutli-sym-refence-b", false),
+    ] {
         let cid = format!("genkey-{id}");
         let leader = c.as_peer(0, 2);
         leader.ceremony_fence(&cid, id, "genkey").await.unwrap();
-        leader.replicate_key(&cid, id, "aes-256-gcm", &[], &wrapped(&c, 0, 2, id, &key)).await.unwrap();
+        leader
+            .replicate_key(&cid, id, "aes-256-gcm", &[], &wrapped(&c, 0, 2, id, &key))
+            .await
+            .unwrap();
         if released {
             leader.ceremony_release(&cid, id).await.unwrap();
         } else {
             // The release never arrives; another generation preempts the lapsed guard and ends.
             let other = c.as_peer(0, 2);
-            other.ceremony_fence("genkey-other", id, "genkey").await.unwrap();
+            other
+                .ceremony_fence("genkey-other", id, "genkey")
+                .await
+                .unwrap();
             other.ceremony_release("genkey-other", id).await.unwrap();
         }
         let evil = c.as_peer(1, 2);
@@ -1169,13 +1655,23 @@ async fn a_mint_needs_enough_not_held_answers() {
     c.set_down(0, true);
     c.set_down(1, true);
     let e = generate_hosted_key(&c.nodes[2], &c.view(2), id, HostedSpec::Aes256Gcm, 2).await;
-    assert!(matches!(e, Err(DaemonError::HostedUnconfirmed { .. })), "{e:?}");
+    assert!(
+        matches!(e, Err(DaemonError::HostedUnconfirmed { .. })),
+        "{e:?}"
+    );
     for (i, node) in c.nodes.iter().enumerate().skip(2) {
         assert!(!node.hosted_exists(id), "node {}", i + 1);
     }
     c.set_down(1, false);
-    let (_, created, _) =
-        generate_hosted_key(&c.nodes[2], &c.view(2), "rutli-sym-five-new", HostedSpec::Aes256Gcm, 2).await.unwrap();
+    let (_, created, _) = generate_hosted_key(
+        &c.nodes[2],
+        &c.view(2),
+        "rutli-sym-five-new",
+        HostedSpec::Aes256Gcm,
+        2,
+    )
+    .await
+    .unwrap();
     assert!(created);
 }
 
@@ -1196,12 +1692,18 @@ async fn ecdh_derive_serves_only_confirmed_material() {
     let c = Cluster::new();
     let id = "rutli-enc-ecdh-paths";
     let key = HostedKey::generate(HostedSpec::EcP256, rutli_cosigner::hosted::now_secs()).unwrap();
-    let other = HostedKey::generate(HostedSpec::EcP256, rutli_cosigner::hosted::now_secs()).unwrap();
+    let other =
+        HostedKey::generate(HostedSpec::EcP256, rutli_cosigner::hosted::now_secs()).unwrap();
     let spki = other.public_key_der().unwrap();
     let point = spki[spki.len() - 65..].to_vec();
     c.nodes[0].hosted_store(id, &key).unwrap();
     let svc = c.signer(1);
-    let ask = || svc.ecdh_derive(Request::new(pb::EcdhDeriveRequest { key_id: id.into(), peer_point: point.clone() }));
+    let ask = || {
+        svc.ecdh_derive(Request::new(pb::EcdhDeriveRequest {
+            key_id: id.into(),
+            peer_point: point.clone(),
+        }))
+    };
     assert_eq!(ask().await.unwrap_err().code(), Code::Unavailable);
     assert!(!c.nodes[1].hosted_exists(id));
     c.nodes[2].hosted_store(id, &key).unwrap();
@@ -1219,11 +1721,17 @@ async fn the_sweep_bounds_its_pulls_and_pulls_real_keys_first() {
     c.nodes[0].hosted_store(id, &key).unwrap();
     c.nodes[2].hosted_store(id, &key).unwrap();
     let made_up: Vec<String> = (0..300).map(|i| format!("rutli-sym-aaa-{i:03}")).collect();
-    let view = c.view_with(1, |j| Hooks { extra_inventory: if j == 0 { made_up.clone() } else { Vec::new() }, ..Hooks::default() });
+    let view = c.view_with(1, |j| Hooks {
+        extra_inventory: if j == 0 { made_up.clone() } else { Vec::new() },
+        ..Hooks::default()
+    });
     assert_eq!(anti_entropy_sweep(&c.nodes[1], &view).await.unwrap(), 1);
     assert!(c.nodes[1].hosted_exists(id));
     let asked = c.fetches[2].load(Ordering::SeqCst);
-    assert!(asked <= 1 + rutli_cosigner::orchestrator::SWEEP_MAX_PULLS_PER_PEER, "{asked} fan-outs");
+    assert!(
+        asked <= 1 + rutli_cosigner::orchestrator::SWEEP_MAX_PULLS_PER_PEER,
+        "{asked} fan-outs"
+    );
 }
 
 /// A rollback that arrives while a push of the same generation is still checking its peers ends
@@ -1239,7 +1747,9 @@ async fn a_rollback_during_a_pushs_peer_check_leaves_no_orphan() {
         let n2 = nodes[1].clone();
         Hooks {
             on_fetch: Some(Box::new(move || {
-                assert!(!n2.hosted_rollback_purge_from(cid, id, Some("cosigner1")).unwrap());
+                assert!(!n2
+                    .hosted_rollback_purge_from(cid, id, Some("cosigner1"))
+                    .unwrap());
                 None
             })),
             ..Hooks::default()
@@ -1247,7 +1757,9 @@ async fn a_rollback_during_a_pushs_peer_check_leaves_no_orphan() {
     });
     let leader = c.as_peer(0, 1);
     leader.ceremony_fence(cid, id, "genkey").await.unwrap();
-    let e = leader.replicate_key(cid, id, "aes-256-gcm", &[], &wrapped(&c, 0, 1, id, &aes())).await;
+    let e = leader
+        .replicate_key(cid, id, "aes-256-gcm", &[], &wrapped(&c, 0, 1, id, &aes()))
+        .await;
     assert!(matches!(e, Err(DaemonError::HostedPushRefused(_))), "{e:?}");
     assert!(!c.nodes[1].hosted_exists(id));
 }
@@ -1274,11 +1786,18 @@ async fn a_key_arriving_during_a_pushs_peer_check_is_not_overwritten() {
     });
     let leader = c.as_peer(0, 1);
     leader.ceremony_fence(cid, id, "genkey").await.unwrap();
-    let e = leader.replicate_key(cid, id, "aes-256-gcm", &[], &wrapped(&c, 0, 1, id, &aes())).await;
-    assert!(matches!(e, Err(DaemonError::HostedConflict { .. })), "{e:?}");
-    assert_eq!(c.nodes[1].hosted_load(id).unwrap().private_der, arrived.private_der);
+    let e = leader
+        .replicate_key(cid, id, "aes-256-gcm", &[], &wrapped(&c, 0, 1, id, &aes()))
+        .await;
+    assert!(
+        matches!(e, Err(DaemonError::HostedConflict { .. })),
+        "{e:?}"
+    );
+    assert_eq!(
+        c.nodes[1].hosted_load(id).unwrap().private_der,
+        arrived.private_der
+    );
 }
-
 
 /// Five nodes, four peers each listing a hundred made-up ids: the total bound is hit, and the real
 /// key two peers list (sorting last by name) is still pulled, because ids more peers list go first.
@@ -1291,7 +1810,9 @@ async fn the_sweep_pulls_a_key_two_peers_list_before_made_up_ids() {
         c.nodes[i].hosted_store(id, &key).unwrap();
     }
     let view = c.view_with(1, |j| Hooks {
-        extra_inventory: (0..100).map(|i| format!("rutli-sym-aaa-{j}-{i:03}")).collect(),
+        extra_inventory: (0..100)
+            .map(|i| format!("rutli-sym-aaa-{j}-{i:03}"))
+            .collect(),
         ..Hooks::default()
     });
     assert_eq!(anti_entropy_sweep(&c.nodes[1], &view).await.unwrap(), 1);
@@ -1309,7 +1830,16 @@ async fn fenced_pushes_are_held_to_the_fan_out_ceiling() {
         let id = format!("rutli-sym-flood-{i:03}");
         let cid = format!("genkey-flood-{i:03}");
         evil.ceremony_fence(&cid, &id, "genkey").await.unwrap();
-        match evil.replicate_key(&cid, &id, "aes-256-gcm", &[], &wrapped(&c, 2, 1, &id, &aes())).await {
+        match evil
+            .replicate_key(
+                &cid,
+                &id,
+                "aes-256-gcm",
+                &[],
+                &wrapped(&c, 2, 1, &id, &aes()),
+            )
+            .await
+        {
             Ok(_) => {}
             Err(DaemonError::HostedUnconfirmed { .. }) => throttled += 1,
             Err(e) => panic!("{e:?}"),

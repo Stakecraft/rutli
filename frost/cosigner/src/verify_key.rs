@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! `rutli-cosigner verify-key`: does every cosigner hold a consistent share of the key the operator
@@ -38,9 +38,9 @@
 
 use std::collections::BTreeSet;
 
-use frost_ed25519 as frost;
 use frost::keys::PublicKeyPackage;
 use frost::Identifier;
+use frost_ed25519 as frost;
 use serde::Serialize;
 
 use crate::pb::KeyStatusReply;
@@ -117,7 +117,9 @@ impl VerifyReport {
         if !self.ok {
             return None;
         }
-        self.group_verifying_key.as_ref().and_then(|h| hex::decode(h).ok()?.try_into().ok())
+        self.group_verifying_key
+            .as_ref()
+            .and_then(|h| hex::decode(h).ok()?.try_into().ok())
     }
 
     /// Record one `CeremonySignTest` result: `(message, signature)` as the cluster returned them
@@ -134,7 +136,9 @@ impl VerifyReport {
         let outcome = result.and_then(|(message, sig)| {
             let group = self.agreed_group_key().ok_or("no agreed group key")?;
             if message != expected {
-                return Err("the cluster signed a different message than the ceremony test digest".into());
+                return Err(
+                    "the cluster signed a different message than the ceremony test digest".into(),
+                );
             }
             if signature_verifies(&group, &expected, &sig) {
                 Ok(())
@@ -146,7 +150,9 @@ impl VerifyReport {
             self.ok = false;
             // A report with a problem names no fingerprint as the cluster's.
             self.fingerprint = None;
-            self.problems.push(format!("sign test by {signers:?} (led by node {leader}): {e}"));
+            self.problems.push(format!(
+                "sign test by {signers:?} (led by node {leader}): {e}"
+            ));
         }
         self.sign_test.push(SignRow {
             leader,
@@ -194,9 +200,14 @@ pub fn verify_message(ceremony_id: &str, key_id: &str) -> [u8; 34] {
 
 /// `verify_strict` of a 64-byte Ed25519 signature under a 32-byte public key.
 pub fn signature_verifies(public: &[u8; 32], message: &[u8], signature: &[u8]) -> bool {
-    let Ok(sig) = <[u8; 64]>::try_from(signature) else { return false };
+    let Ok(sig) = <[u8; 64]>::try_from(signature) else {
+        return false;
+    };
     ed25519_dalek::VerifyingKey::from_bytes(public)
-        .map(|vk| vk.verify_strict(message, &ed25519_dalek::Signature::from_bytes(&sig)).is_ok())
+        .map(|vk| {
+            vk.verify_strict(message, &ed25519_dalek::Signature::from_bytes(&sig))
+                .is_ok()
+        })
         .unwrap_or(false)
 }
 
@@ -223,7 +234,9 @@ pub fn check_views(
     let expected_ids: BTreeSet<u16> = roster.iter().copied().collect();
     let seen_ids: BTreeSet<u16> = views.iter().map(|v| v.identifier).collect();
     if seen_ids != expected_ids || views.len() != roster.len() {
-        problems.push(format!("asked nodes {seen_ids:?}, but the roster is {expected_ids:?}"));
+        problems.push(format!(
+            "asked nodes {seen_ids:?}, but the roster is {expected_ids:?}"
+        ));
     }
 
     let mut digests = BTreeSet::new();
@@ -293,20 +306,31 @@ pub fn check_views(
         ));
     }
     if epochs.len() > 1 {
-        problems.push(format!("nodes are on different epochs {epochs:?} — mixed sharings never combine"));
+        problems.push(format!(
+            "nodes are on different epochs {epochs:?} — mixed sharings never combine"
+        ));
     }
     if provenance.len() > 1 {
         problems.push(format!(
             "nodes disagree on provenance (origin, ceremony, refreshes, carried for, usage): {provenance:?}"
         ));
     }
-    let single = |set: &BTreeSet<String>| (set.len() == 1).then(|| set.iter().next().cloned()).flatten();
-    let (origin, ceremony_id, refresh_count, carried_for, recorded_usage) = match provenance.iter().next() {
-        Some((o, c, r, f, u)) if provenance.len() == 1 => {
-            (Some(o.clone()), Some(c.clone()), Some(*r), Some(f.clone()), Some(u.clone()))
-        }
-        _ => (None, None, None, None, None),
+    let single = |set: &BTreeSet<String>| {
+        (set.len() == 1)
+            .then(|| set.iter().next().cloned())
+            .flatten()
     };
+    let (origin, ceremony_id, refresh_count, carried_for, recorded_usage) =
+        match provenance.iter().next() {
+            Some((o, c, r, f, u)) if provenance.len() == 1 => (
+                Some(o.clone()),
+                Some(c.clone()),
+                Some(*r),
+                Some(f.clone()),
+                Some(u.clone()),
+            ),
+            _ => (None, None, None, None, None),
+        };
     let group_verifying_key = single(&groups);
     let fingerprint = group_verifying_key
         .as_ref()
@@ -328,7 +352,9 @@ pub fn check_views(
         refresh_count,
         carried_for,
         recorded_usage,
-        epoch: (epochs.len() == 1).then(|| epochs.iter().next().copied()).flatten(),
+        epoch: (epochs.len() == 1)
+            .then(|| epochs.iter().next().copied())
+            .flatten(),
         nodes: rows,
         sign_test: Vec::new(),
     }
@@ -353,7 +379,10 @@ fn check_one(
         .map_err(|_| "group key is not 32 bytes".to_string())?;
     row.fingerprint = crate::share_delivery::ed25519_fingerprint(&group);
     if let Some(expected) = expected_fingerprint.filter(|e| *e != row.fingerprint) {
-        return Err(format!("group key fingerprint {} is not the expected {expected}", row.fingerprint));
+        return Err(format!(
+            "group key fingerprint {} is not the expected {expected}",
+            row.fingerprint
+        ));
     }
     let pkp: PublicKeyPackage = serde_json::from_slice(&s.public_key_package)
         .map_err(|e| format!("unreadable public key package: {e}"))?;
@@ -369,11 +398,20 @@ fn check_one(
         .iter()
         .map(|&i| Identifier::try_from(i).map_err(|e| e.to_string()))
         .collect::<std::result::Result<_, _>>()?;
-    if pkp.verifying_shares().keys().copied().collect::<BTreeSet<_>>() != ids {
+    if pkp
+        .verifying_shares()
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        != ids
+    {
         return Err(format!("public key package is not for roster {roster:?}"));
     }
     if s.threshold != u32::from(threshold) {
-        return Err(format!("share threshold {} ≠ configured {threshold}", s.threshold));
+        return Err(format!(
+            "share threshold {} ≠ configured {threshold}",
+            s.threshold
+        ));
     }
     row.own_share_in_package = pkp
         .verifying_shares()
@@ -397,14 +435,22 @@ mod tests {
         let plan = sign_test_plan(&[1, 2, 3], 2);
         let subsets: Vec<Vec<u16>> = plan.iter().map(|(_, s)| s.clone()).collect();
         assert_eq!(subsets, vec![vec![1, 2], vec![1, 3], vec![2, 3]]);
-        assert_eq!(plan.iter().map(|(l, _)| *l).collect::<Vec<_>>(), vec![1, 2, 3], "the leader rotates");
+        assert_eq!(
+            plan.iter().map(|(l, _)| *l).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "the leader rotates"
+        );
         assert!(sign_test_plan(&[], 2).is_empty());
-        assert!(sign_test_plan(&[1, 2], 3).is_empty(), "a threshold above the roster has no subset");
+        assert!(
+            sign_test_plan(&[1, 2], 3).is_empty(),
+            "a threshold above the roster has no subset"
+        );
     }
 
     /// Statuses as three healthy nodes holding a 2-of-3 split of `seed` would report them.
     fn views(seed: [u8; 32]) -> (Vec<NodeView>, String) {
-        let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&seed, &[1, 2, 3], 2).unwrap();
+        let (shares, pkp) =
+            rutli_frost_core::dealer::split_ed25519_seed(&seed, &[1, 2, 3], 2).unwrap();
         let group = rutli_frost_core::dkg::group_verifying_key_bytes(&pkp).unwrap();
         let fp = crate::share_delivery::ed25519_fingerprint(&group);
         let views = shares
@@ -445,13 +491,26 @@ mod tests {
         assert!(r.ok, "{:?}", r.problems);
         assert!(r.agreed_group_key().is_some());
         assert_eq!(r.refresh_count, Some(0));
-        assert_eq!((r.carried_for.as_deref(), r.recorded_usage.as_deref()), (Some("namespace"), Some("namespace")));
+        assert_eq!(
+            (r.carried_for.as_deref(), r.recorded_usage.as_deref()),
+            (Some("namespace"), Some("namespace"))
+        );
         // The operator's fingerprint is compared in canonical form (2026-10-15 review, L2).
-        let r = check_views(KEY, Some(&format!(" {} ", fp.to_uppercase())), &[1, 2, 3], 2, &v);
+        let r = check_views(
+            KEY,
+            Some(&format!(" {} ", fp.to_uppercase())),
+            &[1, 2, 3],
+            2,
+            &v,
+        );
         assert!(r.ok, "{:?}", r.problems);
         assert_eq!(r.expected_fingerprint.as_deref(), Some(fp.as_str()));
         let r = check_views(KEY, Some("1220zz"), &[1, 2, 3], 2, &v);
-        assert!(!r.ok && r.problems.iter().any(|p| p.contains("not a 1220")), "{:?}", r.problems);
+        assert!(
+            !r.ok && r.problems.iter().any(|p| p.contains("not a 1220")),
+            "{:?}",
+            r.problems
+        );
     }
 
     #[test]
@@ -464,14 +523,24 @@ mod tests {
         // The wrong key everywhere.
         let (v, _) = views([2u8; 32]);
         let r = check_views(KEY, Some(&fp), &[1, 2, 3], 2, &v);
-        assert!(r.problems.iter().any(|p| p.contains("fingerprint")), "{:?}", r.problems);
+        assert!(
+            r.problems.iter().any(|p| p.contains("fingerprint")),
+            "{:?}",
+            r.problems
+        );
         // One node from a different split of the same key: same group key, different package.
         let (mut v, _) = views([1u8; 32]);
         let (other, _) = views([1u8; 32]);
         v.pop();
         v.push(other.into_iter().nth(2).unwrap());
         let r = check_views(KEY, Some(&fp), &[1, 2, 3], 2, &v);
-        assert!(r.problems.iter().any(|p| p.contains("different public key packages")), "{:?}", r.problems);
+        assert!(
+            r.problems
+                .iter()
+                .any(|p| p.contains("different public key packages")),
+            "{:?}",
+            r.problems
+        );
         // A node whose own share is not in the package (e.g. a mis-installed bundle).
         let (mut v, _) = views([1u8; 32]);
         let s1 = v[0].status.as_ref().unwrap().own_verifying_share.clone();
@@ -489,7 +558,11 @@ mod tests {
         let (mut v, _) = views([1u8; 32]);
         v[2].status.as_mut().unwrap().carried_for = "protocol".into();
         let r = check_views(KEY, Some(&fp), &[1, 2, 3], 2, &v);
-        assert!(r.problems.iter().any(|p| p.contains("carried for")), "{:?}", r.problems);
+        assert!(
+            r.problems.iter().any(|p| p.contains("carried for")),
+            "{:?}",
+            r.problems
+        );
         // Wrong configured threshold.
         let (v, _) = views([1u8; 32]);
         assert!(!check_views(KEY, Some(&fp), &[1, 2, 3], 3, &v).ok);
@@ -501,14 +574,26 @@ mod tests {
         let (v, fp) = views([1u8; 32]);
         let shown = check_views(KEY, None, &[1, 2, 3], 2, &v);
         assert!(shown.ok, "{:?}", shown.problems);
-        assert_eq!((shown.kind, shown.expected_fingerprint.as_deref()), ("frost", None));
+        assert_eq!(
+            (shown.kind, shown.expected_fingerprint.as_deref()),
+            ("frost", None)
+        );
         assert_eq!(shown.fingerprint.as_deref(), Some(fp.as_str()));
-        assert!(shown.nodes.iter().all(|n| n.fingerprint == fp && n.own_share_in_package));
-        assert_eq!((shown.origin.as_deref(), shown.epoch, shown.threshold), (Some("dealer-split"), Some(0), 2));
+        assert!(shown
+            .nodes
+            .iter()
+            .all(|n| n.fingerprint == fp && n.own_share_in_package));
+        assert_eq!(
+            (shown.origin.as_deref(), shown.epoch, shown.threshold),
+            (Some("dealer-split"), Some(0), 2)
+        );
         // With the right expectation: the same report, plus the expectation.
         let verified = check_views(KEY, Some(&fp), &[1, 2, 3], 2, &v);
         let mut json = serde_json::to_value(&verified).unwrap();
-        assert_eq!(json.as_object_mut().unwrap().remove("expected_fingerprint"), Some(fp.clone().into()));
+        assert_eq!(
+            json.as_object_mut().unwrap().remove("expected_fingerprint"),
+            Some(fp.clone().into())
+        );
         assert_eq!(json, serde_json::to_value(&shown).unwrap());
 
         // Everything `verify-key` catches other than "not the expected key" is caught here too,
@@ -526,9 +611,25 @@ mod tests {
         let (other, other_fp) = views([2u8; 32]);
         v[2] = other.into_iter().nth(2).unwrap();
         let r = check_views(KEY, None, &[1, 2, 3], 2, &v);
-        assert!(!r.ok && r.fingerprint.is_none() && r.group_verifying_key.is_none(), "{:?}", r.problems);
-        assert!(r.problems.iter().any(|p| p.contains("different public key packages")), "{:?}", r.problems);
-        assert_eq!((r.nodes[0].fingerprint.as_str(), r.nodes[2].fingerprint.as_str()), (fp.as_str(), other_fp.as_str()));
+        assert!(
+            !r.ok && r.fingerprint.is_none() && r.group_verifying_key.is_none(),
+            "{:?}",
+            r.problems
+        );
+        assert!(
+            r.problems
+                .iter()
+                .any(|p| p.contains("different public key packages")),
+            "{:?}",
+            r.problems
+        );
+        assert_eq!(
+            (
+                r.nodes[0].fingerprint.as_str(),
+                r.nodes[2].fingerprint.as_str()
+            ),
+            (fp.as_str(), other_fp.as_str())
+        );
         let (mut v, _) = views([1u8; 32]);
         let s1 = v[0].status.as_ref().unwrap().own_verifying_share.clone();
         v[1].status.as_mut().unwrap().own_verifying_share = s1;
@@ -551,7 +652,11 @@ mod tests {
         let wrong = format!("1220{}", "0".repeat(64));
         for expected in [wrong.as_str(), "1220zz"] {
             let r = check_views(KEY, Some(expected), &[1, 2, 3], 2, &v);
-            assert!(!r.ok && r.fingerprint.is_none() && r.group_verifying_key.is_some(), "{:?}", r.problems);
+            assert!(
+                !r.ok && r.fingerprint.is_none() && r.group_verifying_key.is_some(),
+                "{:?}",
+                r.problems
+            );
             assert!(r.nodes.iter().all(|n| n.fingerprint == fp));
         }
     }
@@ -566,7 +671,11 @@ mod tests {
         assert!(!r.ok && r.fingerprint.is_none());
         r.record_signature(2, &[1, 3], Ok((msg.to_vec(), vec![0u8; 64])));
         // A valid-looking reply over a message the operator did not expect is a failure too.
-        r.record_signature(3, &[2, 3], Ok((verify_message("other", KEY).to_vec(), vec![0u8; 64])));
+        r.record_signature(
+            3,
+            &[2, 3],
+            Ok((verify_message("other", KEY).to_vec(), vec![0u8; 64])),
+        );
         assert!(!r.ok);
         assert_eq!(r.sign_test.iter().filter(|s| !s.ok).count(), 3);
         assert_eq!(&msg[..2], &[0x12, 0x20]);

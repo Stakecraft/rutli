@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Proactive share refresh (dealer-free).
@@ -21,11 +21,11 @@
 
 use std::collections::BTreeMap;
 
-use frost_ed25519 as frost;
 use frost::keys::dkg::{round1, round2};
 use frost::keys::refresh::{refresh_dkg_part1, refresh_dkg_part2, refresh_dkg_shares};
 use frost::keys::{KeyPackage, PublicKeyPackage};
 use frost::Identifier;
+use frost_ed25519 as frost;
 use rand::rngs::OsRng;
 
 use crate::Result;
@@ -42,7 +42,13 @@ pub struct RefreshParticipant {
 
 impl RefreshParticipant {
     pub fn new(id: Identifier, max_signers: u16, min_signers: u16) -> Self {
-        Self { id, max_signers, min_signers, r1_secret: None, r2_secret: None }
+        Self {
+            id,
+            max_signers,
+            min_signers,
+            r1_secret: None,
+            r2_secret: None,
+        }
     }
 
     /// Part 1: commit, to broadcast to every peer.
@@ -61,7 +67,9 @@ impl RefreshParticipant {
         let r1 = self
             .r1_secret
             .take()
-            .ok_or(crate::CoreError::InvalidCeremonyState("refresh part2 before part1"))?;
+            .ok_or(crate::CoreError::InvalidCeremonyState(
+                "refresh part2 before part1",
+            ))?;
         let (secret, packages) = refresh_dkg_part2(r1, round1_packages)?;
         self.r2_secret = Some(secret);
         Ok(packages)
@@ -79,7 +87,9 @@ impl RefreshParticipant {
         let r2 = self
             .r2_secret
             .take()
-            .ok_or(crate::CoreError::InvalidCeremonyState("refresh part3 before part2"))?;
+            .ok_or(crate::CoreError::InvalidCeremonyState(
+                "refresh part3 before part2",
+            ))?;
         let (key_package, public_key_package) = refresh_dkg_shares(
             &r2,
             round1_packages,
@@ -87,6 +97,9 @@ impl RefreshParticipant {
             old_public_key_package,
             old_key_package,
         )?;
-        Ok((key_package, crate::dkg::without_min_signers(&public_key_package)))
+        Ok((
+            key_package,
+            crate::dkg::without_min_signers(&public_key_package),
+        ))
     }
 }

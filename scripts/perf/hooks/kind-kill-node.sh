@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 #
 # HOOK_KILL_NODE for a kind cluster (an example of the hook contract in scripts/perf/cluster.py):

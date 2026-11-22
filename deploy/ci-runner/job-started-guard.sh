@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 #
 # Self-hosted runner job-started hook (ACTIONS_RUNNER_HOOK_JOB_STARTED): refuse every job that

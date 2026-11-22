@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! The accept loop (`rutli_cosigner::accept`) under real mutual TLS on 127.0.0.1: a connection
@@ -326,7 +326,9 @@ async fn a_peer_key_that_is_not_its_pin_is_refused_through_the_accept_loop() {
 
     let refused = node_info(addr, &client).await;
     assert!(
-        refused.as_ref().is_err_and(|e| e.contains("PermissionDenied") || e.contains("permission")),
+        refused
+            .as_ref()
+            .is_err_and(|e| e.contains("PermissionDenied") || e.contains("permission")),
         "a key that is not the peer's pin is refused, got {refused:?}"
     );
     serving.abort();

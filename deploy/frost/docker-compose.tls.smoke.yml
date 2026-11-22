@@ -1,3 +1,4 @@
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Overlay for CI smoke: no host port binds (RPCs go over the compose network), and the configs
 # from ./config-tls-smoke — the examples with ceremony and signing intents opted out, written by

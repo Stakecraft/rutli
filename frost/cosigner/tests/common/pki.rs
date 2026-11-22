@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Test PKI: a cluster CA and per-node mTLS certificates, as `scripts/gen-frost-certs.sh` issues
@@ -37,11 +37,17 @@ impl TestPki {
     ) -> Self {
         let ca_key = rcgen::KeyPair::generate_for(alg).unwrap();
         let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
-        params.distinguished_name.push(rcgen::DnType::CommonName, "rutli-frost-cluster-ca");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "rutli-frost-cluster-ca");
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         f(&mut params);
         let ca = params.self_signed(&ca_key).unwrap();
-        Self { ca_pem: ca.pem(), ca_key, ca }
+        Self {
+            ca_pem: ca.pem(),
+            ca_key,
+            ca,
+        }
     }
 
     /// (certificate PEM, key PEM) for a P-256 leaf whose parameters `f` sets entirely (subject
@@ -78,7 +84,9 @@ impl TestPki {
     ) -> (String, String) {
         let key = rcgen::KeyPair::generate_for(alg).unwrap();
         let mut params = rcgen::CertificateParams::new(vec!["rutli-cosigner".to_string()]).unwrap();
-        params.distinguished_name.push(rcgen::DnType::CommonName, cn);
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, cn);
         if expired {
             params.not_before = rcgen::date_time_ymd(2001, 1, 1);
             params.not_after = rcgen::date_time_ymd(2002, 1, 1);

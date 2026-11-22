@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Trusted-dealer split of an **existing** Ed25519 key into FROST shares — migration only.
@@ -58,9 +58,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use frost_ed25519 as frost;
 use frost::keys::{IdentifierList, KeyPackage, PublicKeyPackage, SecretShare};
 use frost::{Ed25519Group, Ed25519ScalarField, Field, Group, Identifier, SigningPackage};
+use frost_ed25519 as frost;
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
@@ -83,7 +83,9 @@ pub fn signing_key_from_seed(seed: &[u8; 32]) -> Result<frost::SigningKey> {
 
 /// The raw 32-byte RFC 8032 public key of a seed — what Canton fingerprints for an Ed25519 key.
 pub fn public_key_from_seed(seed: &[u8; 32]) -> [u8; 32] {
-    ed25519_dalek::SigningKey::from_bytes(seed).verifying_key().to_bytes()
+    ed25519_dalek::SigningKey::from_bytes(seed)
+        .verifying_key()
+        .to_bytes()
 }
 
 /// A Canton-shaped 34-byte message, `0x12 0x20 ‖ SHA-256(label)` (docs/wire-contract.md), for
@@ -131,7 +133,9 @@ pub fn split_ed25519_seed(
             Some(share) => shares.push(share),
             None => {
                 wipe(&mut shares);
-                return Err(CoreError::Dealer("split did not produce a share for every id".into()));
+                return Err(CoreError::Dealer(
+                    "split did not produce a share for every id".into(),
+                ));
             }
         }
     }
@@ -165,8 +169,10 @@ pub fn check_public_key_package(pkp: &PublicKeyPackage, t: u16) -> Result<()> {
         .collect::<Result<_>>()?;
 
     for subset in subsets(n, usize::from(t)) {
-        let chosen: Vec<&(Identifier, <Ed25519Group as Group>::Element)> =
-            subset.iter().map(|&i| at(&points, i)).collect::<Result<_>>()?;
+        let chosen: Vec<&(Identifier, <Ed25519Group as Group>::Element)> = subset
+            .iter()
+            .map(|&i| at(&points, i))
+            .collect::<Result<_>>()?;
         let xs: Vec<Identifier> = chosen.iter().map(|p| p.0).collect();
         let mut acc = <Ed25519Group as Group>::identity();
         for p in &chosen {
@@ -187,7 +193,9 @@ pub fn check_public_key_package(pkp: &PublicKeyPackage, t: u16) -> Result<()> {
 fn roster(ids: &[u16], t: u16) -> Result<Vec<Identifier>> {
     let n = ids.len();
     if !(2..=MAX_SIGNERS).contains(&n) {
-        return Err(CoreError::Dealer(format!("need 2..={MAX_SIGNERS} recipients, got {n}")));
+        return Err(CoreError::Dealer(format!(
+            "need 2..={MAX_SIGNERS} recipients, got {n}"
+        )));
     }
     if t < 2 || usize::from(t) > n {
         return Err(CoreError::Dealer(format!(
@@ -196,7 +204,9 @@ fn roster(ids: &[u16], t: u16) -> Result<Vec<Identifier>> {
     }
     let unique: BTreeSet<u16> = ids.iter().copied().collect();
     if unique.len() != n {
-        return Err(CoreError::Dealer(format!("duplicate identifiers in {ids:?}")));
+        return Err(CoreError::Dealer(format!(
+            "duplicate identifiers in {ids:?}"
+        )));
     }
     ids.iter()
         .map(|&i| {
@@ -223,8 +233,16 @@ fn verify_split(
         ));
     }
     let roster: BTreeSet<Identifier> = shares.iter().map(|s| *s.identifier()).collect();
-    if pkp.verifying_shares().keys().copied().collect::<BTreeSet<_>>() != roster {
-        return Err(CoreError::Dealer("public key package roster differs from the shares".into()));
+    if pkp
+        .verifying_shares()
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        != roster
+    {
+        return Err(CoreError::Dealer(
+            "public key package roster differs from the shares".into(),
+        ));
     }
 
     // 2. One commitment for everyone, VSS-valid shares, matching verifying shares, min_signers = t.
@@ -236,7 +254,9 @@ fn verify_split(
     let outcome = (|| {
         for share in shares {
             if share.commitment() != commitment {
-                return Err(CoreError::Dealer("shares carry different VSS commitments".into()));
+                return Err(CoreError::Dealer(
+                    "shares carry different VSS commitments".into(),
+                ));
             }
             let kp = KeyPackage::try_from(share.clone())?; // VSS verification
             let ok = *kp.min_signers() == t
@@ -259,8 +279,10 @@ fn verify_split(
             .map_err(|_| CoreError::Dealer("seed public key is not a valid point".into()))?;
         let message = canton_test_message(b"rutli-dealer/self-test");
         for subset in subsets(key_packages.len(), usize::from(t)) {
-            let quorum: Vec<KeyPackage> =
-                subset.iter().map(|&i| at(&key_packages, i).cloned()).collect::<Result<_>>()?;
+            let quorum: Vec<KeyPackage> = subset
+                .iter()
+                .map(|&i| at(&key_packages, i).cloned())
+                .collect::<Result<_>>()?;
             let ids: Vec<Identifier> = quorum.iter().map(|kp| *kp.identifier()).collect();
             let reconstructed = frost::keys::reconstruct(&quorum);
             let signed = selftest_sign(&quorum, pkp, &message);
@@ -378,7 +400,12 @@ fn subsets(n: usize, k: usize) -> Vec<Vec<usize>> {
 /// `items[i]`, or an error: the indices come from `subsets(items.len(), k)`, so a miss is a bug here,
 /// but it must not be a panic in a tool that holds key shares.
 fn at<T>(items: &[T], i: usize) -> Result<&T> {
-    items.get(i).ok_or_else(|| CoreError::Dealer(format!("internal: index {i} out of range ({})", items.len())))
+    items.get(i).ok_or_else(|| {
+        CoreError::Dealer(format!(
+            "internal: index {i} out of range ({})",
+            items.len()
+        ))
+    })
 }
 
 /// Identifiers for an error message, as the small integers operators configured.
@@ -416,11 +443,17 @@ mod tests {
 
     #[test]
     fn describe_prints_small_identifiers_as_integers_and_anything_else_as_hex() {
-        let ids: Vec<Identifier> = [1u16, 2, 300].iter().map(|&i| Identifier::try_from(i).unwrap()).collect();
+        let ids: Vec<Identifier> = [1u16, 2, 300]
+            .iter()
+            .map(|&i| Identifier::try_from(i).unwrap())
+            .collect();
         assert_eq!(describe(&ids), "{1,2,300}");
         // An identifier derived from a name is a full-width scalar: hex, not a truncated integer.
         let wide = Identifier::derive(b"a name").unwrap();
-        assert_eq!(describe(&[wide]), format!("{{{}}}", hex::encode(wide.serialize())));
+        assert_eq!(
+            describe(&[wide]),
+            format!("{{{}}}", hex::encode(wide.serialize()))
+        );
         assert!(at(&[1, 2, 3], 3).is_err());
         assert_eq!(*at(&[1, 2, 3], 2).unwrap(), 3);
     }
@@ -437,7 +470,10 @@ mod tests {
     }
 
     fn key_packages(shares: &[SecretShare]) -> Vec<KeyPackage> {
-        shares.iter().map(|s| KeyPackage::try_from(s.clone()).unwrap()).collect()
+        shares
+            .iter()
+            .map(|s| KeyPackage::try_from(s.clone()).unwrap())
+            .collect()
     }
 
     /// RFC 8032 §7.1 TEST 1–3: (seed, public key).
@@ -474,7 +510,8 @@ mod tests {
     #[test]
     fn a_real_canton_3_6_1_namespace_export_splits_to_its_fingerprint() {
         // B1's throwaway vectors: a password-protected ExportKeyPair of a 3.6.1 namespace key.
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../canton-key/testdata/vectors");
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../canton-key/testdata/vectors");
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).unwrap()).unwrap();
         let password = manifest["password"].as_str().unwrap();
@@ -494,7 +531,9 @@ mod tests {
         let rutli_canton_key::PrivateKeyMaterial::Ed25519 { seed } = &key.material else {
             panic!("namespace key is Ed25519")
         };
-        let rutli_canton_key::PublicKey::Ed25519(public) = key.public else { unreachable!() };
+        let rutli_canton_key::PublicKey::Ed25519(public) = key.public else {
+            unreachable!()
+        };
 
         let (shares, pkp) = split_ed25519_seed(seed, &IDS, 2).unwrap();
         let group = group_verifying_key_bytes(&pkp).unwrap();
@@ -505,7 +544,11 @@ mod tests {
         );
         let kps = key_packages(&shares);
         let msg = canton_test_message(b"namespace topology");
-        assert!(verify(&public, &msg, &selftest_sign(&kps[..2], &pkp, &msg).unwrap()));
+        assert!(verify(
+            &public,
+            &msg,
+            &selftest_sign(&kps[..2], &pkp, &msg).unwrap()
+        ));
     }
 
     #[test]
@@ -531,7 +574,10 @@ mod tests {
 
         // The right path: reduced scalar → the RFC public key.
         let sk = signing_key_from_seed(&seed).unwrap();
-        assert_eq!(frost::VerifyingKey::from(&sk).serialize().unwrap(), public.to_vec());
+        assert_eq!(
+            frost::VerifyingKey::from(&sk).serialize().unwrap(),
+            public.to_vec()
+        );
     }
 
     #[test]
@@ -540,11 +586,23 @@ mod tests {
         let public = public_key_from_seed(&seed);
         let ids = [3u16, 7, 9, 11]; // configured identifiers need not be 1..=n
         let (shares, pkp) = split_ed25519_seed(&seed, &ids, 3).unwrap();
-        let roster: BTreeSet<Identifier> =
-            ids.iter().map(|&i| Identifier::try_from(i).unwrap()).collect();
-        assert_eq!(pkp.verifying_shares().keys().copied().collect::<BTreeSet<_>>(), roster);
+        let roster: BTreeSet<Identifier> = ids
+            .iter()
+            .map(|&i| Identifier::try_from(i).unwrap())
+            .collect();
+        assert_eq!(
+            pkp.verifying_shares()
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            roster
+        );
         for (share, &id) in shares.iter().zip(&ids) {
-            assert_eq!(*share.identifier(), Identifier::try_from(id).unwrap(), "ordered as given");
+            assert_eq!(
+                *share.identifier(),
+                Identifier::try_from(id).unwrap(),
+                "ordered as given"
+            );
         }
 
         let kps = key_packages(&shares);
@@ -553,18 +611,29 @@ mod tests {
         for subset in subsets(kps.len(), 3) {
             let quorum: Vec<KeyPackage> = subset.iter().map(|&i| kps[i].clone()).collect();
             assert!(quorum.iter().all(|kp| *kp.min_signers() == 3));
-            assert_eq!(frost::keys::reconstruct(&quorum).unwrap().to_scalar(), sk.clone().to_scalar());
-            assert!(verify(&public, &msg, &selftest_sign(&quorum, &pkp, &msg).unwrap()));
+            assert_eq!(
+                frost::keys::reconstruct(&quorum).unwrap().to_scalar(),
+                sk.clone().to_scalar()
+            );
+            assert!(verify(
+                &public,
+                &msg,
+                &selftest_sign(&quorum, &pkp, &msg).unwrap()
+            ));
         }
         // t − 1 shares reconstruct garbage, not the key.
         let short = frost::keys::reconstruct(&kps[..2]);
-        assert!(short.map(|k| k.to_scalar() != sk.clone().to_scalar()).unwrap_or(true));
+        assert!(short
+            .map(|k| k.to_scalar() != sk.clone().to_scalar())
+            .unwrap_or(true));
     }
 
     #[test]
     fn two_of_three_shares_have_min_signers_two() {
         let (shares, _) = split_ed25519_seed(&hex32(RFC8032[2].0), &IDS, 2).unwrap();
-        assert!(key_packages(&shares).iter().all(|kp| *kp.min_signers() == 2));
+        assert!(key_packages(&shares)
+            .iter()
+            .all(|kp| *kp.min_signers() == 2));
     }
 
     #[test]
@@ -577,7 +646,10 @@ mod tests {
             (&[0, 1, 2][..], 2),       // zero identifier
             (&[1][..], 1),             // n = 1
         ] {
-            assert!(split_ed25519_seed(&seed, ids, t).is_err(), "{ids:?} t={t} must be refused");
+            assert!(
+                split_ed25519_seed(&seed, ids, t).is_err(),
+                "{ids:?} t={t} must be refused"
+            );
         }
     }
 
@@ -585,7 +657,10 @@ mod tests {
     fn interpolation_catches_a_tampered_or_mislabelled_verifying_share() {
         let (shares, pkp) = split_ed25519_seed(&hex32(RFC8032[0].0), &IDS, 2).unwrap();
         check_public_key_package(&pkp, 2).unwrap();
-        assert!(check_public_key_package(&pkp, 1).is_err(), "t = 1 is never a valid claim");
+        assert!(
+            check_public_key_package(&pkp, 1).is_err(),
+            "t = 1 is never a valid claim"
+        );
         // A threshold lie: a 3-of-3 sharing presented as 2-of-3 does not interpolate (its
         // verifying shares lie on a quadratic, not a line).
         let (_, three_of_three) = split_ed25519_seed(&hex32(RFC8032[0].0), &IDS, 3).unwrap();
@@ -633,14 +708,22 @@ mod tests {
         let t = *kps[0].min_signers();
         let mut parts: BTreeMap<Identifier, RefreshParticipant> = kps
             .iter()
-            .map(|kp| (*kp.identifier(), RefreshParticipant::new(*kp.identifier(), n, t)))
+            .map(|kp| {
+                (
+                    *kp.identifier(),
+                    RefreshParticipant::new(*kp.identifier(), n, t),
+                )
+            })
             .collect();
         let mut r1 = BTreeMap::new();
         for (&id, p) in parts.iter_mut() {
             r1.insert(id, p.part1().unwrap());
         }
         let others = |id: Identifier| -> BTreeMap<_, _> {
-            r1.iter().filter(|(&k, _)| k != id).map(|(&k, v)| (k, v.clone())).collect()
+            r1.iter()
+                .filter(|(&k, _)| k != id)
+                .map(|(&k, v)| (k, v.clone()))
+                .collect()
         };
         let mut r2: BTreeMap<Identifier, BTreeMap<Identifier, frost::keys::dkg::round2::Package>> =
             BTreeMap::new();
@@ -682,15 +765,25 @@ mod tests {
 
         let new: Vec<KeyPackage> = refreshed.into_iter().map(|(kp, _)| kp).collect();
         let msg = canton_test_message(b"after refresh");
-        assert!(verify(&public, &msg, &selftest_sign(&new[1..], &new_pkp, &msg).unwrap()));
+        assert!(verify(
+            &public,
+            &msg,
+            &selftest_sign(&new[1..], &new_pkp, &msg).unwrap()
+        ));
 
         // A leaked dealt share does not combine with a live (refreshed) one.
         let sk = signing_key_from_seed(&seed).unwrap();
         let mixed = [dealt[0].clone(), new[1].clone()];
-        assert_ne!(frost::keys::reconstruct(&mixed).unwrap().to_scalar(), sk.to_scalar());
+        assert_ne!(
+            frost::keys::reconstruct(&mixed).unwrap().to_scalar(),
+            sk.to_scalar()
+        );
         match selftest_sign(&mixed, &new_pkp, &msg) {
             Err(_) => {}
-            Ok(sig) => assert!(!verify(&public, &msg, &sig), "old + new share must not sign"),
+            Ok(sig) => assert!(
+                !verify(&public, &msg, &sig),
+                "old + new share must not sign"
+            ),
         }
     }
 

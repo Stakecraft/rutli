@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! `verify-key` must say *why* a node is unreachable. The CA rotation's Phase D negative control
@@ -32,7 +32,10 @@ impl Ca {
         p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         p.distinguished_name.push(DnType::CommonName, cn);
-        Self { cert: p.self_signed(&key).unwrap(), key }
+        Self {
+            cert: p.self_signed(&key).unwrap(),
+            key,
+        }
     }
 
     /// Writes `<name>.crt` / `<name>.key` under `dir` for a leaf with CN `cn` and that same name as
@@ -42,18 +45,27 @@ impl Ca {
         let mut p = CertificateParams::new(vec![cn.to_string()]).unwrap();
         p.distinguished_name.push(DnType::CommonName, cn);
         p.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        p.extended_key_usages =
-            vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth];
+        p.extended_key_usages = vec![
+            ExtendedKeyUsagePurpose::ServerAuth,
+            ExtendedKeyUsagePurpose::ClientAuth,
+        ];
         let cert = p.signed_by(&key, &self.cert, &self.key).unwrap();
         std::fs::write(dir.join(format!("{name}.crt")), cert.pem()).unwrap();
         std::fs::write(dir.join(format!("{name}.key")), key.serialize_pem()).unwrap();
     }
 }
 
-fn config(dir: &std::path::Path, port: u16, data: &str, trust: &str, leaf: &str) -> std::path::PathBuf {
+fn config(
+    dir: &std::path::Path,
+    port: u16,
+    data: &str,
+    trust: &str,
+    leaf: &str,
+) -> std::path::PathBuf {
     // The node's config pins its own TLS key (required with TLS); the operator's client configs
     // leave the pin out, which a client config may.
-    let mut peer = serde_json::json!({ "identifier": 1, "endpoint": format!("https://127.0.0.1:{port}") });
+    let mut peer =
+        serde_json::json!({ "identifier": 1, "endpoint": format!("https://127.0.0.1:{port}") });
     if leaf == "cosigner1" {
         let pin = rutli_cosigner::tls::spki_sha256_of_pem_file(&dir.join("cosigner1.crt")).unwrap();
         peer["tls_spki_sha256"] = serde_json::json!([hex::encode(pin)]);
@@ -104,8 +116,15 @@ impl Daemon {
 
     fn wait_serving(&mut self) {
         let deadline = Instant::now() + Duration::from_secs(30);
-        while !self.lines.recv_timeout(Duration::from_millis(200)).is_ok_and(|l| l.contains("gRPC serving")) {
-            assert!(Instant::now() < deadline && self.child.try_wait().unwrap().is_none(), "the node did not start");
+        while !self
+            .lines
+            .recv_timeout(Duration::from_millis(200))
+            .is_ok_and(|l| l.contains("gRPC serving"))
+        {
+            assert!(
+                Instant::now() < deadline && self.child.try_wait().unwrap().is_none(),
+                "the node did not start"
+            );
         }
     }
 }
@@ -123,12 +142,20 @@ fn verify_key_reports_the_tls_alert_when_a_node_refuses_an_old_ca_certificate() 
     let dir = tmp.path();
     let (old, new) = (Ca::new("old-ca"), Ca::new("new-ca"));
     std::fs::write(dir.join("new.crt"), new.cert.pem()).unwrap();
-    std::fs::write(dir.join("bundle.crt"), format!("{}{}", old.cert.pem(), new.cert.pem())).unwrap();
+    std::fs::write(
+        dir.join("bundle.crt"),
+        format!("{}{}", old.cert.pem(), new.cert.pem()),
+    )
+    .unwrap();
     new.leaf(dir, "cosigner1", "cosigner1");
     old.leaf(dir, "old-operator", "operator");
     new.leaf(dir, "new-operator", "operator");
 
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     // Phase D: the node trusts only the new CA.
     let mut node = Daemon::spawn(&config(dir, port, "server", "new.crt", "cosigner1"), &[]);
     node.wait_serving();
@@ -137,13 +164,26 @@ fn verify_key_reports_the_tls_alert_when_a_node_refuses_an_old_ca_certificate() 
         let out = Command::new(env!("CARGO_BIN_EXE_rutli-cosigner"))
             .arg("--config")
             .arg(client)
-            .args(["verify-key", "--key-id", "frost-namespace", "--expect-fingerprint"])
+            .args([
+                "verify-key",
+                "--key-id",
+                "frost-namespace",
+                "--expect-fingerprint",
+            ])
             .arg(format!("1220{}", "0".repeat(64)))
             .output()
             .unwrap();
-        (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned())
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
     };
-    let node_line = |out: &str| out.lines().find(|l| l.starts_with("  node 1 ")).unwrap_or_default().to_string();
+    let node_line = |out: &str| {
+        out.lines()
+            .find(|l| l.starts_with("  node 1 "))
+            .unwrap_or_default()
+            .to_string()
+    };
     // The old-CA operator leaf, trusting the bundle (so the client side accepts the server). In
     // TLS 1.3 the node's alert races the client's first request, and the RPC error alone said
     // "connection closed" / "broken pipe" in about half the runs; the TLS probe must make the alert
@@ -154,12 +194,24 @@ fn verify_key_reports_the_tls_alert_when_a_node_refuses_an_old_ca_certificate() 
         assert!(!ok);
         let line = node_line(&refused);
         eprintln!("refused: {line}");
-        assert!(line.contains("UnknownCA"), "the TLS alert must be in the output: {refused}");
+        assert!(
+            line.contains("UnknownCA"),
+            "the TLS alert must be in the output: {refused}"
+        );
     }
     // The new-CA operator leaf gets through TLS (the key is simply absent): no probe detail.
-    let (_, through) = verify(&config(dir, port, "client-new", "bundle.crt", "new-operator"));
+    let (_, through) = verify(&config(
+        dir,
+        port,
+        "client-new",
+        "bundle.crt",
+        "new-operator",
+    ));
     drop(node);
-    assert!(through.contains("unknown key id") && !through.contains("UnknownCA"), "{through}");
+    assert!(
+        through.contains("unknown key id") && !through.contains("UnknownCA"),
+        "{through}"
+    );
     assert!(!through.contains("TLS probe"), "{through}");
 
     // A node that is down is reported as unreachable, with no TLS detail made up for it.
@@ -167,7 +219,10 @@ fn verify_key_reports_the_tls_alert_when_a_node_refuses_an_old_ca_certificate() 
     let line = node_line(&down);
     eprintln!("down: {line}");
     assert!(!ok);
-    assert!(line.contains("unreachable") && !line.contains("TLS probe") && !line.contains("UnknownCA"), "{down}");
+    assert!(
+        line.contains("unreachable") && !line.contains("TLS probe") && !line.contains("UnknownCA"),
+        "{down}"
+    );
 }
 
 // ── key show / key fingerprint ─────────────────────────────────────────────────────────────────
@@ -178,7 +233,15 @@ const SEAL: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab
 
 /// A config on the 2-of-3 roster at `ports` for node `identifier`, listening on `listen` and
 /// presenting `<leaf>.crt`, with `extra` merged in.
-fn roster_config(dir: &Path, name: &str, identifier: u16, listen: u16, ports: &[u16], leaf: &str, extra: serde_json::Value) -> PathBuf {
+fn roster_config(
+    dir: &Path,
+    name: &str,
+    identifier: u16,
+    listen: u16,
+    ports: &[u16],
+    leaf: &str,
+    extra: serde_json::Value,
+) -> PathBuf {
     // A node's config pins every cosigner's TLS key (required with TLS); the operator's client
     // config leaves the pins out, which a client config may.
     let peers: Vec<_> = (1u16..)
@@ -199,7 +262,9 @@ fn roster_config(dir: &Path, name: &str, identifier: u16, listen: u16, ports: &[
         "signer_allowlist": ["driver"], "peer_allowlist": ["cosigner1", "cosigner2", "cosigner3"],
         "operator_allowlist": ["operator"]
     });
-    cfg.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+    cfg.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
     let path = dir.join(format!("{name}.json"));
     std::fs::write(&path, serde_json::to_vec(&cfg).unwrap()).unwrap();
     path
@@ -226,7 +291,10 @@ fn cli(config: Option<&Path>, args: &[&str]) -> (bool, String, String) {
         if Instant::now() > deadline {
             let _ = child.kill();
             let out = child.wait_with_output().unwrap();
-            panic!("{args:?} did not exit (serving?): {}", String::from_utf8_lossy(&out.stdout));
+            panic!(
+                "{args:?} did not exit (serving?): {}",
+                String::from_utf8_lossy(&out.stdout)
+            );
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -237,7 +305,10 @@ fn cli(config: Option<&Path>, args: &[&str]) -> (bool, String, String) {
 
 /// The value after `prefix` on the first stdout line that starts with it.
 fn field(out: &str, prefix: &str) -> String {
-    out.lines().find_map(|l| l.strip_prefix(prefix)).unwrap_or_else(|| panic!("no {prefix:?} in {out}")).to_string()
+    out.lines()
+        .find_map(|l| l.strip_prefix(prefix))
+        .unwrap_or_else(|| panic!("no {prefix:?} in {out}"))
+        .to_string()
 }
 
 /// Three real daemons over mTLS hold a DKG key and a hosted EC P-256 key, both made over gRPC with
@@ -257,8 +328,13 @@ fn key_show_reads_both_kinds_with_an_operator_certificate_and_key_fingerprint_ag
     for name in ["cosigner1", "cosigner2", "cosigner3", "driver", "operator"] {
         ca.leaf(dir, name, name);
     }
-    let listeners: Vec<_> = (0..4).map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap()).collect();
-    let ports: Vec<u16> = listeners.iter().map(|l| l.local_addr().unwrap().port()).collect();
+    let listeners: Vec<_> = (0..4)
+        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+        .collect();
+    let ports: Vec<u16> = listeners
+        .iter()
+        .map(|l| l.local_addr().unwrap().port())
+        .collect();
     drop(listeners);
     let (nodes, operator_port) = (&ports[..3], ports[3]);
     let daemon_extra = serde_json::json!({
@@ -269,14 +345,30 @@ fn key_show_reads_both_kinds_with_an_operator_certificate_and_key_fingerprint_ag
     let mut daemons: Vec<Daemon> = (1u16..=3)
         .map(|i| {
             let name = format!("cosigner{i}");
-            let config = roster_config(dir, &name, i, nodes[usize::from(i) - 1], nodes, &name, daemon_extra.clone());
+            let config = roster_config(
+                dir,
+                &name,
+                i,
+                nodes[usize::from(i) - 1],
+                nodes,
+                &name,
+                daemon_extra.clone(),
+            );
             Daemon::spawn(&config, &[(SEAL_ENV, SEAL)])
         })
         .collect();
     daemons.iter_mut().for_each(Daemon::wait_serving);
     // The operator's own `listen` is free: a `key show` that fell through to the daemon would serve
     // there and never exit, rather than fail on a taken port.
-    let op = roster_config(dir, "operator", 1, operator_port, nodes, "operator", serde_json::json!({}));
+    let op = roster_config(
+        dir,
+        "operator",
+        1,
+        operator_port,
+        nodes,
+        "operator",
+        serde_json::json!({}),
+    );
 
     let (frost_id, hosted_id) = ("frost-participant1-namespace", "rutli-enc-ecies-1");
     let (group_key, spki) = tokio::runtime::Runtime::new().unwrap().block_on(async {
@@ -287,65 +379,150 @@ fn key_show_reads_both_kinds_with_an_operator_certificate_and_key_fingerprint_ag
             .domain_name("cosigner1")
             .identity(Identity::from_pem(read("driver.crt"), read("driver.key")));
         let channel = Endpoint::from_shared(format!("https://127.0.0.1:{}", nodes[0])).unwrap();
-        let mut driver = pb::signer_client::SignerClient::new(channel.tls_config(tls).unwrap().connect().await.unwrap());
-        let dkg = pb::DkgRequest { key_id: frost_id.into(), ..Default::default() };
-        let group_key = driver.dkg(dkg).await.unwrap().into_inner().group_verifying_key;
-        let request = pb::GenerateKeyRequest { key_id: hosted_id.into(), spec: "ec-p256-ecies".into(), ..Default::default() };
+        let mut driver = pb::signer_client::SignerClient::new(
+            channel.tls_config(tls).unwrap().connect().await.unwrap(),
+        );
+        let dkg = pb::DkgRequest {
+            key_id: frost_id.into(),
+            ..Default::default()
+        };
+        let group_key = driver
+            .dkg(dkg)
+            .await
+            .unwrap()
+            .into_inner()
+            .group_verifying_key;
+        let request = pb::GenerateKeyRequest {
+            key_id: hosted_id.into(),
+            spec: "ec-p256-ecies".into(),
+            ..Default::default()
+        };
         let generated = driver.generate_key(request).await.unwrap().into_inner();
-        assert_eq!(generated.replicas, 3, "`key show` reads each node's own copy: it must be on all three");
+        assert_eq!(
+            generated.replicas, 3,
+            "`key show` reads each node's own copy: it must be on all three"
+        );
         (group_key, generated.public_key_der)
     });
-    let frost_fp = rutli_cosigner::share_delivery::ed25519_fingerprint(&group_key.clone().try_into().unwrap());
-    let hosted_fp = rutli_canton_key::PublicKey::from_spki_der(&spki).unwrap().fingerprint();
+    let frost_fp =
+        rutli_cosigner::share_delivery::ed25519_fingerprint(&group_key.clone().try_into().unwrap());
+    let hosted_fp = rutli_canton_key::PublicKey::from_spki_der(&spki)
+        .unwrap()
+        .fingerprint();
     let wrong = format!("1220{}", "ab".repeat(32));
 
     for (id, kind, fp, printed) in [
-        (frost_id, "frost", &frost_fp, ("  group key ", hex::encode(&group_key))),
-        (hosted_id, "hosted", &hosted_fp, ("  public key (SPKI) ", hex::encode(&spki))),
+        (
+            frost_id,
+            "frost",
+            &frost_fp,
+            ("  group key ", hex::encode(&group_key)),
+        ),
+        (
+            hosted_id,
+            "hosted",
+            &hosted_fp,
+            ("  public key (SPKI) ", hex::encode(&spki)),
+        ),
     ] {
         let (ok, out, err) = cli(Some(&op), &["key", "show", "--key-id", id]);
         assert!(ok, "{out}{err}");
-        assert!(out.starts_with(&format!("key show {id} (")) && out.contains("compared with nothing"), "{out}");
-        assert_eq!((field(&out, "  fingerprint "), field(&out, printed.0)), (fp.clone(), printed.1.clone()));
+        assert!(
+            out.starts_with(&format!("key show {id} (")) && out.contains("compared with nothing"),
+            "{out}"
+        );
+        assert_eq!(
+            (field(&out, "  fingerprint "), field(&out, printed.0)),
+            (fp.clone(), printed.1.clone())
+        );
         assert!(!out.contains("PROBLEM"), "{out}");
 
         let (ok, out, err) = cli(Some(&op), &["key", "show", "--key-id", id, "--json"]);
         assert!(ok, "{out}{err}");
-        let report: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
-        assert_eq!((report["kind"].as_str(), report["fingerprint"].as_str()), (Some(kind), Some(fp.as_str())));
-        assert_eq!((report["ok"].as_bool(), report["key_id"].as_str()), (Some(true), Some(id)));
+        let report: serde_json::Value =
+            serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+        assert_eq!(
+            (report["kind"].as_str(), report["fingerprint"].as_str()),
+            (Some(kind), Some(fp.as_str()))
+        );
+        assert_eq!(
+            (report["ok"].as_bool(), report["key_id"].as_str()),
+            (Some(true), Some(id))
+        );
         assert!(report.get("expected_fingerprint").is_none(), "{out}");
 
-        let (ok, out, err) = cli(Some(&op), &["key", "show", "--key-id", id, "--expect-fingerprint", fp]);
+        let (ok, out, err) = cli(
+            Some(&op),
+            &["key", "show", "--key-id", id, "--expect-fingerprint", fp],
+        );
         assert!(ok && out.contains(&format!("expected {fp}")), "{out}{err}");
-        let (ok, out, err) = cli(Some(&op), &["key", "show", "--key-id", id, "--expect-fingerprint", &wrong]);
-        assert!(!ok && out.contains("not the expected") && err.contains("key show: 3 problem(s)"), "{out}{err}");
+        let (ok, out, err) = cli(
+            Some(&op),
+            &[
+                "key",
+                "show",
+                "--key-id",
+                id,
+                "--expect-fingerprint",
+                &wrong,
+            ],
+        );
+        assert!(
+            !ok && out.contains("not the expected") && err.contains("key show: 3 problem(s)"),
+            "{out}{err}"
+        );
 
         // The older commands still take the expectation to the check: right passes, wrong fails.
-        let legacy = if kind == "frost" { "verify-key" } else { "verify-hosted" };
-        let (ok, out, err) = cli(Some(&op), &[legacy, "--key-id", id, "--expect-fingerprint", fp]);
+        let legacy = if kind == "frost" {
+            "verify-key"
+        } else {
+            "verify-hosted"
+        };
+        let (ok, out, err) = cli(
+            Some(&op),
+            &[legacy, "--key-id", id, "--expect-fingerprint", fp],
+        );
         assert!(ok && out.contains(&format!("expected {fp}")), "{out}{err}");
-        let (ok, out, err) = cli(Some(&op), &[legacy, "--key-id", id, "--expect-fingerprint", &wrong]);
+        let (ok, out, err) = cli(
+            Some(&op),
+            &[legacy, "--key-id", id, "--expect-fingerprint", &wrong],
+        );
         assert!(!ok && out.contains("not the expected"), "{out}{err}");
         assert!(err.contains(&format!("{legacy}: 3 problem(s)")), "{err}");
         // A failed report names no fingerprint as the cluster's.
-        assert!(!out.lines().any(|l| l.starts_with("  fingerprint ")), "{out}");
+        assert!(
+            !out.lines().any(|l| l.starts_with("  fingerprint ")),
+            "{out}"
+        );
 
         // Offline, from what `key show` printed: the same fingerprint, alone on stdout.
         let file = dir.join(format!("{kind}.pub"));
         std::fs::write(&file, format!("{}\n", printed.1)).unwrap();
-        let (ok, out, err) = cli(None, &["key", "fingerprint", "--in", file.to_str().unwrap()]);
+        let (ok, out, err) = cli(
+            None,
+            &["key", "fingerprint", "--in", file.to_str().unwrap()],
+        );
         assert!(ok, "{err}");
         assert_eq!(out, format!("{fp}\n"), "{err}");
         assert!(err.contains("read as"), "{err}");
     }
 
     // Absent ids of either kind: refused, and the process returns rather than serving.
-    for (id, why) in [("frost-participant1-absent", "NotFound"), ("rutli-enc-absent", "does not hold the key")] {
+    for (id, why) in [
+        ("frost-participant1-absent", "NotFound"),
+        ("rutli-enc-absent", "does not hold the key"),
+    ] {
         let started = Instant::now();
         let (ok, out, err) = cli(Some(&op), &["key", "show", "--key-id", id]);
-        assert!(!ok && out.contains(why) && err.contains("key show: 3 problem(s)"), "{out}{err}");
-        assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
+        assert!(
+            !ok && out.contains(why) && err.contains("key show: 3 problem(s)"),
+            "{out}{err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
+        );
     }
 }
 
@@ -368,40 +545,89 @@ fn every_command_takes_its_expectation_to_the_check_and_returns_its_verdict() {
 
     let malformed = "\"1220zz\" is not a 1220";
     for (command, id, kind, name) in [
-        (&["verify-key"][..], "frost-participant1-namespace", "FROST", "verify-key"),
-        (&["verify-hosted"][..], "rutli-enc-1", "hosted", "verify-hosted"),
-        (&["key", "show"][..], "frost-participant1-namespace", "FROST", "key show"),
+        (
+            &["verify-key"][..],
+            "frost-participant1-namespace",
+            "FROST",
+            "verify-key",
+        ),
+        (
+            &["verify-hosted"][..],
+            "rutli-enc-1",
+            "hosted",
+            "verify-hosted",
+        ),
+        (
+            &["key", "show"][..],
+            "frost-participant1-namespace",
+            "FROST",
+            "key show",
+        ),
         (&["key", "show"][..], "rutli-enc-1", "hosted", "key show"),
         // No routing tag: never a hosted key, so a FROST lookup.
-        (&["key", "show"][..], "namespace-participant1", "FROST", "key show"),
+        (
+            &["key", "show"][..],
+            "namespace-participant1",
+            "FROST",
+            "key show",
+        ),
     ] {
         let args = |extra: &[&'static str]| [command, &["--key-id", id], extra].concat();
         let (ok, out, err) = cli(Some(&config), &args(&["--expect-fingerprint", "1220zz"]));
         assert!(!ok, "{out}{err}");
-        assert!(out.starts_with(&format!("{name} {id} ({kind}) — expected 1220zz\n")), "{out}");
-        assert!(out.contains("PROBLEM: --expect-fingerprint: ") && out.contains(malformed), "{out}");
+        assert!(
+            out.starts_with(&format!("{name} {id} ({kind}) — expected 1220zz\n")),
+            "{out}"
+        );
+        assert!(
+            out.contains("PROBLEM: --expect-fingerprint: ") && out.contains(malformed),
+            "{out}"
+        );
         assert!(out.ends_with("FAILED\n"), "{out}");
         assert!(err.contains(&format!("{name}: 4 problem(s)")), "{err}");
-        assert!(!out.lines().any(|l| l.starts_with("  fingerprint ")), "{out}");
+        assert!(
+            !out.lines().any(|l| l.starts_with("  fingerprint ")),
+            "{out}"
+        );
 
-        let (ok, out, err) = cli(Some(&config), &args(&["--expect-fingerprint", "1220zz", "--json"]));
-        let report: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}{err}"));
-        assert!(!ok && report["ok"] == false && report["fingerprint"].is_null(), "{out}");
+        let (ok, out, err) = cli(
+            Some(&config),
+            &args(&["--expect-fingerprint", "1220zz", "--json"]),
+        );
+        let report: serde_json::Value =
+            serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}{err}"));
+        assert!(
+            !ok && report["ok"] == false && report["fingerprint"].is_null(),
+            "{out}"
+        );
         assert_eq!(report["expected_fingerprint"], "1220zz");
         assert_eq!(report["kind"], kind.to_lowercase());
 
         if name == "key show" {
             let (ok, out, err) = cli(Some(&config), &args(&[]));
-            assert!(!ok && out.contains("compared with nothing") && !out.contains("--expect-fingerprint"), "{out}");
-            assert!(out.ends_with("FAILED\n") && err.contains("key show: 3 problem(s)"), "{out}{err}");
+            assert!(
+                !ok && out.contains("compared with nothing")
+                    && !out.contains("--expect-fingerprint"),
+                "{out}"
+            );
+            assert!(
+                out.ends_with("FAILED\n") && err.contains("key show: 3 problem(s)"),
+                "{out}{err}"
+            );
             let (_, out, _) = cli(Some(&config), &args(&["--json"]));
             let report: serde_json::Value = serde_json::from_str(&out).unwrap();
-            assert!(report.get("expected_fingerprint").is_none() && report["fingerprint"].is_null(), "{out}");
+            assert!(
+                report.get("expected_fingerprint").is_none() && report["fingerprint"].is_null(),
+                "{out}"
+            );
         }
     }
     // Without an expectation the older commands do not run at all.
     for command in ["verify-key", "verify-hosted"] {
-        let (ok, _, err) = cli(Some(&config), &[command, "--key-id", "frost-participant1-namespace"]);
+        let (ok, _, err) = cli(
+            Some(&config),
+            &[command, "--key-id", "frost-participant1-namespace"],
+        );
         assert!(!ok && err.contains("--expect-fingerprint"), "{err}");
     }
 }

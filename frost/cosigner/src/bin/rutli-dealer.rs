@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! `rutli-dealer` — the offline dealer of the split ceremony (docs/split-ceremony.md, B2).
@@ -42,7 +42,10 @@ use rutli_cosigner::share_delivery::{self, RecipientRequest};
 use rutli_cosigner::{DaemonError, Result};
 
 #[derive(Parser)]
-#[command(name = "rutli-dealer", about = "Offline dealer for the Rütli split ceremony")]
+#[command(
+    name = "rutli-dealer",
+    about = "Offline dealer for the Rütli split ceremony"
+)]
 struct Args {
     #[command(subcommand)]
     command: Command,
@@ -278,7 +281,9 @@ fn split_key(a: SplitKey) -> Result<()> {
     };
     let requests = read_recipients(&a.recipients, &ca_pem, &cluster_id)?;
     confirm_sas(&requests, a.confirm_sas.as_deref())?;
-    let first = requests.first().ok_or_else(|| refuse("no --recipient given".into()))?;
+    let first = requests
+        .first()
+        .ok_or_else(|| refuse("no --recipient given".into()))?;
     if first.key_id != a.key_id {
         return Err(refuse(format!(
             "recipients were made for key id {}, not {}",
@@ -293,12 +298,18 @@ fn split_key(a: SplitKey) -> Result<()> {
     }
     let outputs: Vec<PathBuf> = requests
         .iter()
-        .map(|r| a.out_dir.join(format!("share-{}-node{}.json", r.key_id, r.identifier)))
+        .map(|r| {
+            a.out_dir
+                .join(format!("share-{}-node{}.json", r.key_id, r.identifier))
+        })
         .chain(std::iter::once(a.out_dir.join("dealer-record.json")))
         .collect();
     for path in &outputs {
         if path.exists() {
-            return Err(refuse(format!("{} exists — refusing to overwrite", path.display())));
+            return Err(refuse(format!(
+                "{} exists — refusing to overwrite",
+                path.display()
+            )));
         }
     }
 
@@ -313,7 +324,11 @@ fn split_key(a: SplitKey) -> Result<()> {
         None => None,
     };
     let raw = Zeroizing::new(std::fs::read(&a.input)?);
-    let input = if a.stored_hex { decode_hex_text(&raw)? } else { raw };
+    let input = if a.stored_hex {
+        decode_hex_text(&raw)?
+    } else {
+        raw
+    };
     let key = rutli_canton_key::parse(&input, password.as_ref().map(|p| p.as_bytes()))
         .map_err(|e| refuse(format!("cannot read the key: {e}")))?;
     drop(input);
@@ -326,7 +341,12 @@ fn split_key(a: SplitKey) -> Result<()> {
         )));
     }
     let fingerprint = key.fingerprint();
-    if fingerprint != expect || key.canton_id.as_ref().is_some_and(|id| id.to_ascii_lowercase() != expect) {
+    if fingerprint != expect
+        || key
+            .canton_id
+            .as_ref()
+            .is_some_and(|id| id.to_ascii_lowercase() != expect)
+    {
         return Err(refuse(format!(
             "this key's fingerprint is {fingerprint}, not the expected {expect} — wrong key file"
         )));
@@ -347,7 +367,8 @@ fn split_key(a: SplitKey) -> Result<()> {
 
     // 3. Split (every check of the dealer module runs inside) and seal.
     let roster: Vec<u16> = requests.iter().map(|r| r.identifier).collect();
-    let (mut shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(seed, &roster, a.threshold)?;
+    let (mut shares, pkp) =
+        rutli_frost_core::dealer::split_ed25519_seed(seed, &roster, a.threshold)?;
     drop(key); // the seed is wiped here
     let sealed: Result<Vec<_>> = requests
         .iter()
@@ -393,7 +414,12 @@ fn split_key(a: SplitKey) -> Result<()> {
         bundles: outputs
             .iter()
             .take(bundles.len())
-            .map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned())
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect(),
         dealer_binary_sha256: self_sha256(),
         dealer_version: env!("CARGO_PKG_VERSION"),
@@ -414,7 +440,13 @@ fn split_key(a: SplitKey) -> Result<()> {
     let record_path = outputs.last().expect("record path");
     write_new(record_path, &serde_json::to_vec_pretty(&record)?)?;
 
-    println!("split {} into {}-of-{} for cluster {}", fingerprint, a.threshold, roster.len(), first.cluster_id);
+    println!(
+        "split {} into {}-of-{} for cluster {}",
+        fingerprint,
+        a.threshold,
+        roster.len(),
+        first.cluster_id
+    );
     println!("  key id:        {}", a.key_id);
     println!(
         "  carried for:   {} (recorded usage: {})",
@@ -495,17 +527,35 @@ struct RecordRecipient {
 /// `request_auth::verify_request_for_cluster`), and check they describe one ceremony: same key,
 /// ceremony, cluster, threshold, size and roster; one request per roster member, no duplicates, no
 /// strays.
-fn read_recipients(paths: &[PathBuf], ca_pem: &[u8], cluster_id: &str) -> Result<Vec<VerifiedRequest>> {
+fn read_recipients(
+    paths: &[PathBuf],
+    ca_pem: &[u8],
+    cluster_id: &str,
+) -> Result<Vec<VerifiedRequest>> {
     let mut requests = Vec::with_capacity(paths.len());
     for p in paths {
-        let r: RecipientRequest = serde_json::from_slice(&std::fs::read(p)?)
-            .map_err(|e| refuse(format!("{} is not a share-recipient request: {e}", p.display())))?;
-        r.validate().map_err(|e| refuse(format!("{}: {e}", p.display())))?;
-        let verified = rutli_cosigner::request_auth::verify_request_for_cluster(&r, ca_pem, cluster_id)
-            .map_err(|e| refuse(format!("{}: {e} — do not seal to it; see the runbook", p.display())))?;
+        let r: RecipientRequest = serde_json::from_slice(&std::fs::read(p)?).map_err(|e| {
+            refuse(format!(
+                "{} is not a share-recipient request: {e}",
+                p.display()
+            ))
+        })?;
+        r.validate()
+            .map_err(|e| refuse(format!("{}: {e}", p.display())))?;
+        let verified =
+            rutli_cosigner::request_auth::verify_request_for_cluster(&r, ca_pem, cluster_id)
+                .map_err(|e| {
+                    refuse(format!(
+                        "{}: {e} — do not seal to it; see the runbook",
+                        p.display()
+                    ))
+                })?;
         requests.push(verified);
     }
-    let first = requests.first().ok_or_else(|| refuse("no --recipient given".into()))?.clone();
+    let first = requests
+        .first()
+        .ok_or_else(|| refuse("no --recipient given".into()))?
+        .clone();
     for r in requests.iter().skip(1) {
         if r.ceremony_params() != first.ceremony_params() {
             return Err(refuse(format!(
@@ -524,7 +574,9 @@ fn read_recipients(paths: &[PathBuf], ca_pem: &[u8], cluster_id: &str) -> Result
     }
     let pubs: BTreeSet<&str> = requests.iter().map(|r| r.recipient_pub.as_str()).collect();
     if pubs.len() != requests.len() {
-        return Err(refuse("two recipient requests share a recipient key".into()));
+        return Err(refuse(
+            "two recipient requests share a recipient key".into(),
+        ));
     }
     if ids.iter().copied().collect::<Vec<_>>() != first.roster {
         return Err(refuse(format!(
@@ -540,13 +592,18 @@ fn read_recipients(paths: &[PathBuf], ca_pem: &[u8], cluster_id: &str) -> Result
 /// not carry the request files. From `--confirm-sas` (identifier order), or typed on the terminal.
 fn confirm_sas(requests: &[VerifiedRequest], given: Option<&str>) -> Result<()> {
     use std::io::{BufRead, IsTerminal};
-    let expected: Vec<(u16, String)> =
-        requests.iter().map(|r| (r.identifier, rutli_cosigner::request_auth::sas(r))).collect();
+    let expected: Vec<(u16, String)> = requests
+        .iter()
+        .map(|r| (r.identifier, rutli_cosigner::request_auth::sas(r)))
+        .collect();
     for (id, sas) in &expected {
         println!("request node {id}: SAS {sas}");
     }
     let typed: Vec<String> = match given {
-        Some(list) => list.split(',').map(|s| s.trim().to_ascii_lowercase()).collect(),
+        Some(list) => list
+            .split(',')
+            .map(|s| s.trim().to_ascii_lowercase())
+            .collect(),
         None => {
             if !std::io::stdin().is_terminal() {
                 return Err(refuse(
@@ -658,7 +715,10 @@ fn harden() -> Hardening {
         // reached — an abort mid-split. So lock only where it cannot bite: as root (CAP_IPC_LOCK,
         // the live-boot host) or with an unlimited memlock limit.
         let memory_locked = unsafe {
-            let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+            let mut lim = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
             let unlimited = libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut lim) == 0
                 && lim.rlim_cur == libc::RLIM_INFINITY;
             (libc::geteuid() == 0 || unlimited)
@@ -691,8 +751,14 @@ mod tests {
 
     #[test]
     fn stored_hex_text_is_decoded_with_or_without_the_psql_prefix() {
-        assert_eq!(decode_hex_text(b"\\x0aff\n").unwrap().as_slice(), &[0x0a, 0xff]);
-        assert_eq!(decode_hex_text(b" 0a ff ").unwrap().as_slice(), &[0x0a, 0xff]);
+        assert_eq!(
+            decode_hex_text(b"\\x0aff\n").unwrap().as_slice(),
+            &[0x0a, 0xff]
+        );
+        assert_eq!(
+            decode_hex_text(b" 0a ff ").unwrap().as_slice(),
+            &[0x0a, 0xff]
+        );
         assert!(decode_hex_text(b"\\x0af").is_err(), "odd length");
         assert!(decode_hex_text(b"zz").is_err());
     }

@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! The networked half of DKG/refresh, run by every node for itself:
@@ -25,8 +25,8 @@ use frost_ed25519::Identifier;
 use sha2::{Digest, Sha256};
 
 use crate::ceremony_record::{
-    decide, equivocation, mixed_evidence, quarantine_droppable, split_evident, CeremonyRecord, Decision, PeerReport,
-    RecordState, StatusInfo,
+    decide, equivocation, mixed_evidence, quarantine_droppable, split_evident, CeremonyRecord,
+    Decision, PeerReport, RecordState, StatusInfo,
 };
 use crate::node::{CeremonyKind, KeyVersion, Node};
 use crate::{DaemonError, Result};
@@ -52,7 +52,10 @@ pub struct DigestContext<'a> {
 /// u64 old_epoch ‖ old_pkp_digest[32 or zero] ‖ Σ_{id asc}(id ‖ lp(package)))`, with frost's own
 /// canonical serializations and `lp` a u32 big-endian length prefix. Equal on two nodes iff they
 /// were shown the same round-1 map for the same ceremony.
-pub fn round1_digest(ctx: &DigestContext<'_>, map: &BTreeMap<Identifier, round1::Package>) -> Result<[u8; 32]> {
+pub fn round1_digest(
+    ctx: &DigestContext<'_>,
+    map: &BTreeMap<Identifier, round1::Package>,
+) -> Result<[u8; 32]> {
     fn lp(h: &mut Sha256, bytes: &[u8]) {
         h.update((bytes.len() as u32).to_be_bytes());
         h.update(bytes);
@@ -94,14 +97,20 @@ pub async fn part2_and_deliver(
     leader: Option<String>,
 ) -> Result<Part2Outcome> {
     let id = ceremony_id.to_owned();
-    let (digest, packages) =
-        node.blocking(move |n| n.ceremony_part2_compute(&id, &round1_map, leader.as_deref())).await?;
+    let (digest, packages) = node
+        .blocking(move |n| n.ceremony_part2_compute(&id, &round1_map, leader.as_deref()))
+        .await?;
     let me = node.index()?;
     let mut delivered = Vec::new();
     for (to, package) in packages {
         let sent = match node.mesh_peer(to) {
-            Some(peer) => peer.ceremony_deliver(ceremony_id, me, to, &digest, &package).await,
-            None => Err(DaemonError::CeremonyRefused(format!("node {to} is not in this node's mesh"))),
+            Some(peer) => {
+                peer.ceremony_deliver(ceremony_id, me, to, &digest, &package)
+                    .await
+            }
+            None => Err(DaemonError::CeremonyRefused(format!(
+                "node {to} is not in this node's mesh"
+            ))),
         };
         if let Err(e) = sent {
             // The recipient's error text (serde errors from parsing a package, for one) stays in
@@ -116,7 +125,10 @@ pub async fn part2_and_deliver(
         }
         delivered.push(to);
     }
-    Ok(Part2Outcome { round1_digest: digest, delivered })
+    Ok(Part2Outcome {
+        round1_digest: digest,
+        delivered,
+    })
 }
 
 /// The category of a failed round-2 delivery, for the leader: a gRPC code or an error kind,
@@ -128,7 +140,9 @@ fn delivery_failure_code(e: &DaemonError) -> &'static str {
         DaemonError::NotServing(_) | DaemonError::KeystoreDown(_) => "recipient not serving",
         DaemonError::UnknownDkg(_) => "recipient has no such session",
         DaemonError::Serde(_) | DaemonError::Frost(_) => "malformed package",
-        DaemonError::CeremonyRefused(_) | DaemonError::Ceremony(_) | DaemonError::Config(_) => "refused by the recipient",
+        DaemonError::CeremonyRefused(_) | DaemonError::Ceremony(_) | DaemonError::Config(_) => {
+            "refused by the recipient"
+        }
         _ => "error",
     }
 }
@@ -154,16 +168,26 @@ where
     match tokio::spawn(fut).await {
         Ok(result) => result,
         Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-        Err(e) => Err(DaemonError::Io(std::io::Error::other(format!("ceremony task did not run: {e}")))),
+        Err(e) => Err(DaemonError::Io(std::io::Error::other(format!(
+            "ceremony task did not run: {e}"
+        )))),
     }
 }
 
 /// Every other roster node's answer about `rec`'s ceremony, asked directly. Nodes in `skip` are
 /// not asked. A node that cannot be asked reports [`PeerReport::Unknown`].
-async fn gather(node: &Arc<Node>, rec: &CeremonyRecord, skip: &[u16]) -> Result<BTreeMap<u16, PeerReport>> {
+async fn gather(
+    node: &Arc<Node>,
+    rec: &CeremonyRecord,
+    skip: &[u16],
+) -> Result<BTreeMap<u16, PeerReport>> {
     let me = node.index()?;
     let mut reports = BTreeMap::new();
-    for &id in rec.roster.iter().filter(|&&id| id != me && !skip.contains(&id)) {
+    for &id in rec
+        .roster
+        .iter()
+        .filter(|&&id| id != me && !skip.contains(&id))
+    {
         let report = match node.mesh_peer(id) {
             None => PeerReport::Unknown("not in this node's mesh".into()),
             Some(peer) => match peer.ceremony_status(&rec.ceremony_id).await {
@@ -193,13 +217,19 @@ pub async fn resolve(node: &Arc<Node>, ceremony_id: &str) -> Result<StatusInfo> 
 /// proves the equivocation ([`equivocation`]). Every resolver abort keeps the staged share
 /// quarantined; it is dropped once every peer is terminal with nobody committed
 /// ([`quarantine_droppable`]).
-pub async fn resolve_from(node: &Arc<Node>, ceremony_id: &str, asker: Option<String>) -> Result<StatusInfo> {
+pub async fn resolve_from(
+    node: &Arc<Node>,
+    ceremony_id: &str,
+    asker: Option<String>,
+) -> Result<StatusInfo> {
     let rec = match node.ceremony_record(ceremony_id) {
         Some(r) if r.state == RecordState::Staged => r,
         Some(r) => return Ok(StatusInfo::from_record(&r)),
         None => {
             let id = ceremony_id.to_owned();
-            return node.blocking(move |n| n.ceremony_status_from(&id, asker.as_deref())).await;
+            return node
+                .blocking(move |n| n.ceremony_status_from(&id, asker.as_deref()))
+                .await;
         }
     };
     let me = node.index()?;
@@ -234,9 +264,11 @@ pub async fn resolve_from(node: &Arc<Node>, ceremony_id: &str, asker: Option<Str
             "ceremony reported both COMMITTED and ABORTED by peers — a cosigner equivocated (docs/ceremonies.md)"
         );
     }
-    let quarantine = matches!(decision, Decision::Abort(_)) && !quarantine_droppable(&rec, me, &reports);
+    let quarantine =
+        matches!(decision, Decision::Abort(_)) && !quarantine_droppable(&rec, me, &reports);
     let id = ceremony_id.to_owned();
-    node.blocking(move |n| n.apply_resolution_with(&id, &decision, quarantine, split)).await
+    node.blocking(move |n| n.apply_resolution_with(&id, &decision, quarantine, split))
+        .await
 }
 
 /// One resolver pass: every STAGED ceremony, then settling and garbage-collecting finished ones.
@@ -262,7 +294,9 @@ pub async fn resolve_pending(node: &Arc<Node>) -> usize {
     // split; every peer terminal with nobody committed frees the share.
     if let Ok(me) = node.index() {
         for rec in node.quarantined_records() {
-            let Ok(reports) = gather(node, &rec, &[]).await else { continue };
+            let Ok(reports) = gather(node, &rec, &[]).await else {
+                continue;
+            };
             if split_evident(&rec, me, &reports) {
                 if node.flag_split(&rec.ceremony_id).unwrap_or(false) {
                     metrics::counter!(crate::metrics::CEREMONY_EQUIVOCATIONS).increment(1);
@@ -286,18 +320,28 @@ pub async fn resolve_pending(node: &Arc<Node>) -> usize {
     }
     match node.gc_quarantine(QUARANTINE_RETENTION) {
         Ok(0) => {}
-        Ok(n) => tracing::info!(dropped = n, "dropped quarantined staged shares past their retention"),
+        Ok(n) => tracing::info!(
+            dropped = n,
+            "dropped quarantined staged shares past their retention"
+        ),
         Err(e) => tracing::warn!(error = %e, "quarantine garbage collection failed"),
     }
     metrics::gauge!(crate::metrics::CEREMONIES_SPLIT).set(node.split_count() as f64);
     node.publish_refresh_gauge();
     for rec in node.unsettled_records() {
-        let Ok(reports) = gather(node, &rec, &[]).await else { continue };
+        let Ok(reports) = gather(node, &rec, &[]).await else {
+            continue;
+        };
         let settled = rec
             .roster
             .iter()
             .filter(|&&id| node.index().map(|me| me != id).unwrap_or(true))
-            .all(|id| matches!(reports.get(id), Some(PeerReport::Committed(_)) | Some(PeerReport::Aborted)));
+            .all(|id| {
+                matches!(
+                    reports.get(id),
+                    Some(PeerReport::Committed(_)) | Some(PeerReport::Aborted)
+                )
+            });
         if settled {
             if let Err(e) = node.mark_settled(&rec.ceremony_id) {
                 tracing::warn!(ceremony_id = %rec.ceremony_id, error = %e, "could not mark a ceremony settled");
@@ -329,10 +373,16 @@ pub fn spawn_resolver(node: Arc<Node>, interval: Duration) -> tokio::task::JoinH
 /// nodes' shares are gone with them. Every roster node not in `lost` must answer. A "lost" node
 /// that comes back after this holds a share nobody else can combine with; never use it for a node
 /// that may return.
-pub async fn resolve_assume_lost(node: &Arc<Node>, ceremony_id: &str, lost: &[u16]) -> Result<StatusInfo> {
+pub async fn resolve_assume_lost(
+    node: &Arc<Node>,
+    ceremony_id: &str,
+    lost: &[u16],
+) -> Result<StatusInfo> {
     let me = node.index()?;
     if lost.contains(&me) {
-        return Err(DaemonError::CeremonyRefused("this node cannot assume itself lost".into()));
+        return Err(DaemonError::CeremonyRefused(
+            "this node cannot assume itself lost".into(),
+        ));
     }
     let rec = node
         .ceremony_record(ceremony_id)
@@ -341,7 +391,9 @@ pub async fn resolve_assume_lost(node: &Arc<Node>, ceremony_id: &str, lost: &[u1
         return Ok(StatusInfo::from_record(&rec));
     }
     if let Some(stranger) = lost.iter().find(|id| !rec.roster.contains(id)) {
-        return Err(DaemonError::CeremonyRefused(format!("node {stranger} is not in this ceremony's roster")));
+        return Err(DaemonError::CeremonyRefused(format!(
+            "node {stranger} is not in this ceremony's roster"
+        )));
     }
     let reports = gather(node, &rec, lost).await?;
     // Evidence among the reachable nodes decides exactly as the normal resolver would.
@@ -350,7 +402,11 @@ pub async fn resolve_assume_lost(node: &Arc<Node>, ceremony_id: &str, lost: &[u1
         let mine = rec.outcome();
         let mut missing = Vec::new();
         let mut someone_committed = false;
-        for &id in rec.roster.iter().filter(|&&id| id != me && !lost.contains(&id)) {
+        for &id in rec
+            .roster
+            .iter()
+            .filter(|&&id| id != me && !lost.contains(&id))
+        {
             match reports.get(&id) {
                 Some(PeerReport::Committed(o)) if *o == mine => someone_committed = true,
                 Some(PeerReport::Staged(o)) if *o == mine => {}
@@ -374,7 +430,8 @@ pub async fn resolve_assume_lost(node: &Arc<Node>, ceremony_id: &str, lost: &[u1
     }
     tracing::warn!(ceremony_id, ?lost, decision = ?normal, "break-glass ceremony resolution");
     let id = ceremony_id.to_owned();
-    node.blocking(move |n| n.apply_resolution(&id, &normal)).await
+    node.blocking(move |n| n.apply_resolution(&id, &normal))
+        .await
 }
 
 /// Operator recovery of a split (audit F3; `rutli-cosigner ceremony recover-commit`, daemon
@@ -399,7 +456,11 @@ pub async fn recover_commit(node: &Arc<Node>, ceremony_id: &str) -> Result<Statu
         return Err(DaemonError::CeremonyRefused(format!(
             "ceremony {ceremony_id} is {} here{} — nothing to recover",
             rec.state.as_str(),
-            if rec.state == RecordState::Aborted { " and its staged share is not quarantined" } else { "" }
+            if rec.state == RecordState::Aborted {
+                " and its staged share is not quarantined"
+            } else {
+                ""
+            }
         )));
     }
     let reports = gather(node, &rec, &[]).await?;
@@ -417,7 +478,9 @@ pub async fn recover_commit(node: &Arc<Node>, ceremony_id: &str) -> Result<Statu
         if !matches!(r, PeerReport::Committed(o) if *o == mine) {
             continue;
         }
-        let Some(peer) = node.mesh_peer(id) else { continue };
+        let Some(peer) = node.mesh_peer(id) else {
+            continue;
+        };
         match peer.key_epoch(&rec.key_id).await {
             Ok(v) if v.present && v.epoch == rec.new_epoch && hex::encode(&v.pkp_digest) == rec.new_pkp_digest => {
                 proven.push(id)
@@ -464,8 +527,16 @@ pub struct DiscardReport {
 ///
 /// The caller holds the instance lock (the daemon on this node is stopped). Whether Canton ever
 /// registered the key — a 2-of-3 partial key held by two nodes can sign — only the operator knows.
-pub async fn discard_partial_key(node: &Arc<Node>, key_id: &str, confirm_group_key: &[u8; 32]) -> Result<DiscardReport> {
-    let refuse = |why: String| Err(DaemonError::CeremonyRefused(format!("discard-partial-key {key_id}: {why}")));
+pub async fn discard_partial_key(
+    node: &Arc<Node>,
+    key_id: &str,
+    confirm_group_key: &[u8; 32],
+) -> Result<DiscardReport> {
+    let refuse = |why: String| {
+        Err(DaemonError::CeremonyRefused(format!(
+            "discard-partial-key {key_id}: {why}"
+        )))
+    };
     let me = node.index()?;
     let local = {
         let id = key_id.to_owned();
@@ -501,12 +572,16 @@ pub async fn discard_partial_key(node: &Arc<Node>, key_id: &str, confirm_group_k
         if id == me {
             continue;
         }
-        let peer = node
-            .mesh_peer(id)
-            .ok_or_else(|| DaemonError::CeremonyRefused(format!("node {id} is not in the roster mesh")))?;
+        let peer = node.mesh_peer(id).ok_or_else(|| {
+            DaemonError::CeremonyRefused(format!("node {id} is not in the roster mesh"))
+        })?;
         let view = match peer.key_epoch(key_id).await {
             Ok(v) => v,
-            Err(e) => return refuse(format!("node {id} did not answer ({e}) — every node must, to prove the key is partial")),
+            Err(e) => {
+                return refuse(format!(
+                    "node {id} did not answer ({e}) — every node must, to prove the key is partial"
+                ))
+            }
         };
         if view.staged || (view.present && view.epoch >= 1) {
             return refuse(format!(
@@ -524,5 +599,8 @@ pub async fn discard_partial_key(node: &Arc<Node>, key_id: &str, confirm_group_k
     let id = key_id.to_owned();
     node.blocking(move |n| n.discard_local_key(&id)).await?;
     holders.sort_unstable();
-    Ok(DiscardReport { key_id: key_id.to_string(), holders })
+    Ok(DiscardReport {
+        key_id: key_id.to_string(),
+        holders,
+    })
 }

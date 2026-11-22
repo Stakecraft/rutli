@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Write quality/baseline.json from the current.json files of Quality runs: one run on main (every
 # tree metric, with coverage) and one nightly run (cargo audit, image scan). Later files win for

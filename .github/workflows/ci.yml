@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 name: CI
 
@@ -100,13 +100,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
         with:
           toolchain: ${{ steps.rust.outputs.version }}
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: frost
           # Only main saves: a pull request saves its own 440 MB copy per dependency change and
           # fills the repository's 10 GB cache (docs/ci-cache.md). Pull requests still restore main's.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # First, and cheap: a file that rustfmt would change fails the job before the build.
+      - name: Formatting (rustfmt of the pinned toolchain; fix with scripts/fmt-tree.sh)
+        run: scripts/fmt-tree.sh --check
       - name: Test
         working-directory: frost
         run: cargo test --locked

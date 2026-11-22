@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! The per-node sign journal (audit C2) and the per-key sign rate limit it backs.
@@ -217,7 +217,11 @@ impl SignJournal {
         if let Some(k) = keys.get(key_id) {
             return Ok(k.clone());
         }
-        let k = Arc::new(Mutex::new(KeyJournal::open(&self.dir.join(key_id), now_ms, self.retention)?));
+        let k = Arc::new(Mutex::new(KeyJournal::open(
+            &self.dir.join(key_id),
+            now_ms,
+            self.retention,
+        )?));
         keys.insert(key_id.to_string(), k.clone());
         Ok(k)
     }
@@ -234,7 +238,12 @@ impl SignJournal {
     /// Charge (if `entry` has a new charge id) against `limits`, then append `entry` durably — or
     /// refuse with [`DaemonError::RateLimited`] and append nothing. `seq`, `ts_ms`, `node`, `prev`
     /// and `hash` are filled in here. The check and the append are one step per key.
-    pub fn append_charged(&self, entry: JournalEntry, limits: Limits, now_ms: u64) -> Result<JournalEntry> {
+    pub fn append_charged(
+        &self,
+        entry: JournalEntry,
+        limits: Limits,
+        now_ms: u64,
+    ) -> Result<JournalEntry> {
         // A broken or poisoned instance is evicted and the journal reopened from disk; twice in a
         // row means the disk itself is the problem, and the caller gets the error.
         for _ in 0..2 {
@@ -269,7 +278,13 @@ impl SignJournal {
         )))
     }
 
-    fn charge_and_append(&self, k: &mut KeyJournal, mut entry: JournalEntry, limits: Limits, now_ms: u64) -> Result<JournalEntry> {
+    fn charge_and_append(
+        &self,
+        k: &mut KeyJournal,
+        mut entry: JournalEntry,
+        limits: Limits,
+        now_ms: u64,
+    ) -> Result<JournalEntry> {
         k.prune(now_ms);
         if let Some(id) = entry.charge_id() {
             match k.shares.get(&id) {
@@ -282,7 +297,12 @@ impl SignJournal {
                 }
                 Some(_) => {}
                 None => {
-                    let last_min = k.charges.iter().rev().take_while(|(t, _)| *t + MINUTE_MS > now_ms).count();
+                    let last_min = k
+                        .charges
+                        .iter()
+                        .rev()
+                        .take_while(|(t, _)| *t + MINUTE_MS > now_ms)
+                        .count();
                     if limits.per_min > 0 && last_min >= limits.per_min as usize {
                         return Err(DaemonError::RateLimited(format!(
                             "key {}: {last_min} signatures in the last minute on this node \
@@ -442,16 +462,24 @@ impl KeyJournal {
         entry.hash = entry.compute_hash();
         let mut line = serde_json::to_vec(&entry)?;
         line.push(b'\n');
-        let mut f = std::fs::OpenOptions::new().append(true).open(&self.current)?;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&self.current)?;
         let written = (|| -> std::io::Result<()> {
             #[cfg(test)]
-            if matches!(fault, Some(Fault::PartialWrite) | Some(Fault::PartialWriteNoRollback)) {
+            if matches!(
+                fault,
+                Some(Fault::PartialWrite) | Some(Fault::PartialWriteNoRollback)
+            ) {
                 f.write_all(&line[..line.len() / 2])?;
                 return Err(std::io::Error::other("injected: partial write"));
             }
             f.write_all(&line)?;
             #[cfg(test)]
-            if matches!(fault, Some(Fault::SyncFails) | Some(Fault::SyncAndRollbackFail)) {
+            if matches!(
+                fault,
+                Some(Fault::SyncFails) | Some(Fault::SyncAndRollbackFail)
+            ) {
                 return Err(std::io::Error::other("injected: fsync failed"));
             }
             f.sync_data()
@@ -459,10 +487,16 @@ impl KeyJournal {
         if let Err(e) = written {
             self.broken = true;
             #[cfg(test)]
-            let skip_rollback = matches!(fault, Some(Fault::SyncAndRollbackFail) | Some(Fault::PartialWriteNoRollback));
+            let skip_rollback = matches!(
+                fault,
+                Some(Fault::SyncAndRollbackFail) | Some(Fault::PartialWriteNoRollback)
+            );
             #[cfg(not(test))]
             let skip_rollback = false;
-            let rolled_back = !skip_rollback && f.set_len(self.current_len).and_then(|()| f.sync_all()).is_ok();
+            let rolled_back = !skip_rollback
+                && f.set_len(self.current_len)
+                    .and_then(|()| f.sync_all())
+                    .is_ok();
             tracing::error!(
                 file = %self.current.display(),
                 error = %e,
@@ -480,7 +514,9 @@ impl KeyJournal {
 
     /// Delete closed segments past the retention age or the size cap, oldest first.
     fn sweep(&mut self, retention: Retention, now_ms: u64) {
-        let Ok(segs) = segments(&self.dir) else { return };
+        let Ok(segs) = segments(&self.dir) else {
+            return;
+        };
         let mut sized: Vec<(PathBuf, u64, Option<std::time::SystemTime>)> = segs
             .into_iter()
             .map(|p| {
@@ -494,8 +530,11 @@ impl KeyJournal {
         let now = std::time::UNIX_EPOCH + std::time::Duration::from_millis(now_ms);
         let mut removed = false;
         while sized.len() > 1 {
-            let Some((path, len, modified)) = sized.first() else { break };
-            let too_old = modified.is_some_and(|m| now.duration_since(m).is_ok_and(|age| age > max_age));
+            let Some((path, len, modified)) = sized.first() else {
+                break;
+            };
+            let too_old =
+                modified.is_some_and(|m| now.duration_since(m).is_ok_and(|age| age > max_age));
             if !(too_old || total > retention.max_bytes) {
                 break;
             }
@@ -525,7 +564,9 @@ pub fn segments(dir: &Path) -> Result<Vec<PathBuf>> {
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| {
                 p.extension().is_some_and(|x| x == "jsonl")
-                    && p.file_stem().and_then(|s| s.to_str()).is_some_and(|s| s.len() == 20 && s.bytes().all(|b| b.is_ascii_digit()))
+                    && p.file_stem()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|s| s.len() == 20 && s.bytes().all(|b| b.is_ascii_digit()))
             })
             .collect(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
@@ -541,7 +582,11 @@ fn torn_tail(path: &Path) -> Result<usize> {
     if bytes.is_empty() || bytes.last() == Some(&b'\n') {
         return Ok(0);
     }
-    let cut = bytes.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0);
+    let cut = bytes
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
     // A complete entry missing only its newline cannot be told from a torn one that happens to
     // parse; both are treated as never acknowledged (the append returns only after the newline is
     // fsynced with the rest).
@@ -554,13 +599,22 @@ fn read_segment(path: &Path) -> Result<(Vec<JournalEntry>, usize)> {
     let torn = if bytes.is_empty() || bytes.last() == Some(&b'\n') {
         0
     } else {
-        bytes.len() - bytes.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0)
+        bytes.len()
+            - bytes
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map(|i| i + 1)
+                .unwrap_or(0)
     };
     let body = bytes
         .get(..bytes.len().saturating_sub(torn))
         .ok_or_else(|| corrupt(path, "the torn tail is longer than the segment"))?;
     let mut out = Vec::new();
-    for (i, line) in body.split(|&b| b == b'\n').filter(|l| !l.is_empty()).enumerate() {
+    for (i, line) in body
+        .split(|&b| b == b'\n')
+        .filter(|l| !l.is_empty())
+        .enumerate()
+    {
         let e: JournalEntry = serde_json::from_slice(line)
             .map_err(|err| corrupt(path, &format!("line {} does not parse: {err}", i + 1)))?;
         out.push(e);
@@ -573,7 +627,10 @@ fn verify_entries(entries: &[JournalEntry], path: &Path) -> Result<()> {
     let mut before: Option<&JournalEntry> = None;
     for e in entries {
         if e.hash != e.compute_hash() {
-            return Err(corrupt(path, &format!("entry seq {} does not match its hash", e.seq)));
+            return Err(corrupt(
+                path,
+                &format!("entry seq {} does not match its hash", e.seq),
+            ));
         }
         if before.is_some_and(|p| e.prev != p.hash || p.seq.checked_add(1) != Some(e.seq)) {
             return Err(corrupt(path, &format!("the chain breaks at seq {}", e.seq)));
@@ -588,7 +645,10 @@ fn verify_entries(entries: &[JournalEntry], path: &Path) -> Result<()> {
 /// may have been deleted by retention). For the offline tools.
 pub fn read_key_dir(dir: &Path) -> Result<ReadReport> {
     let segs = segments(dir)?;
-    let mut report = ReadReport { segments: segs.len(), ..Default::default() };
+    let mut report = ReadReport {
+        segments: segs.len(),
+        ..Default::default()
+    };
     for (i, seg) in segs.iter().enumerate() {
         let (entries, torn) = read_segment(seg)?;
         if torn > 0 {
@@ -599,7 +659,10 @@ pub fn read_key_dir(dir: &Path) -> Result<ReadReport> {
         }
         if let (Some(prev), Some(first)) = (report.entries.last(), entries.first()) {
             if first.prev != prev.hash || first.seq != prev.seq + 1 {
-                return Err(corrupt(seg, "the segment does not continue the previous one's chain"));
+                return Err(corrupt(
+                    seg,
+                    "the segment does not continue the previous one's chain",
+                ));
             }
         }
         verify_entries(&entries, seg)?;
@@ -609,7 +672,11 @@ pub fn read_key_dir(dir: &Path) -> Result<ReadReport> {
 }
 
 fn check_key_id(key_id: &str) -> Result<()> {
-    if key_id.is_empty() || !key_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if key_id.is_empty()
+        || !key_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(DaemonError::Config(format!("invalid key id: {key_id:?}")));
     }
     Ok(())
@@ -627,8 +694,15 @@ fn corrupt(path: &Path, what: &str) -> DaemonError {
 mod tests {
     use super::*;
 
-    const LIMITS: Limits = Limits { per_min: 3, per_day: 5, max_shares_per_charge: 2 };
-    const KEEP: Retention = Retention { days: 90, max_bytes: 64 << 20 };
+    const LIMITS: Limits = Limits {
+        per_min: 3,
+        per_day: 5,
+        max_shares_per_charge: 2,
+    };
+    const KEEP: Retention = Retention {
+        days: 90,
+        max_bytes: 64 << 20,
+    };
 
     fn entry(key: &str, request: &str) -> JournalEntry {
         JournalEntry {
@@ -648,37 +722,61 @@ mod tests {
         {
             let j = SignJournal::open(tmp.path(), 1, KEEP).unwrap();
             for (i, r) in ["a", "b", "c"].iter().enumerate() {
-                j.append_charged(entry("k", r), LIMITS, t0 + i as u64).unwrap();
+                j.append_charged(entry("k", r), LIMITS, t0 + i as u64)
+                    .unwrap();
             }
             // Per minute: the 4th distinct request in the minute is refused, nothing appended.
-            assert!(matches!(j.append_charged(entry("k", "d"), LIMITS, t0 + 10), Err(DaemonError::RateLimited(_))));
+            assert!(matches!(
+                j.append_charged(entry("k", "d"), LIMITS, t0 + 10),
+                Err(DaemonError::RateLimited(_))
+            ));
             // The same request again is not a new charge, but is capped per request.
             j.append_charged(entry("k", "a"), LIMITS, t0 + 11).unwrap();
-            assert!(matches!(j.append_charged(entry("k", "a"), LIMITS, t0 + 12), Err(DaemonError::RateLimited(_))));
+            assert!(matches!(
+                j.append_charged(entry("k", "a"), LIMITS, t0 + 12),
+                Err(DaemonError::RateLimited(_))
+            ));
         }
         let report = read_key_dir(&tmp.path().join("k")).unwrap();
-        assert_eq!(report.entries.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+        assert_eq!(
+            report.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
         assert_eq!(report.entries[0].prev, GENESIS);
         assert_eq!(report.entries[0].node, 1);
 
         // A restart rebuilds the ledger: still 3 charges in that minute, 3 of 5 for the day.
         let j = SignJournal::open(tmp.path(), 1, KEEP).unwrap();
-        assert!(matches!(j.append_charged(entry("k", "e"), LIMITS, t0 + 20), Err(DaemonError::RateLimited(_))));
-        assert!(matches!(j.append_charged(entry("k", "a"), LIMITS, t0 + 21), Err(DaemonError::RateLimited(_))));
+        assert!(matches!(
+            j.append_charged(entry("k", "e"), LIMITS, t0 + 20),
+            Err(DaemonError::RateLimited(_))
+        ));
+        assert!(matches!(
+            j.append_charged(entry("k", "a"), LIMITS, t0 + 21),
+            Err(DaemonError::RateLimited(_))
+        ));
         let later = t0 + 2 * MINUTE_MS;
         j.append_charged(entry("k", "e"), LIMITS, later).unwrap();
         j.append_charged(entry("k", "f"), LIMITS, later).unwrap();
         // Day limit: 5 charges in 24 h.
-        assert!(matches!(j.append_charged(entry("k", "g"), LIMITS, later + 1), Err(DaemonError::RateLimited(_))));
+        assert!(matches!(
+            j.append_charged(entry("k", "g"), LIMITS, later + 1),
+            Err(DaemonError::RateLimited(_))
+        ));
         // A day later the window has moved on.
-        j.append_charged(entry("k", "g"), LIMITS, t0 + DAY_MS + 3 * MINUTE_MS).unwrap();
+        j.append_charged(entry("k", "g"), LIMITS, t0 + DAY_MS + 3 * MINUTE_MS)
+            .unwrap();
         // Sign-test entries are journaled but never charged.
         for i in 0..10 {
             let mut e = entry("k", "");
             e.purpose = PURPOSE_SIGN_TEST.into();
-            j.append_charged(e, LIMITS, t0 + DAY_MS + 3 * MINUTE_MS + i).unwrap();
+            j.append_charged(e, LIMITS, t0 + DAY_MS + 3 * MINUTE_MS + i)
+                .unwrap();
         }
-        assert_eq!(read_key_dir(&tmp.path().join("k")).unwrap().entries.len(), 17);
+        assert_eq!(
+            read_key_dir(&tmp.path().join("k")).unwrap().entries.len(),
+            17
+        );
     }
 
     /// The window lengths and the segment size are the documented ones.
@@ -694,22 +792,42 @@ mod tests {
     fn a_charge_leaves_the_minute_and_the_day_window_exactly_on_time() {
         let tmp = tempfile::tempdir().unwrap();
         let t0 = 1_800_000_000_000u64;
-        let per_min = Limits { per_min: 1, per_day: 100, max_shares_per_charge: 1 };
+        let per_min = Limits {
+            per_min: 1,
+            per_day: 100,
+            max_shares_per_charge: 1,
+        };
         let j = SignJournal::open(tmp.path(), 1, KEEP).unwrap();
         j.append_charged(entry("m", "a"), per_min, t0).unwrap();
-        assert!(matches!(j.append_charged(entry("m", "b"), per_min, t0 + MINUTE_MS - 1), Err(DaemonError::RateLimited(_))));
-        j.append_charged(entry("m", "b"), per_min, t0 + MINUTE_MS).unwrap();
+        assert!(matches!(
+            j.append_charged(entry("m", "b"), per_min, t0 + MINUTE_MS - 1),
+            Err(DaemonError::RateLimited(_))
+        ));
+        j.append_charged(entry("m", "b"), per_min, t0 + MINUTE_MS)
+            .unwrap();
 
-        let per_day = Limits { per_min: 0, per_day: 1, max_shares_per_charge: 1 };
+        let per_day = Limits {
+            per_min: 0,
+            per_day: 1,
+            max_shares_per_charge: 1,
+        };
         j.append_charged(entry("d", "a"), per_day, t0).unwrap();
-        assert!(matches!(j.append_charged(entry("d", "b"), per_day, t0 + DAY_MS - 1), Err(DaemonError::RateLimited(_))));
+        assert!(matches!(
+            j.append_charged(entry("d", "b"), per_day, t0 + DAY_MS - 1),
+            Err(DaemonError::RateLimited(_))
+        ));
         drop(j);
         // Reopened exactly a day later: the old charge is not replayed into the ledger.
         let j = SignJournal::open(tmp.path(), 1, KEEP).unwrap();
-        j.append_charged(entry("d", "b"), per_day, t0 + DAY_MS).unwrap();
-        assert!(matches!(j.append_charged(entry("d", "c"), per_day, t0 + DAY_MS + 1), Err(DaemonError::RateLimited(_))));
+        j.append_charged(entry("d", "b"), per_day, t0 + DAY_MS)
+            .unwrap();
+        assert!(matches!(
+            j.append_charged(entry("d", "c"), per_day, t0 + DAY_MS + 1),
+            Err(DaemonError::RateLimited(_))
+        ));
         // Kept in memory past the day: pruned on time too.
-        j.append_charged(entry("d", "c"), per_day, t0 + 2 * DAY_MS).unwrap();
+        j.append_charged(entry("d", "c"), per_day, t0 + 2 * DAY_MS)
+            .unwrap();
     }
 
     /// A sign without an intent is charged per session: the rate limit holds for an older driver
@@ -718,7 +836,11 @@ mod tests {
     fn signs_without_an_intent_are_charged_per_session() {
         let tmp = tempfile::tempdir().unwrap();
         let t0 = 1_800_000_000_000u64;
-        let limits = Limits { per_min: 2, per_day: 100, max_shares_per_charge: 1 };
+        let limits = Limits {
+            per_min: 2,
+            per_day: 100,
+            max_shares_per_charge: 1,
+        };
         let j = SignJournal::open(tmp.path(), 1, KEEP).unwrap();
         let no_intent = |session: &str| JournalEntry {
             key_id: "k".into(),
@@ -728,9 +850,15 @@ mod tests {
             ..Default::default()
         };
         j.append_charged(no_intent("s1"), limits, t0).unwrap();
-        assert!(matches!(j.append_charged(no_intent("s1"), limits, t0 + 1), Err(DaemonError::RateLimited(_))));
+        assert!(matches!(
+            j.append_charged(no_intent("s1"), limits, t0 + 1),
+            Err(DaemonError::RateLimited(_))
+        ));
         j.append_charged(no_intent("s2"), limits, t0 + 2).unwrap();
-        assert!(matches!(j.append_charged(no_intent("s3"), limits, t0 + 3), Err(DaemonError::RateLimited(_))));
+        assert!(matches!(
+            j.append_charged(no_intent("s3"), limits, t0 + 3),
+            Err(DaemonError::RateLimited(_))
+        ));
     }
 
     /// A key id is a directory name: anything that could leave the journal directory is refused
@@ -743,11 +871,24 @@ mod tests {
             let err = j.append_charged(entry(bad, "r"), LIMITS, 1).unwrap_err();
             assert!(matches!(err, DaemonError::Config(_)), "{bad:?}: {err:?}");
         }
-        assert_eq!(std::fs::read_dir(tmp.path().join("j")).map(|d| d.count()).unwrap_or(0), 0);
+        assert_eq!(
+            std::fs::read_dir(tmp.path().join("j"))
+                .map(|d| d.count())
+                .unwrap_or(0),
+            0
+        );
         for good in ["k", "frost-participant1_namespace-2"] {
             j.append_charged(entry(good, good), LIMITS, 1).unwrap();
             let report = read_key_dir(&tmp.path().join("j").join(good)).unwrap();
-            assert_eq!((report.entries.len(), report.segments, report.torn_tail_bytes), (1, 1, 0), "{good}");
+            assert_eq!(
+                (
+                    report.entries.len(),
+                    report.segments,
+                    report.torn_tail_bytes
+                ),
+                (1, 1, 0),
+                "{good}"
+            );
             assert_eq!(report.entries[0].key_id, good);
         }
     }
@@ -759,7 +900,11 @@ mod tests {
     fn one_request_id_for_two_digests_is_two_charges() {
         let tmp = tempfile::tempdir().unwrap();
         let t0 = 1_800_000_000_000u64;
-        let limits = Limits { per_min: 2, per_day: 100, max_shares_per_charge: 3 };
+        let limits = Limits {
+            per_min: 2,
+            per_day: 100,
+            max_shares_per_charge: 3,
+        };
         let j = SignJournal::open(tmp.path(), 1, KEEP).unwrap();
         let intent = |digest: &str, intent_sha: &str| {
             let mut e = entry("k", "0f".repeat(16).as_str());
@@ -781,7 +926,10 @@ mod tests {
             "a third digest under the same request id is a third charge, refused by the per-minute limit"
         );
         // The per-charge share cap applies to each intent separately.
-        assert!(matches!(j.append_charged(a, limits, t0 + 5), Err(DaemonError::RateLimited(_))));
+        assert!(matches!(
+            j.append_charged(a, limits, t0 + 5),
+            Err(DaemonError::RateLimited(_))
+        ));
         j.append_charged(b, limits, t0 + 6).unwrap();
         let k = j.keys.lock().unwrap().get("k").unwrap().clone();
         let k = k.lock().unwrap();
@@ -794,35 +942,85 @@ mod tests {
     fn a_failed_append_rolls_back_and_the_chain_stays_intact() {
         let tmp = tempfile::tempdir().unwrap();
         let t0 = 1_800_000_000_000u64;
-        let unlimited = Limits { per_min: 0, per_day: 0, max_shares_per_charge: u32::MAX };
+        let unlimited = Limits {
+            per_min: 0,
+            per_day: 0,
+            max_shares_per_charge: u32::MAX,
+        };
         let j = SignJournal::open(tmp.path(), 1, KEEP).unwrap();
         j.append_charged(entry("k", "a"), unlimited, t0).unwrap();
 
         // 1. A partial write: refused, the torn half is cut back, the next append is seq 2.
         j.faults.lock().unwrap().push_back(Fault::PartialWrite);
-        assert!(matches!(j.append_charged(entry("k", "b"), unlimited, t0 + 1), Err(DaemonError::Io(_))));
-        assert_eq!(read_key_dir(&tmp.path().join("k")).unwrap().torn_tail_bytes, 0, "rolled back");
-        assert_eq!(j.append_charged(entry("k", "b"), unlimited, t0 + 2).unwrap().seq, 2);
+        assert!(matches!(
+            j.append_charged(entry("k", "b"), unlimited, t0 + 1),
+            Err(DaemonError::Io(_))
+        ));
+        assert_eq!(
+            read_key_dir(&tmp.path().join("k")).unwrap().torn_tail_bytes,
+            0,
+            "rolled back"
+        );
+        assert_eq!(
+            j.append_charged(entry("k", "b"), unlimited, t0 + 2)
+                .unwrap()
+                .seq,
+            2
+        );
 
         // 2. An fsync error after a full write, rollback works: the line is gone, seq 3 is next.
         j.faults.lock().unwrap().push_back(Fault::SyncFails);
-        assert!(j.append_charged(entry("k", "c"), unlimited, t0 + 3).is_err());
-        assert_eq!(read_key_dir(&tmp.path().join("k")).unwrap().entries.len(), 2);
-        assert_eq!(j.append_charged(entry("k", "c"), unlimited, t0 + 4).unwrap().seq, 3);
+        assert!(j
+            .append_charged(entry("k", "c"), unlimited, t0 + 3)
+            .is_err());
+        assert_eq!(
+            read_key_dir(&tmp.path().join("k")).unwrap().entries.len(),
+            2
+        );
+        assert_eq!(
+            j.append_charged(entry("k", "c"), unlimited, t0 + 4)
+                .unwrap()
+                .seq,
+            3
+        );
 
         // 3. An fsync error and a failed rollback (hung volume): the complete line stays on disk
         // unacknowledged. The instance was evicted, so the next append reopens from disk, takes
         // that line as the head and continues after it — never a second seq 4.
-        j.faults.lock().unwrap().push_back(Fault::SyncAndRollbackFail);
-        assert!(j.append_charged(entry("k", "d"), unlimited, t0 + 5).is_err());
-        assert_eq!(read_key_dir(&tmp.path().join("k")).unwrap().entries.len(), 4, "the unacknowledged line stayed");
-        assert_eq!(j.append_charged(entry("k", "e"), unlimited, t0 + 6).unwrap().seq, 5);
+        j.faults
+            .lock()
+            .unwrap()
+            .push_back(Fault::SyncAndRollbackFail);
+        assert!(j
+            .append_charged(entry("k", "d"), unlimited, t0 + 5)
+            .is_err());
+        assert_eq!(
+            read_key_dir(&tmp.path().join("k")).unwrap().entries.len(),
+            4,
+            "the unacknowledged line stayed"
+        );
+        assert_eq!(
+            j.append_charged(entry("k", "e"), unlimited, t0 + 6)
+                .unwrap()
+                .seq,
+            5
+        );
 
         // 4. A partial write whose rollback fails too: the torn tail stays until the reopen cuts it.
-        j.faults.lock().unwrap().push_back(Fault::PartialWriteNoRollback);
-        assert!(j.append_charged(entry("k", "f"), unlimited, t0 + 7).is_err());
+        j.faults
+            .lock()
+            .unwrap()
+            .push_back(Fault::PartialWriteNoRollback);
+        assert!(j
+            .append_charged(entry("k", "f"), unlimited, t0 + 7)
+            .is_err());
         assert!(read_key_dir(&tmp.path().join("k")).unwrap().torn_tail_bytes > 0);
-        assert_eq!(j.append_charged(entry("k", "f"), unlimited, t0 + 8).unwrap().seq, 6);
+        assert_eq!(
+            j.append_charged(entry("k", "f"), unlimited, t0 + 8)
+                .unwrap()
+                .seq,
+            6
+        );
 
         // 5. A holder panicking mid-append poisons the per-key lock: evicted and reopened.
         let key = j.key("k", t0 + 9).unwrap();
@@ -833,15 +1031,28 @@ mod tests {
         })
         .join();
         assert!(key.is_poisoned());
-        assert_eq!(j.append_charged(entry("k", "g"), unlimited, t0 + 10).unwrap().seq, 7);
+        assert_eq!(
+            j.append_charged(entry("k", "g"), unlimited, t0 + 10)
+                .unwrap()
+                .seq,
+            7
+        );
 
         let report = read_key_dir(&tmp.path().join("k")).unwrap();
-        assert_eq!(report.entries.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(
+            report.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5, 6, 7]
+        );
         assert_eq!(report.torn_tail_bytes, 0);
         drop(j);
         // A restart opens it cleanly and continues.
         let j = SignJournal::open(tmp.path(), 1, KEEP).unwrap();
-        assert_eq!(j.append_charged(entry("k", "h"), unlimited, t0 + 11).unwrap().seq, 8);
+        assert_eq!(
+            j.append_charged(entry("k", "h"), unlimited, t0 + 11)
+                .unwrap()
+                .seq,
+            8
+        );
     }
 
     #[test]
@@ -859,27 +1070,46 @@ mod tests {
         let mut torn = good.clone();
         torn.extend_from_slice(b"{\"seq\":3,\"ts_ms\":");
         std::fs::write(&seg, &torn).unwrap();
-        assert_eq!(read_key_dir(&tmp.path().join("k")).unwrap().torn_tail_bytes, 17);
+        assert_eq!(
+            read_key_dir(&tmp.path().join("k")).unwrap().torn_tail_bytes,
+            17
+        );
         let j = SignJournal::open(tmp.path(), 2, KEEP).unwrap();
         let e = j.append_charged(entry("k", "c"), LIMITS, t0 + 2).unwrap();
         assert_eq!(e.seq, 3);
         drop(j);
-        assert_eq!(read_key_dir(&tmp.path().join("k")).unwrap().entries.len(), 3);
+        assert_eq!(
+            read_key_dir(&tmp.path().join("k")).unwrap().entries.len(),
+            3
+        );
 
         // Tampered: a digest rewritten in place.
         let text = String::from_utf8(std::fs::read(&seg).unwrap()).unwrap();
         std::fs::write(&seg, text.replacen(&"12".repeat(34), &"13".repeat(34), 1)).unwrap();
-        assert!(matches!(read_key_dir(&tmp.path().join("k")), Err(DaemonError::Journal(_))));
+        assert!(matches!(
+            read_key_dir(&tmp.path().join("k")),
+            Err(DaemonError::Journal(_))
+        ));
         let j = SignJournal::open(tmp.path(), 2, KEEP).unwrap();
-        assert!(matches!(j.append_charged(entry("k", "d"), LIMITS, t0 + 3), Err(DaemonError::Journal(_))));
+        assert!(matches!(
+            j.append_charged(entry("k", "d"), LIMITS, t0 + 3),
+            Err(DaemonError::Journal(_))
+        ));
     }
 
     #[test]
     fn segments_rotate_and_retention_deletes_the_oldest_but_the_chain_still_verifies() {
         let tmp = tempfile::tempdir().unwrap();
         let t0 = 1_800_000_000_000u64;
-        let unlimited = Limits { per_min: 0, per_day: 0, max_shares_per_charge: u32::MAX };
-        let small = Retention { days: 90, max_bytes: SEGMENT_BYTES * 2 };
+        let unlimited = Limits {
+            per_min: 0,
+            per_day: 0,
+            max_shares_per_charge: u32::MAX,
+        };
+        let small = Retention {
+            days: 90,
+            max_bytes: SEGMENT_BYTES * 2,
+        };
         let j = SignJournal::open(tmp.path(), 1, small).unwrap();
         let mut n = 0u64;
         // Fat entries rotate quickly: about five segments' worth.
@@ -890,10 +1120,19 @@ mod tests {
             n += 1;
         }
         let segs = segments(&tmp.path().join("k")).unwrap();
-        let total: u64 = segs.iter().map(|p| std::fs::metadata(p).unwrap().len()).sum();
-        assert!(total <= SEGMENT_BYTES * 3, "the size cap holds (one current segment of slack): {total}");
+        let total: u64 = segs
+            .iter()
+            .map(|p| std::fs::metadata(p).unwrap().len())
+            .sum();
+        assert!(
+            total <= SEGMENT_BYTES * 3,
+            "the size cap holds (one current segment of slack): {total}"
+        );
         let report = read_key_dir(&tmp.path().join("k")).unwrap();
-        assert!(report.entries.first().unwrap().seq > 1, "the oldest entries were deleted");
+        assert!(
+            report.entries.first().unwrap().seq > 1,
+            "the oldest entries were deleted"
+        );
         assert_eq!(report.entries.last().unwrap().seq, n);
     }
 }

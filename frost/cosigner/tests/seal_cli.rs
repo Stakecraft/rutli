@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! `rutli-cosigner seal …` and a node running on a seal bundle, through the real binary.
@@ -19,7 +19,9 @@ const MASTER: &str = "0123456789abcdef0123456789abcdef-soak-like-master";
 
 fn cosigner(args: &[&str], master: Option<&str>) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rutli-cosigner"));
-    cmd.args(args).env_remove("RUTLI_COSIGNER_CONFIG").env_remove("RUTLI_SEAL_SECRET");
+    cmd.args(args)
+        .env_remove("RUTLI_COSIGNER_CONFIG")
+        .env_remove("RUTLI_SEAL_SECRET");
     if let Some(m) = master {
         cmd.env("RUTLI_SEAL_SECRET", m);
     }
@@ -27,7 +29,11 @@ fn cosigner(args: &[&str], master: Option<&str>) -> Output {
 }
 
 fn text(o: &Output) -> String {
-    format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    )
 }
 
 #[cfg(unix)]
@@ -38,7 +44,14 @@ fn mode(p: &Path) -> u32 {
 
 fn split(dir: &Path) -> Output {
     cosigner(
-        &["seal", "split-legacy", "--nodes", "1,2,3", "--out-dir", dir.to_str().unwrap()],
+        &[
+            "seal",
+            "split-legacy",
+            "--nodes",
+            "1,2,3",
+            "--out-dir",
+            dir.to_str().unwrap(),
+        ],
         Some(MASTER),
     )
 }
@@ -50,19 +63,27 @@ fn split_legacy_writes_one_private_bundle_per_node_with_the_current_derivations(
     assert!(out.status.success(), "{}", text(&out));
     let printed = text(&out);
 
-    let commitment = hex::encode(rutli_cosigner::wrap::legacy_commitment_key(MASTER.as_bytes()));
-    assert!(printed.contains(&commitment), "commitment key must be printed: {printed}");
+    let commitment = hex::encode(rutli_cosigner::wrap::legacy_commitment_key(
+        MASTER.as_bytes(),
+    ));
+    assert!(
+        printed.contains(&commitment),
+        "commitment key must be printed: {printed}"
+    );
     for i in 1..=3u16 {
         let path = tmp.path().join(format!("node-{i}.json"));
         #[cfg(unix)]
         assert_eq!(mode(&path), 0o600, "a bundle is a secret");
         let bundle = NodeSealBundle::parse(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(bundle.node, i);
-        let pin = hex::encode(rutli_cosigner::wrap::DistKey::derive(MASTER.as_bytes(), i).public_bytes());
+        let pin =
+            hex::encode(rutli_cosigner::wrap::DistKey::derive(MASTER.as_bytes(), i).public_bytes());
         assert_eq!(hex::encode(bundle.dist_public_key()), pin);
         assert!(printed.contains(&pin), "node {i}'s pin must be printed");
         // The DEK is the one the node already seals with.
-        let sealed = Sealer::from_master_secret(MASTER.as_bytes(), i).seal(b"share").unwrap();
+        let sealed = Sealer::from_master_secret(MASTER.as_bytes(), i)
+            .seal(b"share")
+            .unwrap();
         assert_eq!(bundle.sealer().unseal(&sealed).unwrap(), b"share");
     }
     assert!(!printed.contains(MASTER), "the master must never be echoed");
@@ -70,18 +91,39 @@ fn split_legacy_writes_one_private_bundle_per_node_with_the_current_derivations(
     // Never overwrites a bundle (a re-run must not clobber a file someone already distributed).
     let again = split(tmp.path());
     assert!(!again.status.success());
-    assert!(text(&again).contains("refusing to overwrite"), "{}", text(&again));
+    assert!(
+        text(&again).contains("refusing to overwrite"),
+        "{}",
+        text(&again)
+    );
 }
 
 #[test]
 fn split_legacy_refuses_a_missing_or_short_master() {
     let tmp = tempfile::tempdir().unwrap();
     let d = tmp.path().to_str().unwrap();
-    let none = cosigner(&["seal", "split-legacy", "--nodes", "1", "--out-dir", d], None);
-    assert!(!none.status.success() && text(&none).contains("not set"), "{}", text(&none));
-    let short = cosigner(&["seal", "split-legacy", "--nodes", "1", "--out-dir", d], Some("short"));
-    assert!(!short.status.success() && text(&short).contains("too short"), "{}", text(&short));
-    let dup = cosigner(&["seal", "split-legacy", "--nodes", "1,1", "--out-dir", d], Some(MASTER));
+    let none = cosigner(
+        &["seal", "split-legacy", "--nodes", "1", "--out-dir", d],
+        None,
+    );
+    assert!(
+        !none.status.success() && text(&none).contains("not set"),
+        "{}",
+        text(&none)
+    );
+    let short = cosigner(
+        &["seal", "split-legacy", "--nodes", "1", "--out-dir", d],
+        Some("short"),
+    );
+    assert!(
+        !short.status.success() && text(&short).contains("too short"),
+        "{}",
+        text(&short)
+    );
+    let dup = cosigner(
+        &["seal", "split-legacy", "--nodes", "1,1", "--out-dir", d],
+        Some(MASTER),
+    );
     assert!(!dup.status.success());
 }
 
@@ -89,7 +131,17 @@ fn split_legacy_refuses_a_missing_or_short_master() {
 fn new_node_and_inspect() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("n4.json");
-    let out = cosigner(&["seal", "new-node", "--node", "4", "--out", path.to_str().unwrap()], None);
+    let out = cosigner(
+        &[
+            "seal",
+            "new-node",
+            "--node",
+            "4",
+            "--out",
+            path.to_str().unwrap(),
+        ],
+        None,
+    );
     assert!(out.status.success(), "{}", text(&out));
     let bundle = NodeSealBundle::parse(&std::fs::read(&path).unwrap()).unwrap();
     let pin = hex::encode(bundle.dist_public_key());
@@ -98,7 +150,10 @@ fn new_node_and_inspect() {
     assert!(shown.status.success());
     assert_eq!(
         text(&shown),
-        format!("node 4\ndist_public_key {pin}\nshare_dek id {} (+0 previous)\n", bundle.dek_id())
+        format!(
+            "node 4\ndist_public_key {pin}\nshare_dek id {} (+0 previous)\n",
+            bundle.dek_id()
+        )
     );
 }
 
@@ -108,8 +163,23 @@ fn new_node_and_inspect() {
 fn rotate_dek_then_drop_previous() {
     let tmp = tempfile::tempdir().unwrap();
     let p = |n: &str| tmp.path().join(n).to_str().unwrap().to_string();
-    assert!(cosigner(&["seal", "new-node", "--node", "2", "--out", &p("a.json")], None).status.success());
-    let rotated = cosigner(&["seal", "rotate-dek", "--in", &p("a.json"), "--out", &p("b.json")], None);
+    assert!(cosigner(
+        &["seal", "new-node", "--node", "2", "--out", &p("a.json")],
+        None
+    )
+    .status
+    .success());
+    let rotated = cosigner(
+        &[
+            "seal",
+            "rotate-dek",
+            "--in",
+            &p("a.json"),
+            "--out",
+            &p("b.json"),
+        ],
+        None,
+    );
     assert!(rotated.status.success(), "{}", text(&rotated));
     let a = NodeSealBundle::parse(&std::fs::read(p("a.json")).unwrap()).unwrap();
     let b = NodeSealBundle::parse(&std::fs::read(p("b.json")).unwrap()).unwrap();
@@ -119,18 +189,58 @@ fn rotate_dek_then_drop_previous() {
     // A file sealed under the old DEK opens under the rotated bundle, not after the drop.
     let sealed = a.sealer().seal(b"share").unwrap();
     assert_eq!(b.sealer().unseal(&sealed).unwrap(), b"share");
-    let dropped = cosigner(&["seal", "drop-previous", "--in", &p("b.json"), "--out", &p("c.json")], None);
+    let dropped = cosigner(
+        &[
+            "seal",
+            "drop-previous",
+            "--in",
+            &p("b.json"),
+            "--out",
+            &p("c.json"),
+        ],
+        None,
+    );
     assert!(dropped.status.success(), "{}", text(&dropped));
     let c = NodeSealBundle::parse(&std::fs::read(p("c.json")).unwrap()).unwrap();
     assert_eq!((c.previous_count(), c.dek_id()), (0, b.dek_id()));
     assert!(c.sealer().unseal(&sealed).is_err());
     // Never overwrites, and refuses a bundle with nothing to drop.
-    assert!(!cosigner(&["seal", "rotate-dek", "--in", &p("a.json"), "--out", &p("b.json")], None).status.success());
-    assert!(!cosigner(&["seal", "drop-previous", "--in", &p("c.json"), "--out", &p("d.json")], None).status.success());
+    assert!(!cosigner(
+        &[
+            "seal",
+            "rotate-dek",
+            "--in",
+            &p("a.json"),
+            "--out",
+            &p("b.json")
+        ],
+        None
+    )
+    .status
+    .success());
+    assert!(!cosigner(
+        &[
+            "seal",
+            "drop-previous",
+            "--in",
+            &p("c.json"),
+            "--out",
+            &p("d.json")
+        ],
+        None
+    )
+    .status
+    .success());
 }
 
 /// A config for node `id` on `bundle`, hosted keys on, with `pins` for nodes 1..=3.
-fn bundle_config(dir: &Path, id: u16, bundle: &Path, pins: &[String; 3], commitment: &str) -> std::path::PathBuf {
+fn bundle_config(
+    dir: &Path,
+    id: u16,
+    bundle: &Path,
+    pins: &[String; 3],
+    commitment: &str,
+) -> std::path::PathBuf {
     let cfg = dir.join(format!("cosigner{id}.json"));
     std::fs::write(
         &cfg,
@@ -164,9 +274,12 @@ fn a_node_on_its_split_bundle_opens_keys_sealed_under_the_master_and_refuses_mis
         let p = bundles.join(format!("node-{i}.json"));
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o400)).unwrap();
     }
-    let pins: [String; 3] =
-        [1u16, 2, 3].map(|i| hex::encode(rutli_cosigner::wrap::DistKey::derive(MASTER.as_bytes(), i).public_bytes()));
-    let commitment = hex::encode(rutli_cosigner::wrap::legacy_commitment_key(MASTER.as_bytes()));
+    let pins: [String; 3] = [1u16, 2, 3].map(|i| {
+        hex::encode(rutli_cosigner::wrap::DistKey::derive(MASTER.as_bytes(), i).public_bytes())
+    });
+    let commitment = hex::encode(rutli_cosigner::wrap::legacy_commitment_key(
+        MASTER.as_bytes(),
+    ));
 
     // A hosted key written by node 2 while it still ran on the shared master.
     let legacy = Arc::new(Sealer::from_master_secret(MASTER.as_bytes(), 2));
@@ -178,11 +291,25 @@ fn a_node_on_its_split_bundle_opens_keys_sealed_under_the_master_and_refuses_mis
 
     // Node 2 on its bundle (no master in the environment at all) reads it: export goes through
     // the same seal-key loading as the daemon.
-    let cfg = bundle_config(tmp.path(), 2, &bundles.join("node-2.json"), &pins, &commitment);
+    let cfg = bundle_config(
+        tmp.path(),
+        2,
+        &bundles.join("node-2.json"),
+        &pins,
+        &commitment,
+    );
     let exported = tmp.path().join("export.json");
     let out = cosigner(
-        &["--config", cfg.to_str().unwrap(), "export-key", "--key-id", "rutli-sym-legacy",
-          "--out", exported.to_str().unwrap(), "--unsafe-plaintext"],
+        &[
+            "--config",
+            cfg.to_str().unwrap(),
+            "export-key",
+            "--key-id",
+            "rutli-sym-legacy",
+            "--out",
+            exported.to_str().unwrap(),
+            "--unsafe-plaintext",
+        ],
         None,
     );
     assert!(out.status.success(), "{}", text(&out));
@@ -198,12 +325,24 @@ fn a_node_on_its_split_bundle_opens_keys_sealed_under_the_master_and_refuses_mis
     // creates, so writing into an existing (possibly world-readable) file would leak the key.
     let before = std::fs::read(&exported).unwrap();
     let out = cosigner(
-        &["--config", cfg.to_str().unwrap(), "export-key", "--key-id", "rutli-sym-legacy",
-          "--out", exported.to_str().unwrap(), "--unsafe-plaintext"],
+        &[
+            "--config",
+            cfg.to_str().unwrap(),
+            "export-key",
+            "--key-id",
+            "rutli-sym-legacy",
+            "--out",
+            exported.to_str().unwrap(),
+            "--unsafe-plaintext",
+        ],
         None,
     );
     assert!(!out.status.success(), "an existing --out must be refused");
-    assert!(text(&out).contains("refusing to overwrite"), "{}", text(&out));
+    assert!(
+        text(&out).contains("refusing to overwrite"),
+        "{}",
+        text(&out)
+    );
     assert_eq!(std::fs::read(&exported).unwrap(), before);
 
     // A symlink at --out is refused too (even a dangling one), never followed.
@@ -213,32 +352,69 @@ fn a_node_on_its_split_bundle_opens_keys_sealed_under_the_master_and_refuses_mis
         let target = tmp.path().join("export-target.json");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let out = cosigner(
-            &["--config", cfg.to_str().unwrap(), "export-key", "--key-id", "rutli-sym-legacy",
-              "--out", link.to_str().unwrap(), "--unsafe-plaintext"],
+            &[
+                "--config",
+                cfg.to_str().unwrap(),
+                "export-key",
+                "--key-id",
+                "rutli-sym-legacy",
+                "--out",
+                link.to_str().unwrap(),
+                "--unsafe-plaintext",
+            ],
             None,
         );
         assert!(!out.status.success(), "a symlinked --out must be refused");
-        assert!(!target.exists(), "the export must not write through the symlink");
+        assert!(
+            !target.exists(),
+            "the export must not write through the symlink"
+        );
     }
 
     // Node 1's bundle mounted into node 2: refused before anything is opened.
-    let cfg = bundle_config(tmp.path(), 2, &bundles.join("node-1.json"), &pins, &commitment);
+    let cfg = bundle_config(
+        tmp.path(),
+        2,
+        &bundles.join("node-1.json"),
+        &pins,
+        &commitment,
+    );
     let out = cosigner(&["--config", cfg.to_str().unwrap(), "serve"], None);
     assert!(!out.status.success());
-    assert!(text(&out).contains("wrong Secret mounted"), "{}", text(&out));
+    assert!(
+        text(&out).contains("wrong Secret mounted"),
+        "{}",
+        text(&out)
+    );
 
     // The daemon refuses to start when its own pin does not match its bundle.
     let mut wrong = pins.clone();
     wrong[1] = pins[0].clone();
     wrong[0] = pins[1].clone();
-    let cfg = bundle_config(tmp.path(), 2, &bundles.join("node-2.json"), &wrong, &commitment);
+    let cfg = bundle_config(
+        tmp.path(),
+        2,
+        &bundles.join("node-2.json"),
+        &wrong,
+        &commitment,
+    );
     let out = cosigner(&["--config", cfg.to_str().unwrap(), "serve"], None);
     assert!(!out.status.success());
     assert!(text(&out).contains("wrong seal bundle"), "{}", text(&out));
 
     // A world-readable bundle is refused too.
-    std::fs::set_permissions(bundles.join("node-2.json"), std::fs::Permissions::from_mode(0o644)).unwrap();
-    let cfg = bundle_config(tmp.path(), 2, &bundles.join("node-2.json"), &pins, &commitment);
+    std::fs::set_permissions(
+        bundles.join("node-2.json"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    let cfg = bundle_config(
+        tmp.path(),
+        2,
+        &bundles.join("node-2.json"),
+        &pins,
+        &commitment,
+    );
     let out = cosigner(&["--config", cfg.to_str().unwrap(), "serve"], None);
     assert!(!out.status.success());
     assert!(text(&out).contains("every user"), "{}", text(&out));

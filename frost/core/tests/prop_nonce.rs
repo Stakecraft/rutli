@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Property tests for the single-use nonce guarantee (issue #121).
@@ -165,9 +165,16 @@ struct Keys {
 fn keys() -> &'static Keys {
     static KEYS: std::sync::OnceLock<Keys> = std::sync::OnceLock::new();
     KEYS.get_or_init(|| {
-        let (shares, pkp) = frost::keys::generate_with_dealer(2, 2, IdentifierList::Default, OsRng).unwrap();
-        let mut packages = shares.into_values().map(|s| KeyPackage::try_from(s).unwrap());
-        Keys { mine: packages.next().unwrap(), other: packages.next().unwrap(), pkp }
+        let (shares, pkp) =
+            frost::keys::generate_with_dealer(2, 2, IdentifierList::Default, OsRng).unwrap();
+        let mut packages = shares
+            .into_values()
+            .map(|s| KeyPackage::try_from(s).unwrap());
+        Keys {
+            mine: packages.next().unwrap(),
+            other: packages.next().unwrap(),
+            pkp,
+        }
     })
 }
 

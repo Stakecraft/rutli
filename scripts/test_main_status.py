@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 """Tests for scripts/main-status.py. Run: python3 scripts/test_main_status.py"""
 

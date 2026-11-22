@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Exercises the daemon's DKG + signing orchestration across a 3-node cluster wired with
@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 use frost_ed25519::Identifier;
 use rutli_cosigner::keystore::KeyStore;
-use rutli_cosigner::DaemonError;
 use rutli_cosigner::node::Node;
 use rutli_cosigner::orchestrator::{run_dkg, run_refresh, sign, Peers};
 use rutli_cosigner::peer::{LocalPeer, PeerApi};
+use rutli_cosigner::DaemonError;
 
 const N: u16 = 3;
 const T: u16 = 2;
@@ -26,8 +26,10 @@ fn cluster(tmp: &tempfile::TempDir) -> (Vec<Arc<Node>>, Peers) {
         let id = Identifier::try_from(i).unwrap();
         nodes.push(Arc::new(Node::new(id, N, T, ks)));
     }
-    let peers: Peers =
-        nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    let peers: Peers = nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect();
     rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     (nodes, peers)
 }
@@ -47,7 +49,11 @@ async fn dkg_then_sign_across_cluster_verifies() {
     let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
     for n in &nodes {
         assert!(n.has_key(KEY_ID), "each node persists its own share");
-        assert_eq!(n.group_key(KEY_ID).unwrap(), group_key, "nodes agree on the group key");
+        assert_eq!(
+            n.group_key(KEY_ID).unwrap(),
+            group_key,
+            "nodes agree on the group key"
+        );
     }
 
     // Threshold signature over Canton's 34-byte payload, verified by an independent strict verifier.
@@ -71,7 +77,10 @@ async fn refresh_rotates_shares_keeping_group_key_and_still_signs() {
 
     // Proactive refresh — same group key out.
     let after_key = run_refresh(&peers, KEY_ID).await.unwrap();
-    assert_eq!(after_key, group_key, "refresh must not change the group key (node identity stable)");
+    assert_eq!(
+        after_key, group_key,
+        "refresh must not change the group key (node identity stable)"
+    );
     for n in &nodes {
         assert_eq!(n.group_key(KEY_ID).unwrap(), group_key);
     }
@@ -84,7 +93,8 @@ async fn refresh_rotates_shares_keeping_group_key_and_still_signs() {
     let message = canton_digest(b"after refresh");
     let sig = sign(&nodes[0], &peers, KEY_ID, &message).await.unwrap();
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
-    vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig)).unwrap();
+    vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig))
+        .unwrap();
 
     // Refresh again — chains cleanly.
     assert_eq!(run_refresh(&peers, KEY_ID).await.unwrap(), group_key);
@@ -102,7 +112,11 @@ async fn dkg_commits_epoch_one_and_every_refresh_adds_one_on_every_node() {
             assert!(view.present && !view.staged);
             assert_eq!(view.epoch, expected);
             assert_eq!(n.key_status(KEY_ID).unwrap().epoch, expected);
-            assert_eq!(view.pkp_digest, digest(&nodes[0]), "every node on the same sharing");
+            assert_eq!(
+                view.pkp_digest,
+                digest(&nodes[0]),
+                "every node on the same sharing"
+            );
         }
         if expected < 3 {
             run_refresh(&peers, KEY_ID).await.unwrap();
@@ -149,7 +163,8 @@ async fn a_lost_node_recovers_from_a_share_backup_and_the_cluster_signs() {
     let message = canton_digest(b"after restore");
     let sig = sign(&nodes[0], &peers, KEY_ID, &message).await.unwrap();
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
-    vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig)).unwrap();
+    vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig))
+        .unwrap();
 }
 
 #[tokio::test]
@@ -158,11 +173,33 @@ async fn sign_rejects_non_canton_digest_lengths() {
     let (nodes, peers) = cluster(&tmp);
     run_dkg(&peers, KEY_ID).await.unwrap();
 
-    let err = sign(&nodes[0], &peers, KEY_ID, b"too-short").await.unwrap_err();
-    assert!(matches!(err, DaemonError::InvalidMessageLength { got: 9, expected: 34 }), "got {err:?}");
+    let err = sign(&nodes[0], &peers, KEY_ID, b"too-short")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DaemonError::InvalidMessageLength {
+                got: 9,
+                expected: 34
+            }
+        ),
+        "got {err:?}"
+    );
 
-    let err = sign(&nodes[0], &peers, KEY_ID, &[0u8; 64]).await.unwrap_err();
-    assert!(matches!(err, DaemonError::InvalidMessageLength { got: 64, expected: 34 }), "got {err:?}");
+    let err = sign(&nodes[0], &peers, KEY_ID, &[0u8; 64])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DaemonError::InvalidMessageLength {
+                got: 64,
+                expected: 34
+            }
+        ),
+        "got {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -177,7 +214,8 @@ async fn signing_survives_one_downed_cosigner() {
     let sig = sign(&nodes[0], &available, KEY_ID, &message).await.unwrap();
 
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
-    vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig)).unwrap();
+    vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig))
+        .unwrap();
 }
 
 /// Audit M4: a plaintext share under sealing is refused (the daemon will not start with one), and
@@ -218,11 +256,19 @@ async fn sealed_shares_are_encrypted_at_rest_and_reload_with_the_right_key() {
     let mut nodes = Vec::new();
     for i in 1..=N {
         let sealer = Arc::new(Sealer::from_master_secret(b"cluster master secret", i));
-        let ks = KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(sealer)).unwrap();
-        nodes.push(Arc::new(Node::new(Identifier::try_from(i).unwrap(), N, T, ks)));
+        let ks =
+            KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(sealer)).unwrap();
+        nodes.push(Arc::new(Node::new(
+            Identifier::try_from(i).unwrap(),
+            N,
+            T,
+            ks,
+        )));
     }
-    let peers: Peers =
-        nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    let peers: Peers = nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect();
     rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
 
@@ -239,27 +285,42 @@ async fn sealed_shares_are_encrypted_at_rest_and_reload_with_the_right_key() {
     let mut reloaded = Vec::new();
     for i in 1..=N {
         let sealer = Arc::new(Sealer::from_master_secret(b"cluster master secret", i));
-        let ks = KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(sealer)).unwrap();
-        reloaded.push(Arc::new(Node::new(Identifier::try_from(i).unwrap(), N, T, ks)));
+        let ks =
+            KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(sealer)).unwrap();
+        reloaded.push(Arc::new(Node::new(
+            Identifier::try_from(i).unwrap(),
+            N,
+            T,
+            ks,
+        )));
     }
-    let peers2: Peers =
-        reloaded.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    let peers2: Peers = reloaded
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect();
     rutli_cosigner::peer::wire_local_mesh(&reloaded).unwrap();
     let message = canton_digest(b"sealed shares");
     let sig = sign(&reloaded[0], &peers2, KEY_ID, &message).await.unwrap();
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
-    vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig)).unwrap();
+    vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig))
+        .unwrap();
 
     // Reload with the WRONG key: refuses.
     let wrong = Arc::new(Sealer::from_master_secret(b"not the master secret", 1));
     let ks = KeyStore::open_with_sealer(tmp.path().join("node-1"), Some(wrong)).unwrap();
     let node = Node::new(Identifier::try_from(1u16).unwrap(), N, T, ks);
-    assert!(node.group_key(KEY_ID).is_err(), "wrong seal key must not open the share");
+    assert!(
+        node.group_key(KEY_ID).is_err(),
+        "wrong seal key must not open the share"
+    );
 
     // And without any sealer configured: refuses loudly (no silent plaintext fallback).
     let ks = KeyStore::open(tmp.path().join("node-1")).unwrap();
     let node = Node::new(Identifier::try_from(1u16).unwrap(), N, T, ks);
-    assert!(node.group_key(KEY_ID).is_err(), "sealed share must not open without sealing configured");
+    assert!(
+        node.group_key(KEY_ID).is_err(),
+        "sealed share must not open without sealing configured"
+    );
 }
 
 #[tokio::test]
@@ -274,15 +335,30 @@ async fn shares_sealed_under_the_legacy_master_sign_after_switching_to_split_bun
     let mut nodes = Vec::new();
     for i in 1..=N {
         let sealer = Arc::new(Sealer::from_master_secret(MASTER, i));
-        let ks = KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(sealer)).unwrap();
-        nodes.push(Arc::new(Node::new(Identifier::try_from(i).unwrap(), N, T, ks)));
+        let ks =
+            KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(sealer)).unwrap();
+        nodes.push(Arc::new(Node::new(
+            Identifier::try_from(i).unwrap(),
+            N,
+            T,
+            ks,
+        )));
     }
-    let peers: Peers =
-        nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    let peers: Peers = nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect();
     rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
     let before: Vec<Vec<u8>> = (1..=N)
-        .map(|i| std::fs::read(tmp.path().join(format!("node-{i}")).join(format!("{KEY_ID}.json"))).unwrap())
+        .map(|i| {
+            std::fs::read(
+                tmp.path()
+                    .join(format!("node-{i}"))
+                    .join(format!("{KEY_ID}.json")),
+            )
+            .unwrap()
+        })
         .collect();
     drop((nodes, peers));
 
@@ -291,12 +367,22 @@ async fn shares_sealed_under_the_legacy_master_sign_after_switching_to_split_bun
         let sealer = if i == 1 {
             Sealer::from_master_secret(MASTER, i)
         } else {
-            let json = NodeSealBundle::from_legacy_master(MASTER, i).to_json().unwrap();
+            let json = NodeSealBundle::from_legacy_master(MASTER, i)
+                .to_json()
+                .unwrap();
             NodeSealBundle::parse(&json).unwrap().sealer()
         };
-        let ks = KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(Arc::new(sealer)))
-            .unwrap();
-        reloaded.push(Arc::new(Node::new(Identifier::try_from(i).unwrap(), N, T, ks)));
+        let ks = KeyStore::open_with_sealer(
+            tmp.path().join(format!("node-{i}")),
+            Some(Arc::new(sealer)),
+        )
+        .unwrap();
+        reloaded.push(Arc::new(Node::new(
+            Identifier::try_from(i).unwrap(),
+            N,
+            T,
+            ks,
+        )));
     }
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
     for pair in [[0usize, 1], [0, 2], [1, 2]] {
@@ -305,12 +391,24 @@ async fn shares_sealed_under_the_legacy_master_sign_after_switching_to_split_bun
             .map(|&k| Arc::new(LocalPeer::new(reloaded[k].clone())) as Arc<dyn PeerApi>)
             .collect();
         let message = canton_digest(format!("after split {pair:?}").as_bytes());
-        let sig = sign(&reloaded[pair[0]], &peers, KEY_ID, &message).await.unwrap();
-        vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig)).unwrap();
+        let sig = sign(&reloaded[pair[0]], &peers, KEY_ID, &message)
+            .await
+            .unwrap();
+        vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig))
+            .unwrap();
     }
     for i in 1..=N {
-        let after = std::fs::read(tmp.path().join(format!("node-{i}")).join(format!("{KEY_ID}.json"))).unwrap();
-        assert_eq!(after, before[i as usize - 1], "node {i}'s share file must not be rewritten");
+        let after = std::fs::read(
+            tmp.path()
+                .join(format!("node-{i}"))
+                .join(format!("{KEY_ID}.json")),
+        )
+        .unwrap();
+        assert_eq!(
+            after,
+            before[i as usize - 1],
+            "node {i}'s share file must not be rewritten"
+        );
     }
 }
 
@@ -326,10 +424,17 @@ async fn shares_persist_across_node_reload() {
     let mut reloaded = Vec::new();
     for i in 1..=N {
         let ks = KeyStore::open(tmp.path().join(format!("node-{i}"))).unwrap();
-        reloaded.push(Arc::new(Node::new(Identifier::try_from(i).unwrap(), N, T, ks)));
+        reloaded.push(Arc::new(Node::new(
+            Identifier::try_from(i).unwrap(),
+            N,
+            T,
+            ks,
+        )));
     }
-    let peers2: Peers =
-        reloaded.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    let peers2: Peers = reloaded
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect();
     rutli_cosigner::peer::wire_local_mesh(&reloaded).unwrap();
 
     for n in &reloaded {
@@ -338,7 +443,8 @@ async fn shares_persist_across_node_reload() {
     let message = canton_digest(b"after restart");
     let sig = sign(&reloaded[0], &peers2, KEY_ID, &message).await.unwrap();
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
-    vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig)).unwrap();
+    vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig))
+        .unwrap();
 }
 
 // ── ceremony serialization (regression: concurrent DKG/refresh must not split-brain shares) ──
@@ -352,7 +458,10 @@ async fn dkg_refuses_a_concurrent_ceremony_for_the_same_key() {
     n.dkg_part1("ceremony-A", KEY_ID).unwrap();
     // A different, overlapping ceremony for the same key is refused (would split-brain the shares).
     let err = n.dkg_part1("ceremony-B", KEY_ID).unwrap_err();
-    assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "got {err:?}");
+    assert!(
+        matches!(err, DaemonError::CeremonyInProgress { .. }),
+        "got {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -369,7 +478,11 @@ async fn dkg_refuses_when_the_key_already_exists() {
     // A full orchestrated re-DKG is idempotent (M5: Canton retries a deterministic key id after a
     // timeout): it returns the committed key and rewrites nothing. It used to fail.
     assert_eq!(run_dkg(&peers, KEY_ID).await.unwrap(), group_key);
-    assert_eq!(std::fs::read(&share_file).unwrap(), before, "a retried DKG never overwrites");
+    assert_eq!(
+        std::fs::read(&share_file).unwrap(),
+        before,
+        "a retried DKG never overwrites"
+    );
 
     // The original key still signs and verifies.
     let msg = canton_digest(b"after refused re-dkg");
@@ -396,7 +509,9 @@ async fn dkg_refuses_ids_reserved_for_imported_keys_on_every_path() {
         assert!(!nodes.iter().any(|n| n.has_key(id)));
     }
     // A refresh fence on such an id is fine (that is how an imported key is refreshed).
-    nodes[0].ceremony_fence("r", "frost-import-x", "refresh").unwrap();
+    nodes[0]
+        .ceremony_fence("r", "frost-import-x", "refresh")
+        .unwrap();
     nodes[0].ceremony_release("r", "frost-import-x");
 }
 
@@ -406,8 +521,7 @@ async fn refresh_carries_a_dealt_keys_origin_and_counts_refreshes() {
     const IMPORTED: &str = "frost-import-sig-refresh";
     let tmp = tempfile::tempdir().unwrap();
     let seed = [11u8; 32];
-    let (shares, pkp) =
-        rutli_frost_core::dealer::split_ed25519_seed(&seed, &[1, 2, 3], T).unwrap();
+    let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&seed, &[1, 2, 3], T).unwrap();
     let origin = KeyOrigin {
         kind: ORIGIN_DEALER_SPLIT.into(),
         ceremony_id: "c".into(),
@@ -424,14 +538,17 @@ async fn refresh_carries_a_dealt_keys_origin_and_counts_refreshes() {
     for (i, s) in shares.iter().enumerate() {
         let ks = KeyStore::open(tmp.path().join(format!("node-{}", i + 1))).unwrap();
         let key_package = frost_ed25519::keys::KeyPackage::try_from(s.clone()).unwrap();
-        ks.create(IMPORTED, &Share {
-            key_package,
-            public_key_package: pkp.clone(),
-            origin: Some(origin.clone()),
-            epoch: 0,
-            key_id: IMPORTED.into(),
-        })
-            .unwrap();
+        ks.create(
+            IMPORTED,
+            &Share {
+                key_package,
+                public_key_package: pkp.clone(),
+                origin: Some(origin.clone()),
+                epoch: 0,
+                key_id: IMPORTED.into(),
+            },
+        )
+        .unwrap();
     }
     let (_nodes, peers) = cluster(&tmp);
     let public = rutli_frost_core::dealer::public_key_from_seed(&seed);
@@ -439,8 +556,19 @@ async fn refresh_carries_a_dealt_keys_origin_and_counts_refreshes() {
     assert_eq!(run_refresh(&peers, IMPORTED).await.unwrap(), public);
     for i in 1..=N {
         let ks = KeyStore::open(tmp.path().join(format!("node-{i}"))).unwrap();
-        let got = ks.load(IMPORTED).unwrap().origin.clone().expect("origin survives refresh");
-        assert_eq!(got, KeyOrigin { refresh_count: 2, ..origin.clone() });
+        let got = ks
+            .load(IMPORTED)
+            .unwrap()
+            .origin
+            .clone()
+            .expect("origin survives refresh");
+        assert_eq!(
+            got,
+            KeyOrigin {
+                refresh_count: 2,
+                ..origin.clone()
+            }
+        );
         assert!(ks.dealt_keys_never_refreshed().unwrap().is_empty());
     }
     // A DKG key stays origin-less through a refresh.
@@ -458,7 +586,10 @@ async fn refresh_refuses_a_concurrent_ceremony_for_the_same_key() {
     let n = &nodes[0];
     n.refresh_part1("refresh-A", KEY_ID).unwrap();
     let err = n.refresh_part1("refresh-B", KEY_ID).unwrap_err();
-    assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "got {err:?}");
+    assert!(
+        matches!(err, DaemonError::CeremonyInProgress { .. }),
+        "got {err:?}"
+    );
 }
 
 /// Build a cluster whose ceremony orphan-guard timeout is tiny, so a stalled ceremony can be
@@ -469,11 +600,17 @@ fn cluster_fast_orphan(tmp: &tempfile::TempDir) -> (Vec<Arc<Node>>, Peers) {
         let ks = KeyStore::open(tmp.path().join(format!("node-{i}"))).unwrap();
         let id = Identifier::try_from(i).unwrap();
         nodes.push(Arc::new(Node::new_with_ceremony_timeout(
-            id, N, T, ks, std::time::Duration::from_millis(1),
+            id,
+            N,
+            T,
+            ks,
+            std::time::Duration::from_millis(1),
         )));
     }
-    let peers: Peers =
-        nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    let peers: Peers = nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect();
     rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     (nodes, peers)
 }
@@ -492,7 +629,9 @@ async fn a_superseded_refresh_cannot_persist_after_orphan_preempt() {
     assert_eq!(run_refresh(&peers, KEY_ID).await.unwrap(), group_key);
 
     // The stale ceremony can no longer persist — its finish is refused (superseded / session gone).
-    assert!(nodes[0].ceremony_part3("stale-refresh", &[0u8; 32]).is_err());
+    assert!(nodes[0]
+        .ceremony_part3("stale-refresh", &[0u8; 32])
+        .is_err());
 
     // The cluster is consistent and still signs under the unchanged group key.
     for n in &nodes {
@@ -523,8 +662,10 @@ async fn signing_continues_on_every_node_under_a_cluster_wide_refresh_fence() {
     // Every node still joins a quorum, and the cluster signs.
     for (i, n) in nodes.iter().enumerate() {
         let session = format!("sign-during-refresh-{i}");
-        n.sign_round1(KEY_ID, &session, &Default::default()).unwrap_or_else(|e| panic!("node {i}: {e:?}"));
-        n.abort_sign_as(KEY_ID, &session, &rutli_cosigner::node::SessionOwner::Local).unwrap();
+        n.sign_round1(KEY_ID, &session, &Default::default())
+            .unwrap_or_else(|e| panic!("node {i}: {e:?}"));
+        n.abort_sign_as(KEY_ID, &session, &rutli_cosigner::node::SessionOwner::Local)
+            .unwrap();
     }
     let msg = canton_digest(b"under a refresh fence");
     let sig = sign(&nodes[0], &peers, KEY_ID, &msg).await.unwrap();
@@ -534,7 +675,10 @@ async fn signing_continues_on_every_node_under_a_cluster_wide_refresh_fence() {
         .unwrap();
 
     // The fence still serializes ceremonies: another refresh is refused until it is released.
-    assert!(matches!(run_refresh(&peers, KEY_ID).await, Err(DaemonError::CeremonyInProgress { .. })));
+    assert!(matches!(
+        run_refresh(&peers, KEY_ID).await,
+        Err(DaemonError::CeremonyInProgress { .. })
+    ));
     for n in &nodes {
         n.ceremony_release("refresh-1", KEY_ID);
     }
@@ -550,7 +694,8 @@ async fn signing_continues_on_every_node_under_a_cluster_wide_refresh_fence() {
 /// mixed quorums) is covered by the unit tests in `node::sign_across_commit_tests`, which need a
 /// test-only pause inside round 2.
 #[tokio::test]
-async fn a_round2_started_after_a_refresh_evicted_the_cosigner_fails_cleanly_and_the_sign_is_retried() {
+async fn a_round2_started_after_a_refresh_evicted_the_cosigner_fails_cleanly_and_the_sign_is_retried(
+) {
     use rutli_cosigner::node::Round1Ctx;
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = cluster(&tmp);
@@ -558,10 +703,16 @@ async fn a_round2_started_after_a_refresh_evicted_the_cosigner_fails_cleanly_and
     let msg = canton_digest(b"spans a commit");
 
     // Nodes 1 and 2 have an in-flight sign at epoch 1 (round 1 done, round 2 not yet).
-    let ctx = Round1Ctx { leader_view: Some(nodes[0].signing_view(KEY_ID).unwrap().view), ..Default::default() };
+    let ctx = Round1Ctx {
+        leader_view: Some(nodes[0].signing_view(KEY_ID).unwrap().view),
+        ..Default::default()
+    };
     let mut commitments = BTreeMap::new();
     for n in &nodes[..2] {
-        commitments.insert(n.identifier, n.sign_round1(KEY_ID, "in-flight", &ctx).unwrap());
+        commitments.insert(
+            n.identifier,
+            n.sign_round1(KEY_ID, "in-flight", &ctx).unwrap(),
+        );
         assert_eq!(n.pending_sign_count(KEY_ID), 1);
     }
 
@@ -574,12 +725,19 @@ async fn a_round2_started_after_a_refresh_evicted_the_cosigner_fails_cleanly_and
     // Round 2 of the old session fails on both members: its nonces went with the evicted cosigner,
     // so they can never be used (or reused) — nothing is pending on the new one.
     for n in &nodes[..2] {
-        assert!(n.sign_round2(KEY_ID, "in-flight", &msg, &commitments).is_err());
+        assert!(n
+            .sign_round2(KEY_ID, "in-flight", &msg, &commitments)
+            .is_err());
         assert_eq!(n.pending_sign_count(KEY_ID), 0);
     }
     // A round 1 still naming the old sharing is refused (epoch check), not mixed into the new one.
-    let err = nodes[1].sign_round1(KEY_ID, "stale-view", &ctx).unwrap_err();
-    assert!(matches!(err, DaemonError::EpochMismatch { .. }), "got {err:?}");
+    let err = nodes[1]
+        .sign_round1(KEY_ID, "stale-view", &ctx)
+        .unwrap_err();
+    assert!(
+        matches!(err, DaemonError::EpochMismatch { .. }),
+        "got {err:?}"
+    );
 
     // Retried as a new sign: it signs on the refreshed sharing, under the unchanged group key.
     let sig = sign(&nodes[0], &peers, KEY_ID, &msg).await.unwrap();
@@ -591,11 +749,11 @@ async fn a_round2_started_after_a_refresh_evicted_the_cosigner_fails_cleanly_and
 
 // ── sign abort on failure (P1.3): a give-up frees in-flight nonces now, not at the pending TTL ──
 
-use std::collections::BTreeMap;
 use async_trait::async_trait;
 use frost_ed25519::round1::SigningCommitments;
 use frost_ed25519::round2::SignatureShare;
 use rutli_cosigner::Result as DaemonResult;
+use std::collections::BTreeMap;
 
 /// Wraps a real peer but fails `sign_round2`, so the leader's round 2 gives up. Every other call —
 /// including `abort_sign` — forwards to the inner peer, modelling a live cosigner that simply can't
@@ -609,7 +767,12 @@ impl PeerApi for FailRound2 {
     fn identifier(&self) -> Identifier {
         self.inner.identifier()
     }
-    async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &rutli_cosigner::node::Round1Ctx) -> DaemonResult<SigningCommitments> {
+    async fn sign_round1(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        ctx: &rutli_cosigner::node::Round1Ctx,
+    ) -> DaemonResult<SigningCommitments> {
         self.inner.sign_round1(key_id, session_id, ctx).await
     }
     async fn sign_round2(
@@ -647,7 +810,9 @@ impl PeerApi for FailRound2 {
         public_key_der: &[u8],
         wrapped: &rutli_cosigner::wrap::Wrapped,
     ) -> DaemonResult<Vec<u8>> {
-        self.inner.replicate_key(ceremony_id, key_id, spec, public_key_der, wrapped).await
+        self.inner
+            .replicate_key(ceremony_id, key_id, spec, public_key_der, wrapped)
+            .await
     }
     async fn fetch_key(
         &self,
@@ -673,7 +838,9 @@ async fn a_failed_sign_round2_aborts_the_in_flight_session_on_every_quorum_membe
     // exactly these two and round 2 must touch the failing peer.
     let peers: Peers = vec![
         Arc::new(LocalPeer::new(nodes[0].clone())) as Arc<dyn PeerApi>,
-        Arc::new(FailRound2 { inner: LocalPeer::new(nodes[1].clone()) }) as Arc<dyn PeerApi>,
+        Arc::new(FailRound2 {
+            inner: LocalPeer::new(nodes[1].clone()),
+        }) as Arc<dyn PeerApi>,
     ];
 
     // With no other subset to retry on, the leader gives up after excluding node 1: UNAVAILABLE
@@ -681,16 +848,36 @@ async fn a_failed_sign_round2_aborts_the_in_flight_session_on_every_quorum_membe
     // member's own error.
     let message = canton_digest(b"round2 will fail");
     let err = sign(&nodes[0], &peers, KEY_ID, &message).await.unwrap_err();
-    assert!(matches!(err, DaemonError::AttemptsExhausted { needed: 2, usable: 1, .. }), "got {err:?}");
+    assert!(
+        matches!(
+            err,
+            DaemonError::AttemptsExhausted {
+                needed: 2,
+                usable: 1,
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
 
     // The load-bearing assertion: node 1 held a round-1 nonce (it answered round 1) and the leader's
     // abort freed it immediately — no waiting for the pending TTL. Node 0 burned its own in round 2.
     assert_eq!(group_key.len(), 32);
-    assert_eq!(nodes[1].pending_sign_count(KEY_ID), 0, "failed sign must abort node 1's session");
-    assert_eq!(nodes[0].pending_sign_count(KEY_ID), 0, "leader's own session is consumed/aborted");
+    assert_eq!(
+        nodes[1].pending_sign_count(KEY_ID),
+        0,
+        "failed sign must abort node 1's session"
+    );
+    assert_eq!(
+        nodes[0].pending_sign_count(KEY_ID),
+        0,
+        "leader's own session is consumed/aborted"
+    );
 
     // The cluster is unharmed: a fresh, all-real quorum still signs and verifies.
-    let sig = sign(&nodes[0], &nodes_peers(&nodes), KEY_ID, &message).await.unwrap();
+    let sig = sign(&nodes[0], &nodes_peers(&nodes), KEY_ID, &message)
+        .await
+        .unwrap();
     ed25519_dalek::VerifyingKey::from_bytes(&group_key)
         .unwrap()
         .verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig))
@@ -706,16 +893,35 @@ async fn a_threshold_shortfall_after_round1_aborts_the_lone_commitment() {
     // Only node 0 is offered to the leader — below the 2-of-3 threshold. It mints one commitment,
     // then the sign gives up; that lone nonce must be aborted, not left for the TTL.
     let only_leader: Peers = vec![Arc::new(LocalPeer::new(nodes[0].clone())) as Arc<dyn PeerApi>];
-    let err = sign(&nodes[0], &only_leader, KEY_ID, &canton_digest(b"lonely")).await.unwrap_err();
-    assert!(matches!(err, DaemonError::AttemptsExhausted { needed: 2, usable: 1, .. }), "got {err:?}");
-    assert_eq!(nodes[0].pending_sign_count(KEY_ID), 0, "shortfall must abort the lone commitment");
+    let err = sign(&nodes[0], &only_leader, KEY_ID, &canton_digest(b"lonely"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DaemonError::AttemptsExhausted {
+                needed: 2,
+                usable: 1,
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+    assert_eq!(
+        nodes[0].pending_sign_count(KEY_ID),
+        0,
+        "shortfall must abort the lone commitment"
+    );
     assert_eq!(group_key.len(), 32);
 }
 
 /// Fresh all-real peer set over the same nodes (each call makes new LocalPeers; nodes are shared).
 fn nodes_peers(nodes: &[Arc<Node>]) -> Peers {
     rutli_cosigner::peer::wire_local_mesh(nodes).unwrap();
-    nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect()
+    nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect()
 }
 
 // ── mesh-API hardening: the Peer path must not be a forgery oracle ──
@@ -731,7 +937,9 @@ async fn peer_round2_refuses_a_non_canton_payload() {
     // arbitrary message and aggregate a valid namespace signature offline.
     let forged = b"arbitrary attacker-chosen message, not a 34-byte Canton digest".to_vec();
     let commitments: BTreeMap<Identifier, SigningCommitments> = BTreeMap::new();
-    let err = nodes[0].sign_round2(KEY_ID, "forge-session", &forged, &commitments).unwrap_err();
+    let err = nodes[0]
+        .sign_round2(KEY_ID, "forge-session", &forged, &commitments)
+        .unwrap_err();
     assert!(
         matches!(err, DaemonError::InvalidMessageLength { expected: 34, .. }),
         "peer-path round2 must refuse non-digest payloads, got {err:?}"
@@ -739,20 +947,25 @@ async fn peer_round2_refuses_a_non_canton_payload() {
 
     // A well-formed 34-byte digest is still accepted through the same path (round1 first).
     let msg = canton_digest(b"legit");
-    let c0 = nodes[0].sign_round1(KEY_ID, "ok-session", &Default::default()).unwrap();
+    let c0 = nodes[0]
+        .sign_round1(KEY_ID, "ok-session", &Default::default())
+        .unwrap();
     let mut cs = BTreeMap::new();
     cs.insert(nodes[0].identifier, c0);
-    let c1 = nodes[1].sign_round1(KEY_ID, "ok-session", &Default::default()).unwrap();
+    let c1 = nodes[1]
+        .sign_round1(KEY_ID, "ok-session", &Default::default())
+        .unwrap();
     cs.insert(nodes[1].identifier, c1);
-    assert!(nodes[0].sign_round2(KEY_ID, "ok-session", &msg, &cs).is_ok());
+    assert!(nodes[0]
+        .sign_round2(KEY_ID, "ok-session", &msg, &cs)
+        .is_ok());
 }
 
 // ── cluster-hosted (non-FROST) keys: RSA encryption + AES symmetric held by the cluster ──
 
 use rutli_cosigner::hosted::HostedSpec;
 use rutli_cosigner::orchestrator::{
-    anti_entropy_sweep, generate_hosted_key, repair_hosted_key,
-    DEFAULT_WRITE_QUORUM,
+    anti_entropy_sweep, generate_hosted_key, repair_hosted_key, DEFAULT_WRITE_QUORUM,
 };
 
 const HOSTED_MASTER: &[u8] = b"hosted key cluster master secret for tests";
@@ -771,8 +984,10 @@ fn hosted_cluster(tmp: &tempfile::TempDir) -> (Vec<Arc<Node>>, Peers) {
             .unwrap();
         nodes.push(Arc::new(node));
     }
-    let peers: Peers =
-        nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    let peers: Peers = nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect();
     rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     (nodes, peers)
 }
@@ -782,10 +997,15 @@ async fn a_hosted_rsa_key_is_replicated_and_every_node_can_decrypt() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = hosted_cluster(&tmp);
 
-    let (key, created, replicas) =
-        generate_hosted_key(&nodes[0], &peers, "rutli-enc-1", HostedSpec::Rsa2048, DEFAULT_WRITE_QUORUM)
-            .await
-            .unwrap();
+    let (key, created, replicas) = generate_hosted_key(
+        &nodes[0],
+        &peers,
+        "rutli-enc-1",
+        HostedSpec::Rsa2048,
+        DEFAULT_WRITE_QUORUM,
+    )
+    .await
+    .unwrap();
     assert!(created);
     assert_eq!(replicas, N as usize, "every cosigner should hold the key");
 
@@ -808,14 +1028,24 @@ async fn a_hosted_rsa_key_is_replicated_and_every_node_can_decrypt() {
 async fn a_hosted_symmetric_key_round_trips_across_nodes() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = hosted_cluster(&tmp);
-    generate_hosted_key(&nodes[0], &peers, "rutli-sym-1", HostedSpec::Aes256Gcm, DEFAULT_WRITE_QUORUM)
-        .await
-        .unwrap();
+    generate_hosted_key(
+        &nodes[0],
+        &peers,
+        "rutli-sym-1",
+        HostedSpec::Aes256Gcm,
+        DEFAULT_WRITE_QUORUM,
+    )
+    .await
+    .unwrap();
 
     // Encrypt on one node, decrypt on another: the replicas are genuinely the same key.
-    let blob = nodes[0].hosted_encrypt_symmetric("rutli-sym-1", b"wrapped private key store").unwrap();
+    let blob = nodes[0]
+        .hosted_encrypt_symmetric("rutli-sym-1", b"wrapped private key store")
+        .unwrap();
     assert_eq!(
-        nodes[2].hosted_decrypt_symmetric("rutli-sym-1", &blob).unwrap(),
+        nodes[2]
+            .hosted_decrypt_symmetric("rutli-sym-1", &blob)
+            .unwrap(),
         b"wrapped private key store"
     );
 }
@@ -825,21 +1055,40 @@ async fn generate_is_idempotent_so_a_retry_cannot_mint_a_second_key() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = hosted_cluster(&tmp);
 
-    let (first, created1, _) =
-        generate_hosted_key(&nodes[0], &peers, "rutli-enc-2", HostedSpec::Rsa2048, DEFAULT_WRITE_QUORUM)
-            .await
-            .unwrap();
+    let (first, created1, _) = generate_hosted_key(
+        &nodes[0],
+        &peers,
+        "rutli-enc-2",
+        HostedSpec::Rsa2048,
+        DEFAULT_WRITE_QUORUM,
+    )
+    .await
+    .unwrap();
     // A client retry / driver failover repeats the request with the same id.
-    let (second, created2, _) =
-        generate_hosted_key(&nodes[0], &peers, "rutli-enc-2", HostedSpec::Rsa2048, DEFAULT_WRITE_QUORUM)
-            .await
-            .unwrap();
+    let (second, created2, _) = generate_hosted_key(
+        &nodes[0],
+        &peers,
+        "rutli-enc-2",
+        HostedSpec::Rsa2048,
+        DEFAULT_WRITE_QUORUM,
+    )
+    .await
+    .unwrap();
 
-    assert!(created1 && !created2, "the second call must not create a new key");
-    assert_eq!(first.public_der, second.public_der, "the key must be unchanged");
+    assert!(
+        created1 && !created2,
+        "the second call must not create a new key"
+    );
+    assert_eq!(
+        first.public_der, second.public_der,
+        "the key must be unchanged"
+    );
     // Ciphertext from before the retry still decrypts — the key was not silently replaced.
     let ct = first.encrypt_oaep(b"still valid").unwrap();
-    assert_eq!(nodes[1].hosted_decrypt("rutli-enc-2", &ct).unwrap(), b"still valid");
+    assert_eq!(
+        nodes[1].hosted_decrypt("rutli-enc-2", &ct).unwrap(),
+        b"still valid"
+    );
 }
 
 #[tokio::test]
@@ -849,22 +1098,37 @@ async fn a_node_that_missed_a_write_is_repaired_and_then_serves_decrypts() {
 
     // Simulate an under-quorum write: only nodes 0 and 1 receive the key (node 2 was down).
     let partial: Peers = peers.iter().take(2).cloned().collect();
-    let (key, _, replicas) =
-        generate_hosted_key(&nodes[0], &partial, "rutli-enc-3", HostedSpec::Rsa2048, DEFAULT_WRITE_QUORUM)
-            .await
-            .unwrap();
+    let (key, _, replicas) = generate_hosted_key(
+        &nodes[0],
+        &partial,
+        "rutli-enc-3",
+        HostedSpec::Rsa2048,
+        DEFAULT_WRITE_QUORUM,
+    )
+    .await
+    .unwrap();
     assert_eq!(replicas, 2);
-    assert!(!nodes[2].hosted_exists("rutli-enc-3"), "node 3 should be missing it");
+    assert!(
+        !nodes[2].hosted_exists("rutli-enc-3"),
+        "node 3 should be missing it"
+    );
 
     // Read-repair: node 2 pulls the key on demand rather than returning NOT_FOUND. It sees the
     // others as peers calling on its behalf, so replies are wrapped to it, as over gRPC.
     let as_node2: Peers = nodes
         .iter()
-        .map(|n| Arc::new(LocalPeer::new(n.clone()).on_behalf_of(nodes[2].clone())) as Arc<dyn PeerApi>)
+        .map(|n| {
+            Arc::new(LocalPeer::new(n.clone()).on_behalf_of(nodes[2].clone())) as Arc<dyn PeerApi>
+        })
         .collect();
-    assert!(repair_hosted_key(&nodes[2], &as_node2, "rutli-enc-3").await.unwrap());
+    assert!(repair_hosted_key(&nodes[2], &as_node2, "rutli-enc-3")
+        .await
+        .unwrap());
     let ct = key.encrypt_oaep(b"after repair").unwrap();
-    assert_eq!(nodes[2].hosted_decrypt("rutli-enc-3", &ct).unwrap(), b"after repair");
+    assert_eq!(
+        nodes[2].hosted_decrypt("rutli-enc-3", &ct).unwrap(),
+        b"after repair"
+    );
 }
 
 /// Node `i`'s view of the cluster: every node as a peer calling on node `i`'s behalf, so replies
@@ -872,7 +1136,9 @@ async fn a_node_that_missed_a_write_is_repaired_and_then_serves_decrypts() {
 fn as_node(nodes: &[Arc<Node>], i: usize) -> Peers {
     nodes
         .iter()
-        .map(|n| Arc::new(LocalPeer::new(n.clone()).on_behalf_of(nodes[i].clone())) as Arc<dyn PeerApi>)
+        .map(|n| {
+            Arc::new(LocalPeer::new(n.clone()).on_behalf_of(nodes[i].clone())) as Arc<dyn PeerApi>
+        })
         .collect()
 }
 
@@ -881,22 +1147,51 @@ async fn anti_entropy_heals_a_node_that_missed_a_write_by_pulling_never_by_a_pus
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = hosted_cluster(&tmp);
     let partial: Peers = peers.iter().take(2).cloned().collect();
-    generate_hosted_key(&nodes[0], &partial, "rutli-sym-3", HostedSpec::Aes256Gcm, DEFAULT_WRITE_QUORUM)
-        .await
-        .unwrap();
+    generate_hosted_key(
+        &nodes[0],
+        &partial,
+        "rutli-sym-3",
+        HostedSpec::Aes256Gcm,
+        DEFAULT_WRITE_QUORUM,
+    )
+    .await
+    .unwrap();
     assert!(!nodes[2].hosted_exists("rutli-sym-3"));
 
     // The holders' sweeps push nothing to the node that lacks the key...
-    assert_eq!(anti_entropy_sweep(&nodes[0], &as_node(&nodes, 0)).await.unwrap(), 0);
-    assert_eq!(anti_entropy_sweep(&nodes[1], &as_node(&nodes, 1)).await.unwrap(), 0);
-    assert!(!nodes[2].hosted_exists("rutli-sym-3"), "the sweep no longer pushes");
+    assert_eq!(
+        anti_entropy_sweep(&nodes[0], &as_node(&nodes, 0))
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        anti_entropy_sweep(&nodes[1], &as_node(&nodes, 1))
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        !nodes[2].hosted_exists("rutli-sym-3"),
+        "the sweep no longer pushes"
+    );
 
     // ...its own sweep pulls it, since two peers hold the same copy: that heals a 2-of-3 write.
-    assert_eq!(anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2)).await.unwrap(), 1);
+    assert_eq!(
+        anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2))
+            .await
+            .unwrap(),
+        1
+    );
     assert!(nodes[2].hosted_exists("rutli-sym-3"));
 
     // Converged: a second sweep has nothing to do.
-    assert_eq!(anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2)).await.unwrap(), 0);
+    assert_eq!(
+        anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2))
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -909,11 +1204,17 @@ async fn a_failed_write_quorum_rolls_back_instead_of_leaving_one_lonely_copy() {
     let err = generate_hosted_key(&nodes[0], &alone, "rutli-enc-4", HostedSpec::Rsa2048, 2)
         .await
         .unwrap_err();
-    assert!(matches!(err, DaemonError::ThresholdNotMet { .. }), "got {err:?}");
+    assert!(
+        matches!(err, DaemonError::ThresholdNotMet { .. }),
+        "got {err:?}"
+    );
 
     // A single surviving copy is exactly what hosted keys exist to prevent, so the id must be free
     // for a clean retry rather than half-created.
-    assert!(!nodes[0].hosted_exists("rutli-enc-4"), "under-quorum write must roll back");
+    assert!(
+        !nodes[0].hosted_exists("rutli-enc-4"),
+        "under-quorum write must roll back"
+    );
 }
 
 #[tokio::test]
@@ -923,9 +1224,15 @@ async fn hosted_keys_and_frost_shares_do_not_interfere() {
 
     // A FROST namespace key and a hosted encryption key, side by side in the same keystore.
     let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
-    generate_hosted_key(&nodes[0], &peers, "rutli-enc-5", HostedSpec::Rsa2048, DEFAULT_WRITE_QUORUM)
-        .await
-        .unwrap();
+    generate_hosted_key(
+        &nodes[0],
+        &peers,
+        "rutli-enc-5",
+        HostedSpec::Rsa2048,
+        DEFAULT_WRITE_QUORUM,
+    )
+    .await
+    .unwrap();
 
     // Threshold signing still works...
     let msg = canton_digest(b"topology tx");
@@ -937,8 +1244,14 @@ async fn hosted_keys_and_frost_shares_do_not_interfere() {
 
     // ...and the hosted inventory lists ONLY the hosted key. A FROST share must never be treated
     // as replicable: copying one would give two nodes the same share and break the threshold.
-    assert_eq!(nodes[0].hosted_list().unwrap(), vec!["rutli-enc-5".to_string()]);
-    assert!(nodes[0].hosted_load(KEY_ID).is_err(), "a FROST share must not load as a hosted key");
+    assert_eq!(
+        nodes[0].hosted_list().unwrap(),
+        vec!["rutli-enc-5".to_string()]
+    );
+    assert!(
+        nodes[0].hosted_load(KEY_ID).is_err(),
+        "a FROST share must not load as a hosted key"
+    );
     assert!(
         nodes[0].hosted_rollback_purge("genkey-x", KEY_ID).is_err(),
         "the namespace key must not be deletable"
@@ -953,7 +1266,10 @@ async fn hosted_keys_never_land_on_import_ids_or_over_a_share() {
     let (nodes, _peers) = hosted_cluster(&tmp);
     let key = rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
     for id in ["frost-import-x", "p-frost-import-y"] {
-        assert!(matches!(nodes[1].hosted_store(id, &key), Err(DaemonError::ReservedKeyId(_))));
+        assert!(matches!(
+            nodes[1].hosted_store(id, &key),
+            Err(DaemonError::ReservedKeyId(_))
+        ));
         assert!(matches!(
             nodes[1].hosted_generate(id, HostedSpec::Aes256Gcm),
             Err(DaemonError::ReservedKeyId(_))
@@ -961,7 +1277,8 @@ async fn hosted_keys_never_land_on_import_ids_or_over_a_share() {
         assert!(!nodes[1].has_key(id));
     }
     // A hosted create onto an id that holds a FROST share is refused; the share survives.
-    let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&[4u8; 32], &[1, 2, 3], 2).unwrap();
+    let (shares, pkp) =
+        rutli_frost_core::dealer::split_ed25519_seed(&[4u8; 32], &[1, 2, 3], 2).unwrap();
     let share = rutli_cosigner::keystore::Share {
         key_package: frost_ed25519::keys::KeyPackage::try_from(shares[1].clone()).unwrap(),
         public_key_package: pkp,
@@ -971,15 +1288,27 @@ async fn hosted_keys_never_land_on_import_ids_or_over_a_share() {
     };
     let frost_ks = KeyStore::open(tmp.path().join("frost-only")).unwrap();
     frost_ks.create("rutli-sym-taken", &share).unwrap();
-    assert!(matches!(frost_ks.create_hosted("rutli-sym-taken", &key), Err(DaemonError::KeyExists(_))));
-    assert!(frost_ks.load("rutli-sym-taken").is_ok(), "the share is still there");
+    assert!(matches!(
+        frost_ks.create_hosted("rutli-sym-taken", &key),
+        Err(DaemonError::KeyExists(_))
+    ));
+    assert!(
+        frost_ks.load("rutli-sym-taken").is_ok(),
+        "the share is still there"
+    );
 }
 
 /// A hosted key wrapped by `from` for node `to` under `key_id`: what a compromised cosigner can
 /// push to (or serve to) an honest one.
-fn wrapped_by(from: &Node, to: &Node, key_id: &str, key: &rutli_cosigner::hosted::HostedKey) -> rutli_cosigner::wrap::Wrapped {
+fn wrapped_by(
+    from: &Node,
+    to: &Node,
+    key_id: &str,
+    key: &rutli_cosigner::hosted::HostedKey,
+) -> rutli_cosigner::wrap::Wrapped {
     let to_id = rutli_cosigner::hosted::identifier_index(to.identifier).unwrap();
-    from.hosted_wrap_for(key_id, key, to_id, &to.dist_public_key().unwrap()).unwrap()
+    from.hosted_wrap_for(key_id, key, to_id, &to.dist_public_key().unwrap())
+        .unwrap()
 }
 
 /// F1: FROST and hosted keys have disjoint ids. A compromised cosigner's `ReplicateKey` under a
@@ -990,23 +1319,50 @@ async fn a_peer_cannot_push_a_hosted_key_under_a_frost_id() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = hosted_cluster(&tmp);
     let key = rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
-    for id in ["frost-namespace", "b8-frost-namespace", "p1-frost-rutli-x", "untagged-key"] {
+    for id in [
+        "frost-namespace",
+        "b8-frost-namespace",
+        "p1-frost-rutli-x",
+        "untagged-key",
+    ] {
         for victim in &nodes[..2] {
             // Node 3 calls the victim's Peer API, as over the mesh.
             let as_node3 = LocalPeer::new(victim.clone()).on_behalf_of(nodes[2].clone());
             let err = as_node3
-                .replicate_key("genkey-evil", id, "aes-256-gcm", &[], &wrapped_by(&nodes[2], victim, id, &key))
+                .replicate_key(
+                    "genkey-evil",
+                    id,
+                    "aes-256-gcm",
+                    &[],
+                    &wrapped_by(&nodes[2], victim, id, &key),
+                )
                 .await
                 .unwrap_err();
-            assert!(matches!(err, DaemonError::NotHostedKeyId(_)), "{id}: got {err:?}");
+            assert!(
+                matches!(err, DaemonError::NotHostedKeyId(_)),
+                "{id}: got {err:?}"
+            );
             assert!(!victim.has_key(id), "{id}");
             // The genkey fence refuses the id too, and generation (by a leader or the CLI).
-            assert!(matches!(victim.ceremony_fence("genkey-evil", id, "genkey"), Err(DaemonError::NotHostedKeyId(_))));
-            assert!(matches!(victim.hosted_generate(id, HostedSpec::Aes256Gcm), Err(DaemonError::NotHostedKeyId(_))));
+            assert!(matches!(
+                victim.ceremony_fence("genkey-evil", id, "genkey"),
+                Err(DaemonError::NotHostedKeyId(_))
+            ));
+            assert!(matches!(
+                victim.hosted_generate(id, HostedSpec::Aes256Gcm),
+                Err(DaemonError::NotHostedKeyId(_))
+            ));
         }
     }
     assert!(matches!(
-        generate_hosted_key(&nodes[0], &peers, "frost-namespace", HostedSpec::Aes256Gcm, DEFAULT_WRITE_QUORUM).await,
+        generate_hosted_key(
+            &nodes[0],
+            &peers,
+            "frost-namespace",
+            HostedSpec::Aes256Gcm,
+            DEFAULT_WRITE_QUORUM
+        )
+        .await,
         Err(DaemonError::NotHostedKeyId(_))
     ));
     // The DKG of the id is unaffected.
@@ -1016,7 +1372,16 @@ async fn a_peer_cannot_push_a_hosted_key_under_a_frost_id() {
         let as_node3 = LocalPeer::new(nodes[0].clone()).on_behalf_of(nodes[2].clone());
         let cid = format!("genkey-ok-{id}");
         as_node3.ceremony_fence(&cid, id, "genkey").await.unwrap();
-        as_node3.replicate_key(&cid, id, "aes-256-gcm", &[], &wrapped_by(&nodes[2], &nodes[0], id, &key)).await.unwrap();
+        as_node3
+            .replicate_key(
+                &cid,
+                id,
+                "aes-256-gcm",
+                &[],
+                &wrapped_by(&nodes[2], &nodes[0], id, &key),
+            )
+            .await
+            .unwrap();
         assert!(nodes[0].hosted_exists(id), "{id}");
     }
 }
@@ -1038,20 +1403,35 @@ async fn anti_entropy_does_not_pull_a_hosted_key_under_a_frost_id() {
     .unwrap();
     let key = rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
     planted.create_hosted(id, &key).unwrap();
-    assert!(nodes[2].hosted_manifest().unwrap().iter().any(|m| m.key_id == id), "listed by node 3");
+    assert!(
+        nodes[2]
+            .hosted_manifest()
+            .unwrap()
+            .iter()
+            .any(|m| m.key_id == id),
+        "listed by node 3"
+    );
 
     for (i, me) in nodes[..2].iter().enumerate() {
         let as_me: Peers = nodes
             .iter()
-            .map(|n| Arc::new(LocalPeer::new(n.clone()).on_behalf_of(me.clone())) as Arc<dyn PeerApi>)
+            .map(|n| {
+                Arc::new(LocalPeer::new(n.clone()).on_behalf_of(me.clone())) as Arc<dyn PeerApi>
+            })
             .collect();
         // Node 3 really serves it, wrapped to the asking node...
         let (_, _, wrapped) = as_me[2].fetch_key(id).await.unwrap();
-        assert!(me.hosted_unwrap(id, HostedSpec::Aes256Gcm, &wrapped).is_ok());
+        assert!(me
+            .hosted_unwrap(id, HostedSpec::Aes256Gcm, &wrapped)
+            .is_ok());
         // ...and still nothing lands here.
         let pulled = anti_entropy_sweep(me, &as_me).await.unwrap();
         assert_eq!(pulled, 0, "node {}", i + 1);
-        assert!(repair_hosted_key(me, &as_me, id).await.is_err(), "node {}", i + 1);
+        assert!(
+            repair_hosted_key(me, &as_me, id).await.is_err(),
+            "node {}",
+            i + 1
+        );
         assert!(!me.has_key(id), "node {}", i + 1);
         assert!(!me.key_epoch(id).unwrap().present, "node {}", i + 1);
     }
@@ -1073,25 +1453,45 @@ async fn a_push_after_part3_staged_cannot_block_the_commit() {
     let (nodes, peers) = hosted_cluster(&tmp);
     let (id, ceremony) = ("frost-namespace", "dkg-staged-push");
     for p in &peers {
-        p.ceremony_begin(ceremony, id, CeremonyKind::Dkg, None, None).await.unwrap();
+        p.ceremony_begin(ceremony, id, CeremonyKind::Dkg, None, None)
+            .await
+            .unwrap();
     }
     let mut map = BTreeMap::new();
     for p in &peers {
-        map.insert(p.identifier(), p.ceremony_part1(ceremony, id, CeremonyKind::Dkg, &[1, 2, 3], None).await.unwrap());
+        map.insert(
+            p.identifier(),
+            p.ceremony_part1(ceremony, id, CeremonyKind::Dkg, &[1, 2, 3], None)
+                .await
+                .unwrap(),
+        );
     }
     let mut digest = [0u8; 32];
     for p in &peers {
-        digest = p.ceremony_part2(ceremony, &map).await.unwrap().round1_digest;
+        digest = p
+            .ceremony_part2(ceremony, &map)
+            .await
+            .unwrap()
+            .round1_digest;
     }
     for p in &peers {
         p.ceremony_part3(ceremony, &digest).await.unwrap();
     }
-    assert_eq!(nodes[0].ceremony_record(ceremony).unwrap().state, RecordState::Staged);
+    assert_eq!(
+        nodes[0].ceremony_record(ceremony).unwrap().state,
+        RecordState::Staged
+    );
 
     let key = rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
     let as_node3 = LocalPeer::new(nodes[0].clone()).on_behalf_of(nodes[2].clone());
     let err = as_node3
-        .replicate_key("genkey-evil", id, "aes-256-gcm", &[], &wrapped_by(&nodes[2], &nodes[0], id, &key))
+        .replicate_key(
+            "genkey-evil",
+            id,
+            "aes-256-gcm",
+            &[],
+            &wrapped_by(&nodes[2], &nodes[0], id, &key),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, DaemonError::NotHostedKeyId(_)), "got {err:?}");
@@ -1100,7 +1500,10 @@ async fn a_push_after_part3_staged_cannot_block_the_commit() {
         p.ceremony_commit(ceremony).await.unwrap();
     }
     for n in &nodes {
-        assert_eq!(n.ceremony_record(ceremony).unwrap().state, RecordState::Committed);
+        assert_eq!(
+            n.ceremony_record(ceremony).unwrap().state,
+            RecordState::Committed
+        );
     }
     // The committed key signs.
     let msg = canton_digest(b"after the push");
@@ -1118,11 +1521,26 @@ async fn only_the_generation_leader_purges_its_rollback() {
     // Node 1 leads the generation on node 2: fence, then the replica.
     let leader = LocalPeer::new(nodes[1].clone()).on_behalf_of(nodes[0].clone());
     leader.ceremony_fence(cid, id, "genkey").await.unwrap();
-    leader.replicate_key(cid, id, "aes-256-gcm", &[], &wrapped_by(&nodes[0], &nodes[1], id, &key)).await.unwrap();
+    leader
+        .replicate_key(
+            cid,
+            id,
+            "aes-256-gcm",
+            &[],
+            &wrapped_by(&nodes[0], &nodes[1], id, &key),
+        )
+        .await
+        .unwrap();
     let node3 = LocalPeer::new(nodes[1].clone()).on_behalf_of(nodes[2].clone());
-    assert!(node3.purge_key(cid, id).await.is_err(), "another peer's purge is refused");
+    assert!(
+        node3.purge_key(cid, id).await.is_err(),
+        "another peer's purge is refused"
+    );
     assert!(nodes[1].hosted_exists(id));
-    assert!(leader.purge_key(cid, id).await.unwrap(), "the leader rolls its generation back");
+    assert!(
+        leader.purge_key(cid, id).await.unwrap(),
+        "the leader rolls its generation back"
+    );
     assert!(!nodes[1].hosted_exists(id));
 }
 
@@ -1146,7 +1564,10 @@ async fn hosted_keys_survive_a_restart() {
     // The whole point of the feature: rebuild from the same data dirs and still decrypt.
     let (reloaded, _) = hosted_cluster(&tmp);
     for n in &reloaded {
-        assert_eq!(n.hosted_decrypt("rutli-enc-7", &ciphertext).unwrap(), b"before restart");
+        assert_eq!(
+            n.hosted_decrypt("rutli-enc-7", &ciphertext).unwrap(),
+            b"before restart"
+        );
     }
 }
 
@@ -1167,7 +1588,12 @@ impl PeerApi for UnreachablePeer {
     fn identifier(&self) -> Identifier {
         self.id
     }
-    async fn sign_round1(&self, _: &str, _: &str, _: &rutli_cosigner::node::Round1Ctx) -> DaemonResult<SigningCommitments> {
+    async fn sign_round1(
+        &self,
+        _: &str,
+        _: &str,
+        _: &rutli_cosigner::node::Round1Ctx,
+    ) -> DaemonResult<SigningCommitments> {
         Err(down())
     }
     async fn sign_round2(
@@ -1219,7 +1645,11 @@ impl PeerApi for UnreachablePeer {
 fn clone_err(e: &DaemonError) -> DaemonError {
     match e {
         DaemonError::Status(s) => DaemonError::Status(tonic::Status::new(s.code(), s.message())),
-        DaemonError::CeremonyInProgress { key_id, kind, other } => DaemonError::CeremonyInProgress {
+        DaemonError::CeremonyInProgress {
+            key_id,
+            kind,
+            other,
+        } => DaemonError::CeremonyInProgress {
             key_id: key_id.clone(),
             kind,
             other: other.clone(),
@@ -1233,7 +1663,12 @@ impl PeerApi for FixedErrorPeer {
     fn identifier(&self) -> Identifier {
         self.id
     }
-    async fn sign_round1(&self, _: &str, _: &str, _: &rutli_cosigner::node::Round1Ctx) -> DaemonResult<SigningCommitments> {
+    async fn sign_round1(
+        &self,
+        _: &str,
+        _: &str,
+        _: &rutli_cosigner::node::Round1Ctx,
+    ) -> DaemonResult<SigningCommitments> {
         Err(clone_err(&self.error))
     }
     async fn sign_round2(
@@ -1312,7 +1747,9 @@ async fn a_hosted_key_can_be_generated_with_one_cosigner_unreachable() {
     let degraded: Peers = vec![
         peers[0].clone(),
         peers[1].clone(),
-        Arc::new(UnreachablePeer { id: nodes[2].identifier }) as Arc<dyn PeerApi>,
+        Arc::new(UnreachablePeer {
+            id: nodes[2].identifier,
+        }) as Arc<dyn PeerApi>,
     ];
 
     let (key, created, replicas) = generate_hosted_key(
@@ -1329,12 +1766,23 @@ async fn a_hosted_key_can_be_generated_with_one_cosigner_unreachable() {
 
     // The key works on both live nodes...
     let ct = key.encrypt_oaep(b"written while degraded").unwrap();
-    assert_eq!(nodes[1].hosted_decrypt("rutli-enc-degraded", &ct).unwrap(), b"written while degraded");
+    assert_eq!(
+        nodes[1].hosted_decrypt("rutli-enc-degraded", &ct).unwrap(),
+        b"written while degraded"
+    );
 
     // ...and the node that was down is healed once it is back, without operator action: its own
     // sweep pulls the key, which both live nodes hold.
-    assert_eq!(anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2)).await.unwrap(), 1);
-    assert_eq!(nodes[2].hosted_decrypt("rutli-enc-degraded", &ct).unwrap(), b"written while degraded");
+    assert_eq!(
+        anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        nodes[2].hosted_decrypt("rutli-enc-degraded", &ct).unwrap(),
+        b"written while degraded"
+    );
 }
 
 #[tokio::test]
@@ -1344,14 +1792,26 @@ async fn a_hosted_write_still_fails_when_too_few_cosigners_are_reachable() {
     let (nodes, _peers) = hosted_cluster(&tmp);
     let mostly_down: Peers = vec![
         Arc::new(LocalPeer::new(nodes[0].clone())) as Arc<dyn PeerApi>,
-        Arc::new(UnreachablePeer { id: nodes[1].identifier }) as Arc<dyn PeerApi>,
-        Arc::new(UnreachablePeer { id: nodes[2].identifier }) as Arc<dyn PeerApi>,
+        Arc::new(UnreachablePeer {
+            id: nodes[1].identifier,
+        }) as Arc<dyn PeerApi>,
+        Arc::new(UnreachablePeer {
+            id: nodes[2].identifier,
+        }) as Arc<dyn PeerApi>,
     ];
-    let err =
-        generate_hosted_key(&nodes[0], &mostly_down, "rutli-enc-lonely", HostedSpec::Rsa2048, 2)
-            .await
-            .unwrap_err();
-    assert!(matches!(err, DaemonError::ThresholdNotMet { .. }), "got {err:?}");
+    let err = generate_hosted_key(
+        &nodes[0],
+        &mostly_down,
+        "rutli-enc-lonely",
+        HostedSpec::Rsa2048,
+        2,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, DaemonError::ThresholdNotMet { .. }),
+        "got {err:?}"
+    );
     assert!(!nodes[0].hosted_exists("rutli-enc-lonely"));
 }
 
@@ -1363,15 +1823,32 @@ async fn anti_entropy_publishes_the_replica_shortfall() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = hosted_cluster(&tmp);
     let partial: Peers = peers.iter().take(2).cloned().collect();
-    generate_hosted_key(&nodes[0], &partial, "rutli-enc-count", HostedSpec::Rsa2048, DEFAULT_WRITE_QUORUM)
-        .await
-        .unwrap();
+    generate_hosted_key(
+        &nodes[0],
+        &partial,
+        "rutli-enc-count",
+        HostedSpec::Rsa2048,
+        DEFAULT_WRITE_QUORUM,
+    )
+    .await
+    .unwrap();
 
     // Before healing: node 3 lacks the key, so its sweep both repairs it and reports the count.
-    assert_eq!(anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2)).await.unwrap(), 1, "node 3 pulls the missing replica");
+    assert_eq!(
+        anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2))
+            .await
+            .unwrap(),
+        1,
+        "node 3 pulls the missing replica"
+    );
 
     // After healing every node holds it, and a second sweep is a no-op.
-    assert_eq!(anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2)).await.unwrap(), 0);
+    assert_eq!(
+        anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2))
+            .await
+            .unwrap(),
+        0
+    );
     assert_eq!(anti_entropy_sweep(&nodes[0], &peers).await.unwrap(), 0);
     for n in &nodes {
         assert!(n.hosted_exists("rutli-enc-count"));
@@ -1389,13 +1866,21 @@ async fn every_shape_of_unreachable_peer_is_tolerated_by_a_hosted_write() {
         let degraded: Peers = vec![
             Arc::new(LocalPeer::new(nodes[0].clone())) as Arc<dyn PeerApi>,
             Arc::new(LocalPeer::new(nodes[1].clone())) as Arc<dyn PeerApi>,
-            Arc::new(FixedErrorPeer { id: nodes[2].identifier, error: variant }) as Arc<dyn PeerApi>,
+            Arc::new(FixedErrorPeer {
+                id: nodes[2].identifier,
+                error: variant,
+            }) as Arc<dyn PeerApi>,
         ];
         let key_id = format!("rutli-enc-shape-{i}");
-        let (_key, created, replicas) =
-            generate_hosted_key(&nodes[0], &degraded, &key_id, HostedSpec::Rsa2048, DEFAULT_WRITE_QUORUM)
-                .await
-                .unwrap_or_else(|e| panic!("variant {i} must be tolerated, got {e:?}"));
+        let (_key, created, replicas) = generate_hosted_key(
+            &nodes[0],
+            &degraded,
+            &key_id,
+            HostedSpec::Rsa2048,
+            DEFAULT_WRITE_QUORUM,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("variant {i} must be tolerated, got {e:?}"));
         assert!(created);
         assert_eq!(replicas, 2);
     }
@@ -1428,7 +1913,10 @@ async fn a_peer_that_refuses_still_aborts_a_hosted_write() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "got {err:?}");
+    assert!(
+        matches!(err, DaemonError::CeremonyInProgress { .. }),
+        "got {err:?}"
+    );
     assert!(!nodes[0].hosted_exists("rutli-enc-conflict"));
 }
 
@@ -1463,7 +1951,10 @@ async fn key_show_views(
     nodes: &[Arc<Node>],
     peers: &Peers,
     key_id: &str,
-) -> (Vec<rutli_cosigner::verify_key::NodeView>, Vec<rutli_cosigner::verify_hosted::HostedView>) {
+) -> (
+    Vec<rutli_cosigner::verify_key::NodeView>,
+    Vec<rutli_cosigner::verify_hosted::HostedView>,
+) {
     use rutli_cosigner::pb::{self, signer_server::Signer};
     let (mut frost, mut hosted) = (Vec::new(), Vec::new());
     for (n, id) in nodes.iter().zip(1u16..) {
@@ -1479,7 +1970,11 @@ async fn key_show_views(
             refresh_cns: None,
         };
         let text = |s: tonic::Status| format!("{:?}: {}", s.code(), s.message());
-        let status = svc.key_status(tonic::Request::new(pb::KeyStatusRequest { key_id: key_id.into() })).await;
+        let status = svc
+            .key_status(tonic::Request::new(pb::KeyStatusRequest {
+                key_id: key_id.into(),
+            }))
+            .await;
         let endpoint = format!("local-{id}");
         let view = rutli_cosigner::verify_key::NodeView {
             identifier: id,
@@ -1487,7 +1982,9 @@ async fn key_show_views(
             status: status.map(|r| r.into_inner()).map_err(text),
         };
         frost.push(view);
-        let request = pb::HostedKeyStatusRequest { key_id: key_id.into() };
+        let request = pb::HostedKeyStatusRequest {
+            key_id: key_id.into(),
+        };
         let status = svc.hosted_key_status(tonic::Request::new(request)).await;
         hosted.push(rutli_cosigner::verify_hosted::HostedView {
             identifier: id,
@@ -1522,36 +2019,81 @@ async fn key_show_reports_each_kind_with_its_canton_fingerprint_and_never_the_ot
     assert_eq!((r.kind, r.expected_fingerprint.as_deref()), ("frost", None));
     assert_eq!(r.fingerprint.as_deref(), Some(fp.as_str()));
     assert_eq!(r.group_verifying_key, Some(hex::encode(group_key)));
-    assert_eq!((r.origin.as_deref(), r.epoch, r.refresh_count, r.threshold), (Some("dkg"), Some(1), Some(0), T));
-    assert!(r.nodes.iter().all(|n| n.present && n.fingerprint == fp && n.own_share_in_package), "{:?}", r.nodes);
+    assert_eq!(
+        (r.origin.as_deref(), r.epoch, r.refresh_count, r.threshold),
+        (Some("dkg"), Some(1), Some(0), T)
+    );
+    assert!(
+        r.nodes
+            .iter()
+            .all(|n| n.present && n.fingerprint == fp && n.own_share_in_package),
+        "{:?}",
+        r.nodes
+    );
     assert!(check_views(frost_id, Some(&fp), &roster, T, &frost_views).ok);
     let r = check_views(frost_id, Some(&wrong), &roster, T, &frost_views);
-    assert!(!r.ok && r.problems.iter().all(|p| p.contains("is not the expected")), "{:?}", r.problems);
+    assert!(
+        !r.ok && r.problems.iter().all(|p| p.contains("is not the expected")),
+        "{:?}",
+        r.problems
+    );
     // Asked as a hosted key, the FROST id holds nothing on any node.
     let r = check_hosted_views(frost_id, None, &roster, &hosted_views);
-    assert!(!r.ok && r.fingerprint.is_none() && r.public_key_der.is_none(), "{:?}", r.problems);
+    assert!(
+        !r.ok && r.fingerprint.is_none() && r.public_key_der.is_none(),
+        "{:?}",
+        r.problems
+    );
     assert!(r.nodes.iter().all(|n| !n.present), "{:?}", r.nodes);
 
-    for (spec, hosted_id) in [(HostedSpec::EcP256, "rutli-enc-ecies-1"), (HostedSpec::Rsa2048, "rutli-enc-rsa-1")] {
+    for (spec, hosted_id) in [
+        (HostedSpec::EcP256, "rutli-enc-ecies-1"),
+        (HostedSpec::Rsa2048, "rutli-enc-rsa-1"),
+    ] {
         assert_eq!(KeyKind::of(hosted_id), KeyKind::Hosted);
         let (key, created, replicas) =
-            generate_hosted_key(&nodes[0], &peers, hosted_id, spec, DEFAULT_WRITE_QUORUM).await.unwrap();
-        assert!(created && replicas == usize::from(N), "on every node: {replicas}");
+            generate_hosted_key(&nodes[0], &peers, hosted_id, spec, DEFAULT_WRITE_QUORUM)
+                .await
+                .unwrap();
+        assert!(
+            created && replicas == usize::from(N),
+            "on every node: {replicas}"
+        );
         let der = key.public_key_der().unwrap();
-        let fp = rutli_canton_key::PublicKey::from_spki_der(&der).unwrap().fingerprint();
+        let fp = rutli_canton_key::PublicKey::from_spki_der(&der)
+            .unwrap()
+            .fingerprint();
         let (frost_views, hosted_views) = key_show_views(&nodes, &peers, hosted_id).await;
         let r = check_hosted_views(hosted_id, None, &roster, &hosted_views);
         assert!(r.ok, "{spec:?}: {:?}", r.problems);
-        assert_eq!((r.kind, r.expected_fingerprint.as_deref()), ("hosted", None));
-        assert_eq!((r.spec.as_deref(), r.public_key_der.clone()), (Some(spec.as_str()), Some(hex::encode(&der))));
+        assert_eq!(
+            (r.kind, r.expected_fingerprint.as_deref()),
+            ("hosted", None)
+        );
+        assert_eq!(
+            (r.spec.as_deref(), r.public_key_der.clone()),
+            (Some(spec.as_str()), Some(hex::encode(&der)))
+        );
         assert_eq!(r.fingerprint.as_deref(), Some(fp.as_str()), "{spec:?}");
-        assert!(r.nodes.iter().all(|n| n.present && n.fingerprint == fp), "{:?}", r.nodes);
+        assert!(
+            r.nodes.iter().all(|n| n.present && n.fingerprint == fp),
+            "{:?}",
+            r.nodes
+        );
         assert!(check_hosted_views(hosted_id, Some(&fp), &roster, &hosted_views).ok);
         let r = check_hosted_views(hosted_id, Some(&wrong), &roster, &hosted_views);
-        assert!(!r.ok && r.problems.iter().all(|p| p.contains("not the expected")), "{:?}", r.problems);
+        assert!(
+            !r.ok && r.problems.iter().all(|p| p.contains("not the expected")),
+            "{:?}",
+            r.problems
+        );
         // Asked as a FROST key, the hosted id is no share on any node.
         let r = check_views(hosted_id, None, &roster, T, &frost_views);
-        assert!(!r.ok && r.fingerprint.is_none() && r.group_verifying_key.is_none(), "{:?}", r.problems);
+        assert!(
+            !r.ok && r.fingerprint.is_none() && r.group_verifying_key.is_none(),
+            "{:?}",
+            r.problems
+        );
         assert!(r.nodes.iter().all(|n| n.error.is_some()), "{:?}", r.nodes);
     }
 }

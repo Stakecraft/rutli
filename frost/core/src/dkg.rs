@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Distributed key generation (FROST DKG, trusted-dealer-free).
@@ -17,9 +17,9 @@
 
 use std::collections::BTreeMap;
 
-use frost_ed25519 as frost;
 use frost::keys::dkg::{part1, part2, part3, round1, round2};
 use frost::Identifier;
+use frost_ed25519 as frost;
 use rand::rngs::OsRng;
 
 use crate::Result;
@@ -35,7 +35,13 @@ pub struct DkgParticipant {
 
 impl DkgParticipant {
     pub fn new(id: Identifier, max_signers: u16, min_signers: u16) -> Self {
-        Self { id, max_signers, min_signers, r1_secret: None, r2_secret: None }
+        Self {
+            id,
+            max_signers,
+            min_signers,
+            r1_secret: None,
+            r2_secret: None,
+        }
     }
 
     /// Part 1: generate this participant's commitment package, to broadcast to every peer.
@@ -54,7 +60,9 @@ impl DkgParticipant {
         let r1 = self
             .r1_secret
             .take()
-            .ok_or(crate::CoreError::InvalidCeremonyState("dkg part2 before part1"))?;
+            .ok_or(crate::CoreError::InvalidCeremonyState(
+                "dkg part2 before part1",
+            ))?;
         let (secret, packages) = part2(r1, round1_packages)?;
         self.r2_secret = Some(secret);
         Ok(packages)
@@ -70,7 +78,9 @@ impl DkgParticipant {
         let r2 = self
             .r2_secret
             .take()
-            .ok_or(crate::CoreError::InvalidCeremonyState("dkg part3 before part2"))?;
+            .ok_or(crate::CoreError::InvalidCeremonyState(
+                "dkg part3 before part2",
+            ))?;
         let (key_package, public_key_package) = part3(&r2, round1_packages, round2_packages)?;
         Ok((key_package, without_min_signers(&public_key_package)))
     }

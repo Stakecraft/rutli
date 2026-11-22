@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Audit C2: the cosigner-enforced signing policy, against the threat model.
@@ -90,7 +90,11 @@ impl Ids {
         pems.insert("rogue", leaf(&rogue_ca, "driver"));
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("ca.pem"), &pki.ca_pem).unwrap();
-        Self { pki, dir: dir.to_path_buf(), pems }
+        Self {
+            pki,
+            dir: dir.to_path_buf(),
+            pems,
+        }
     }
 
     fn signer(&self, who: &str) -> NodeSigner {
@@ -100,13 +104,19 @@ impl Ids {
 
     fn spki_sha256(&self, who: &str) -> String {
         let (c, _) = &self.pems[who];
-        let der = rustls_pemfile::certs(&mut c.as_bytes()).next().unwrap().unwrap();
+        let der = rustls_pemfile::certs(&mut c.as_bytes())
+            .next()
+            .unwrap()
+            .unwrap();
         hex::encode(intent::Caller::from_leaf_der(&der).unwrap().spki_sha256)
     }
 
     fn tls_config(&self, who: &str) -> rutli_cosigner::config::TlsConfig {
         let (c, k) = &self.pems[who];
-        let (cp, kp) = (self.dir.join(format!("{who}.pem")), self.dir.join(format!("{who}.key")));
+        let (cp, kp) = (
+            self.dir.join(format!("{who}.pem")),
+            self.dir.join(format!("{who}.key")),
+        );
         std::fs::write(&cp, c).unwrap();
         std::fs::write(&kp, k).unwrap();
         rutli_cosigner::config::TlsConfig {
@@ -143,8 +153,18 @@ fn unsigned(key: &str, msg: &[u8], request: u8, issued: u64, not_after: u64) -> 
 }
 
 /// A ceremony intent for `kind` of `key`, signed by `who`, request id 16×`rid`.
-fn ceremony_by(ids: &Ids, who: &str, kind: rutli_cosigner::node::CeremonyKind, key: &str, rid: u8) -> pb::SignedIntent {
-    sign(ids, who, intent::ceremony_intent(CLUSTER, kind, key, [rid; 16], now_ms(), 120_000))
+fn ceremony_by(
+    ids: &Ids,
+    who: &str,
+    kind: rutli_cosigner::node::CeremonyKind,
+    key: &str,
+    rid: u8,
+) -> pb::SignedIntent {
+    sign(
+        ids,
+        who,
+        intent::ceremony_intent(CLUSTER, kind, key, [rid; 16], now_ms(), 120_000),
+    )
 }
 
 fn sign(ids: &Ids, who: &str, i: pb::SignIntent) -> pb::SignedIntent {
@@ -181,7 +201,10 @@ fn guard(root: &Path, ids: &Ids, i: u16, policy: &SigningPolicyConfig) -> Arc<Si
     let journal = SignJournal::open(
         root.join(format!("node-{i}")).join("journal"),
         i,
-        Retention { days: 90, max_bytes: 64 << 20 },
+        Retention {
+            days: 90,
+            max_bytes: 64 << 20,
+        },
     )
     .unwrap();
     Arc::new(SignGuard::new(Arc::new(verifier), journal, 10))
@@ -189,27 +212,51 @@ fn guard(root: &Path, ids: &Ids, i: u16, policy: &SigningPolicyConfig) -> Arc<Si
 
 fn open_node(root: &Path, ids: &Ids, i: u16, policy: &SigningPolicyConfig) -> Arc<Node> {
     let ks = KeyStore::open(root.join(format!("node-{i}")).join("keys")).unwrap();
-    Arc::new(Node::new(Identifier::try_from(i).unwrap(), N, T, ks).with_sign_guard(guard(root, ids, i, policy)))
+    Arc::new(
+        Node::new(Identifier::try_from(i).unwrap(), N, T, ks)
+            .with_sign_guard(guard(root, ids, i, policy)),
+    )
 }
 
 /// The cluster, its key `KEY` generated, every node on `policy(i)`; `refreshers` is the
 /// refresh_allowlist.
-async fn cluster(policy: impl Fn(u16) -> SigningPolicyConfig, refreshers: Option<Vec<String>>) -> Cluster {
+async fn cluster(
+    policy: impl Fn(u16) -> SigningPolicyConfig,
+    refreshers: Option<Vec<String>>,
+) -> Cluster {
     cluster_with(|_, i| policy(i), refreshers).await
 }
 
 /// [`cluster`] with a policy that may depend on the identities (pins).
-async fn cluster_with(policy: impl Fn(&Ids, u16) -> SigningPolicyConfig, refreshers: Option<Vec<String>>) -> Cluster {
+async fn cluster_with(
+    policy: impl Fn(&Ids, u16) -> SigningPolicyConfig,
+    refreshers: Option<Vec<String>>,
+) -> Cluster {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
     let ids = Ids::new(&root.join("certs"));
-    let nodes: Vec<Arc<Node>> = (1..=N).map(|i| open_node(&root, &ids, i, &policy(&ids, i))).collect();
+    let nodes: Vec<Arc<Node>> = (1..=N)
+        .map(|i| open_node(&root, &ids, i, &policy(&ids, i)))
+        .collect();
     rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
-    let local: Peers = nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    let local: Peers = nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect();
     if policy(&ids, 1).ceremony_intent_required(true) {
-        run_dkg_with_intent(&local, KEY, Some(ceremony_by(&ids, "driver", rutli_cosigner::node::CeremonyKind::Dkg, KEY, 0xd0)))
-            .await
-            .unwrap();
+        run_dkg_with_intent(
+            &local,
+            KEY,
+            Some(ceremony_by(
+                &ids,
+                "driver",
+                rutli_cosigner::node::CeremonyKind::Dkg,
+                KEY,
+                0xd0,
+            )),
+        )
+        .await
+        .unwrap();
     } else {
         run_dkg(&local, KEY).await.unwrap();
     }
@@ -218,10 +265,17 @@ async fn cluster_with(policy: impl Fn(&Ids, u16) -> SigningPolicyConfig, refresh
     for _ in 0..N {
         listeners.push(TcpListener::bind("127.0.0.1:0").await.unwrap());
     }
-    let endpoints: Vec<String> = listeners.iter().map(|l| format!("https://{}", l.local_addr().unwrap())).collect();
-    let tls: Vec<_> = (1..=N).map(|i| rutli_cosigner::tls::load(&ids.tls_config(&format!("cosigner{i}"))).unwrap()).collect();
-    let peer_cns: Arc<std::collections::HashSet<String>> = Arc::new((1..=N).map(|i| format!("cosigner{i}")).collect());
-    let signer_cns: Arc<std::collections::HashSet<String>> = Arc::new(["driver".into(), "tenant".into()].into());
+    let endpoints: Vec<String> = listeners
+        .iter()
+        .map(|l| format!("https://{}", l.local_addr().unwrap()))
+        .collect();
+    let tls: Vec<_> = (1..=N)
+        .map(|i| rutli_cosigner::tls::load(&ids.tls_config(&format!("cosigner{i}"))).unwrap())
+        .collect();
+    let peer_cns: Arc<std::collections::HashSet<String>> =
+        Arc::new((1..=N).map(|i| format!("cosigner{i}")).collect());
+    let signer_cns: Arc<std::collections::HashSet<String>> =
+        Arc::new(["driver".into(), "tenant".into()].into());
     let mut servers = Vec::new();
     for (i, listener) in listeners.into_iter().enumerate() {
         let peers: Peers = (0..N as usize)
@@ -233,7 +287,11 @@ async fn cluster_with(policy: impl Fn(&Ids, u16) -> SigningPolicyConfig, refresh
                         GrpcPeer::connect_lazy(
                             Identifier::try_from(j as u16 + 1).unwrap(),
                             &endpoints[j],
-                            Some(tls[i].dial_as(&format!("cosigner{}", j + 1), None, 0).unwrap()),
+                            Some(
+                                tls[i]
+                                    .dial_as(&format!("cosigner{}", j + 1), None, 0)
+                                    .unwrap(),
+                            ),
                         )
                         .unwrap(),
                     )
@@ -249,12 +307,16 @@ async fn cluster_with(policy: impl Fn(&Ids, u16) -> SigningPolicyConfig, refresh
             decrypt_limiter: Arc::new(DecryptRateLimiter::new(0)),
             ceremony_test_limiter: Arc::new(DecryptRateLimiter::new(0)),
             sign_guard: nodes[i].sign_guard().cloned(),
-            refresh_cns: refreshers.as_ref().map(|r| Arc::new(r.iter().cloned().collect())),
+            refresh_cns: refreshers
+                .as_ref()
+                .map(|r| Arc::new(r.iter().cloned().collect())),
         };
         let peer = PeerSvc {
             node: nodes[i].clone(),
             allowed_cns: Some(peer_cns.clone()),
-            peer_ids: Some(Arc::new((1..=N).map(|k| (format!("cosigner{k}"), k)).collect())),
+            peer_ids: Some(Arc::new(
+                (1..=N).map(|k| (format!("cosigner{k}"), k)).collect(),
+            )),
             peer_pins: None,
         };
         let server = tonic::transport::Server::builder()
@@ -267,15 +329,29 @@ async fn cluster_with(policy: impl Fn(&Ids, u16) -> SigningPolicyConfig, refresh
             let _ = server.await;
         }));
     }
-    Cluster { ids, root, nodes, endpoints, servers, _tmp: tmp }
+    Cluster {
+        ids,
+        root,
+        nodes,
+        endpoints,
+        servers,
+        _tmp: tmp,
+    }
 }
 
 fn strict() -> SigningPolicyConfig {
-    SigningPolicyConfig { require_intent: Some(true), ..Default::default() }
+    SigningPolicyConfig {
+        require_intent: Some(true),
+        ..Default::default()
+    }
 }
 
 impl Cluster {
-    async fn channel(&self, who: Option<&str>, node: usize) -> std::result::Result<Channel, tonic::transport::Error> {
+    async fn channel(
+        &self,
+        who: Option<&str>,
+        node: usize,
+    ) -> std::result::Result<Channel, tonic::transport::Error> {
         let ca = match who {
             Some("rogue") => {
                 // The rogue client trusts the cluster CA (it can reach the server), but presents a
@@ -291,7 +367,12 @@ impl Cluster {
             let (c, k) = &self.ids.pems[w];
             tls = tls.identity(Identity::from_pem(c, k));
         }
-        Endpoint::from_shared(self.endpoints[node].clone()).unwrap().tls_config(tls).unwrap().connect().await
+        Endpoint::from_shared(self.endpoints[node].clone())
+            .unwrap()
+            .tls_config(tls)
+            .unwrap()
+            .connect()
+            .await
     }
 
     async fn signer(&self, who: &str, node: usize) -> SignerClient<Channel> {
@@ -307,18 +388,33 @@ impl Cluster {
     }
 
     fn journal(&self, i: usize) -> Vec<rutli_cosigner::journal::JournalEntry> {
-        read_key_dir(&self.root.join(format!("node-{}", i + 1)).join("journal").join(KEY))
-            .map(|r| r.entries)
-            .unwrap_or_default()
+        read_key_dir(
+            &self
+                .root
+                .join(format!("node-{}", i + 1))
+                .join("journal")
+                .join(KEY),
+        )
+        .map(|r| r.entries)
+        .unwrap_or_default()
     }
 
     fn markers(&self, i: usize) -> usize {
-        let dir = self.root.join(format!("node-{}", i + 1)).join("keys").join(format!("{KEY}.nonces"));
+        let dir = self
+            .root
+            .join(format!("node-{}", i + 1))
+            .join("keys")
+            .join(format!("{KEY}.nonces"));
         std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0)
     }
 }
 
-fn round1(key: &str, session: &str, msg: Option<&[u8]>, intent: Option<pb::SignedIntent>) -> pb::SignRound1Request {
+fn round1(
+    key: &str,
+    session: &str,
+    msg: Option<&[u8]>,
+    intent: Option<pb::SignedIntent>,
+) -> pb::SignRound1Request {
     pb::SignRound1Request {
         key_id: key.into(),
         session_id: session.into(),
@@ -332,7 +428,11 @@ fn round1(key: &str, session: &str, msg: Option<&[u8]>, intent: Option<pb::Signe
 fn denied(r: std::result::Result<impl std::fmt::Debug, tonic::Status>, needle: &str) {
     let s = r.expect_err("must be refused");
     assert_eq!(s.code(), tonic::Code::PermissionDenied, "{s:?}");
-    assert!(s.message().contains(needle), "expected {needle:?} in {:?}", s.message());
+    assert!(
+        s.message().contains(needle),
+        "expected {needle:?} in {:?}",
+        s.message()
+    );
 }
 
 // ── a compromised cosigner ────────────────────────────────────────────────────────────────────
@@ -349,35 +449,88 @@ async fn a_compromised_cosigner_gets_no_commitment_from_an_honest_peer_without_a
     let good = digest(b"what the driver asked for");
 
     // No intent at all.
-    denied(attacker.sign_round1(round1(KEY, "s-none", Some(&evil), None)).await, "carries no signing intent");
+    denied(
+        attacker
+            .sign_round1(round1(KEY, "s-none", Some(&evil), None))
+            .await,
+        "carries no signing intent",
+    );
     // An intent the compromised node signed itself with its cosigner key.
     let forged = intent_by(&c.ids, "cosigner3", KEY, &evil, 1);
-    denied(attacker.sign_round1(round1(KEY, "s-forged", Some(&evil), Some(forged))).await, "not on this node's signer_allowlist");
+    denied(
+        attacker
+            .sign_round1(round1(KEY, "s-forged", Some(&evil), Some(forged)))
+            .await,
+        "not on this node's signer_allowlist",
+    );
     // A real driver intent, its digest rewritten (the signature no longer matches).
     let mut altered = intent_by(&c.ids, "driver", KEY, &good, 2);
     let mut body = <pb::SignIntent as prost::Message>::decode(altered.intent.as_slice()).unwrap();
     body.digest = evil.clone();
     altered.intent = prost::Message::encode_to_vec(&body);
-    denied(attacker.sign_round1(round1(KEY, "s-altered", Some(&evil), Some(altered))).await, "bad request signature");
+    denied(
+        attacker
+            .sign_round1(round1(KEY, "s-altered", Some(&evil), Some(altered)))
+            .await,
+        "bad request signature",
+    );
     // A real driver intent, for another digest than the round signs.
     let other = intent_by(&c.ids, "driver", KEY, &good, 3);
-    denied(attacker.sign_round1(round1(KEY, "s-other", Some(&evil), Some(other))).await, "another message");
+    denied(
+        attacker
+            .sign_round1(round1(KEY, "s-other", Some(&evil), Some(other)))
+            .await,
+        "another message",
+    );
     // A real driver intent for another key.
     let wrong_key = intent_by(&c.ids, "driver", "frost-participant1-other", &evil, 4);
-    denied(attacker.sign_round1(round1(KEY, "s-key", Some(&evil), Some(wrong_key))).await, "is for key");
+    denied(
+        attacker
+            .sign_round1(round1(KEY, "s-key", Some(&evil), Some(wrong_key)))
+            .await,
+        "is for key",
+    );
     // A replayed, expired driver intent for the very digest.
     let long_ago = now_ms() - 3_600_000;
-    let expired = sign(&c.ids, "driver", unsigned(KEY, &evil, 5, long_ago, long_ago + 60_000));
-    denied(attacker.sign_round1(round1(KEY, "s-expired", Some(&evil), Some(expired))).await, "expired");
+    let expired = sign(
+        &c.ids,
+        "driver",
+        unsigned(KEY, &evil, 5, long_ago, long_ago + 60_000),
+    );
+    denied(
+        attacker
+            .sign_round1(round1(KEY, "s-expired", Some(&evil), Some(expired)))
+            .await,
+        "expired",
+    );
     // A "driver" certificate from another CA.
     let rogue = intent_by(&c.ids, "rogue", KEY, &evil, 6);
-    denied(attacker.sign_round1(round1(KEY, "s-rogue", Some(&evil), Some(rogue))).await, "certificate");
+    denied(
+        attacker
+            .sign_round1(round1(KEY, "s-rogue", Some(&evil), Some(rogue)))
+            .await,
+        "certificate",
+    );
     // An intent for another cluster.
     let mut foreign = unsigned(KEY, &evil, 7, now_ms(), now_ms() + 60_000);
     foreign.cluster_id = "anothercluster00".into();
-    denied(attacker.sign_round1(round1(KEY, "s-cluster", Some(&evil), Some(sign(&c.ids, "driver", foreign)))).await, "cluster");
+    denied(
+        attacker
+            .sign_round1(round1(
+                KEY,
+                "s-cluster",
+                Some(&evil),
+                Some(sign(&c.ids, "driver", foreign)),
+            ))
+            .await,
+        "cluster",
+    );
 
-    assert_eq!(c.nodes[0].pending_sign_count(KEY), 0, "no round-1 nonces were generated");
+    assert_eq!(
+        c.nodes[0].pending_sign_count(KEY),
+        0,
+        "no round-1 nonces were generated"
+    );
     assert_eq!(c.markers(0), 0, "no nonce marker");
     assert!(c.journal(0).is_empty(), "nothing journaled");
     // ...and a round 2 has nothing to sign with.
@@ -403,7 +556,11 @@ async fn open_both(
     good: &[u8],
     valid: &pb::SignedIntent,
 ) -> BTreeMap<Identifier, SigningCommitments> {
-    let r = attacker.clone().sign_round1(round1(KEY, session, Some(good), Some(valid.clone()))).await.unwrap();
+    let r = attacker
+        .clone()
+        .sign_round1(round1(KEY, session, Some(good), Some(valid.clone())))
+        .await
+        .unwrap();
     let c1: SigningCommitments = serde_json::from_slice(&r.into_inner().commitments).unwrap();
     let ctx3 = Round1Ctx {
         message: Some(good.to_vec()),
@@ -412,7 +569,10 @@ async fn open_both(
         ..Default::default()
     };
     let c3 = c.nodes[2].sign_round1(KEY, session, &ctx3).unwrap();
-    BTreeMap::from([(Identifier::try_from(1u16).unwrap(), c1), (Identifier::try_from(3u16).unwrap(), c3)])
+    BTreeMap::from([
+        (Identifier::try_from(1u16).unwrap(), c1),
+        (Identifier::try_from(3u16).unwrap(), c3),
+    ])
 }
 
 /// The leader (or a node that saw a valid intent) swaps the digest between round 1 and round 2, or
@@ -465,7 +625,11 @@ async fn a_leader_cannot_swap_the_digest_or_the_intent_between_the_rounds() {
     denied(r, "another signing intent");
     assert!(c.journal(0).is_empty(), "no refused round 2 is journaled");
     assert_eq!(c.markers(0), 0, "no refused round 2 burns a marker");
-    assert_eq!(c.nodes[0].pending_sign_count(KEY), 0, "a refused round 2 drops the session's nonces");
+    assert_eq!(
+        c.nodes[0].pending_sign_count(KEY),
+        0,
+        "a refused round 2 drops the session's nonces"
+    );
 
     // The authorized digest: the share comes out, journaled first.
     let cs = open_both(&c, &attacker, "honest", &good, &valid).await;
@@ -481,7 +645,10 @@ async fn a_leader_cannot_swap_the_digest_or_the_intent_between_the_rounds() {
         .unwrap();
     let j = c.journal(0);
     assert_eq!(j.len(), 1);
-    assert_eq!((j[0].purpose.as_str(), j[0].digest.as_str()), ("sign", hex::encode(&good).as_str()));
+    assert_eq!(
+        (j[0].purpose.as_str(), j[0].digest.as_str()),
+        ("sign", hex::encode(&good).as_str())
+    );
     assert_eq!(j[0].request_id, hex::encode([9u8; 16]));
     assert_eq!(j[0].signer_cn, "driver");
 }
@@ -494,32 +661,83 @@ async fn a_leader_cannot_swap_the_digest_or_the_intent_between_the_rounds() {
 async fn only_the_driver_signs_with_its_own_intent_and_every_participant_journals_it() {
     let c = cluster(|_| strict(), Some(vec!["refresher".into()])).await;
     let msg = digest(b"a topology transaction");
-    let req = |intent: Option<pb::SignedIntent>| pb::SignRequest { key_id: KEY.into(), message: msg.clone(), intent };
+    let req = |intent: Option<pb::SignedIntent>| pb::SignRequest {
+        key_id: KEY.into(),
+        message: msg.clone(),
+        intent,
+    };
     let by_driver = intent_by(&c.ids, "driver", KEY, &msg, 20);
 
     for who in ["operator", "refresher", "cosigner2"] {
-        denied(c.signer(who, 0).await.sign(req(Some(by_driver.clone()))).await, "not permitted to call the Signer API");
+        denied(
+            c.signer(who, 0)
+                .await
+                .sign(req(Some(by_driver.clone())))
+                .await,
+            "not permitted to call the Signer API",
+        );
     }
     // No client certificate, or one from another CA: no TLS session at all.
-    assert!(c.channel(None, 0).await.is_err() || SignerClient::new(c.channel(None, 0).await.unwrap()).sign(req(None)).await.is_err());
+    assert!(
+        c.channel(None, 0).await.is_err()
+            || SignerClient::new(c.channel(None, 0).await.unwrap())
+                .sign(req(None))
+                .await
+                .is_err()
+    );
     match c.channel(Some("rogue"), 0).await {
         Err(_) => {}
-        Ok(ch) => assert!(SignerClient::new(ch).sign(req(Some(by_driver.clone()))).await.is_err()),
+        Ok(ch) => assert!(SignerClient::new(ch)
+            .sign(req(Some(by_driver.clone())))
+            .await
+            .is_err()),
     }
     // Another allowlisted client cannot use the driver's intent, nor the driver another's.
-    denied(c.signer("tenant", 0).await.sign(req(Some(by_driver.clone()))).await, "only valid on its signer's own connection");
+    denied(
+        c.signer("tenant", 0)
+            .await
+            .sign(req(Some(by_driver.clone())))
+            .await,
+        "only valid on its signer's own connection",
+    );
     let by_tenant = intent_by(&c.ids, "tenant", KEY, &msg, 21);
-    denied(c.signer("driver", 0).await.sign(req(Some(by_tenant))).await, "only valid on its signer's own connection");
+    denied(
+        c.signer("driver", 0).await.sign(req(Some(by_tenant))).await,
+        "only valid on its signer's own connection",
+    );
     // The driver without an intent, where one is required.
-    denied(c.signer("driver", 0).await.sign(req(None)).await, "carries no signing intent");
+    denied(
+        c.signer("driver", 0).await.sign(req(None)).await,
+        "carries no signing intent",
+    );
     assert!((0..3).all(|i| c.journal(i).is_empty()));
 
     // The driver with its own intent: a valid signature, journaled on both participants.
-    let sig = c.signer("driver", 1).await.sign(req(Some(by_driver))).await.unwrap().into_inner().signature;
+    let sig = c
+        .signer("driver", 1)
+        .await
+        .sign(req(Some(by_driver)))
+        .await
+        .unwrap()
+        .into_inner()
+        .signature;
     let sig: [u8; 64] = sig.try_into().unwrap();
-    assert!(rutli_cosigner::verify_key::signature_verifies(&c.group_key(), &msg, &sig));
-    let journaled: Vec<usize> = (0..3).filter(|&i| c.journal(i).iter().any(|e| e.request_id == hex::encode([20u8; 16]))).collect();
-    assert!(journaled.len() >= 2 && journaled.contains(&1), "leader and its partner journal it: {journaled:?}");
+    assert!(rutli_cosigner::verify_key::signature_verifies(
+        &c.group_key(),
+        &msg,
+        &sig
+    ));
+    let journaled: Vec<usize> = (0..3)
+        .filter(|&i| {
+            c.journal(i)
+                .iter()
+                .any(|e| e.request_id == hex::encode([20u8; 16]))
+        })
+        .collect();
+    assert!(
+        journaled.len() >= 2 && journaled.contains(&1),
+        "leader and its partner journal it: {journaled:?}"
+    );
     for i in journaled {
         let e = &c.journal(i)[0];
         assert_eq!(e.digest, hex::encode(&msg));
@@ -542,14 +760,45 @@ async fn the_refresher_refreshes_but_never_signs_and_the_driver_stops_refreshing
     let by_driver = intent_by(&c.ids, "driver", KEY, &msg, 30);
 
     denied(
-        c.signer("refresher", 0).await.sign(pb::SignRequest { key_id: KEY.into(), message: msg.clone(), intent: Some(by_driver) }).await,
+        c.signer("refresher", 0)
+            .await
+            .sign(pb::SignRequest {
+                key_id: KEY.into(),
+                message: msg.clone(),
+                intent: Some(by_driver),
+            })
+            .await,
         "not permitted",
     );
-    denied(c.signer("driver", 0).await.refresh(pb::RefreshRequest { key_id: KEY.into(), intent: None }).await, "may not call Refresh");
-    c.signer("refresher", 0).await.key_status(pb::KeyStatusRequest { key_id: KEY.into() }).await.unwrap();
+    denied(
+        c.signer("driver", 0)
+            .await
+            .refresh(pb::RefreshRequest {
+                key_id: KEY.into(),
+                intent: None,
+            })
+            .await,
+        "may not call Refresh",
+    );
+    c.signer("refresher", 0)
+        .await
+        .key_status(pb::KeyStatusRequest { key_id: KEY.into() })
+        .await
+        .unwrap();
     let before = c.nodes[0].key_epoch(KEY).unwrap().epoch;
-    let reply = c.signer("refresher", 0).await.refresh(pb::RefreshRequest { key_id: KEY.into(), intent: None }).await.unwrap();
-    assert_eq!(reply.into_inner().group_verifying_key, c.group_key().to_vec());
+    let reply = c
+        .signer("refresher", 0)
+        .await
+        .refresh(pb::RefreshRequest {
+            key_id: KEY.into(),
+            intent: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        reply.into_inner().group_verifying_key,
+        c.group_key().to_vec()
+    );
     assert_eq!(c.nodes[0].key_epoch(KEY).unwrap().epoch, before + 1);
 }
 
@@ -560,8 +809,14 @@ async fn a_signer_without_an_acl_for_a_key_is_refused_when_acls_are_required() {
         require_intent: Some(true),
         signer_acl_required: true,
         signer_acl: BTreeMap::from([
-            ("driver".to_string(), vec!["frost-participant1-".to_string()]),
-            ("tenant".to_string(), vec!["frost-participant2-".to_string()]),
+            (
+                "driver".to_string(),
+                vec!["frost-participant1-".to_string()],
+            ),
+            (
+                "tenant".to_string(),
+                vec!["frost-participant2-".to_string()],
+            ),
         ]),
         ..Default::default()
     };
@@ -569,15 +824,42 @@ async fn a_signer_without_an_acl_for_a_key_is_refused_when_acls_are_required() {
     let msg = digest(b"tenant 2 reaches for tenant 1's key");
     let by_tenant = intent_by(&c.ids, "tenant", KEY, &msg, 40);
     denied(
-        c.signer("tenant", 0).await.sign(pb::SignRequest { key_id: KEY.into(), message: msg.clone(), intent: Some(by_tenant.clone()) }).await,
+        c.signer("tenant", 0)
+            .await
+            .sign(pb::SignRequest {
+                key_id: KEY.into(),
+                message: msg.clone(),
+                intent: Some(by_tenant.clone()),
+            })
+            .await,
         "may not use key",
     );
-    denied(c.signer("tenant", 0).await.group_key(pb::GroupKeyRequest { key_id: KEY.into() }).await, "may not use key");
+    denied(
+        c.signer("tenant", 0)
+            .await
+            .group_key(pb::GroupKeyRequest { key_id: KEY.into() })
+            .await,
+        "may not use key",
+    );
     // A compromised node forwarding the tenant's intent to a peer gets the same answer there.
-    denied(c.peer_as("cosigner3", 0).await.sign_round1(round1(KEY, "acl", Some(&msg), Some(by_tenant))).await, "may not use key");
+    denied(
+        c.peer_as("cosigner3", 0)
+            .await
+            .sign_round1(round1(KEY, "acl", Some(&msg), Some(by_tenant)))
+            .await,
+        "may not use key",
+    );
     // The driver, on its own prefix, signs.
     let by_driver = intent_by(&c.ids, "driver", KEY, &msg, 41);
-    c.signer("driver", 0).await.sign(pb::SignRequest { key_id: KEY.into(), message: msg, intent: Some(by_driver) }).await.unwrap();
+    c.signer("driver", 0)
+        .await
+        .sign(pb::SignRequest {
+            key_id: KEY.into(),
+            message: msg,
+            intent: Some(by_driver),
+        })
+        .await
+        .unwrap();
 }
 
 /// A revoked key: a valid certificate under the driver's CN whose key is not pinned is refused on
@@ -598,13 +880,40 @@ async fn an_spki_pin_revokes_a_ca_valid_but_unpinned_driver_key() {
 
     let stolen = intent_by(&c.ids, "driver-2", KEY, &msg, 50);
     denied(
-        c.signer("driver-2", 0).await.sign(pb::SignRequest { key_id: KEY.into(), message: msg.clone(), intent: Some(stolen.clone()) }).await,
+        c.signer("driver-2", 0)
+            .await
+            .sign(pb::SignRequest {
+                key_id: KEY.into(),
+                message: msg.clone(),
+                intent: Some(stolen.clone()),
+            })
+            .await,
         "not pinned",
     );
-    denied(c.signer("driver-2", 0).await.group_key(pb::GroupKeyRequest { key_id: KEY.into() }).await, "not pinned");
-    denied(c.peer_as("cosigner3", 1).await.sign_round1(round1(KEY, "pin", Some(&msg), Some(stolen))).await, "not pinned");
+    denied(
+        c.signer("driver-2", 0)
+            .await
+            .group_key(pb::GroupKeyRequest { key_id: KEY.into() })
+            .await,
+        "not pinned",
+    );
+    denied(
+        c.peer_as("cosigner3", 1)
+            .await
+            .sign_round1(round1(KEY, "pin", Some(&msg), Some(stolen)))
+            .await,
+        "not pinned",
+    );
     let ok = intent_by(&c.ids, "driver", KEY, &msg, 51);
-    c.signer("driver", 0).await.sign(pb::SignRequest { key_id: KEY.into(), message: msg, intent: Some(ok) }).await.unwrap();
+    c.signer("driver", 0)
+        .await
+        .sign(pb::SignRequest {
+            key_id: KEY.into(),
+            message: msg,
+            intent: Some(ok),
+        })
+        .await
+        .unwrap();
 }
 
 // ── approvals ─────────────────────────────────────────────────────────────────────────────────
@@ -616,19 +925,33 @@ struct Approver {
 
 impl Approver {
     fn new(id: &'static str) -> Self {
-        let pkcs8 = aws_lc_rs::signature::Ed25519KeyPair::generate_pkcs8(&aws_lc_rs::rand::SystemRandom::new()).unwrap();
-        Self { id, key: aws_lc_rs::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap() }
+        let pkcs8 = aws_lc_rs::signature::Ed25519KeyPair::generate_pkcs8(
+            &aws_lc_rs::rand::SystemRandom::new(),
+        )
+        .unwrap();
+        Self {
+            id,
+            key: aws_lc_rs::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap(),
+        }
     }
     fn config(&self) -> ApproverConfig {
         use aws_lc_rs::signature::KeyPair;
         use base64::Engine;
-        let mut spki = vec![0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+        let mut spki = vec![
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
         spki.extend_from_slice(self.key.public_key().as_ref());
-        ApproverConfig { id: self.id.into(), public_key_spki_b64: base64::engine::general_purpose::STANDARD.encode(spki) }
+        ApproverConfig {
+            id: self.id.into(),
+            public_key_spki_b64: base64::engine::general_purpose::STANDARD.encode(spki),
+        }
     }
     fn approve(&self, key: &str, msg: &[u8], nonce: &[u8]) -> pb::IntentApproval {
         let request_id = intent::approval_request_id(key, msg, nonce);
-        pb::IntentApproval { approver_id: self.id.into(), signature: self.key.sign(request_id.as_bytes()).as_ref().to_vec() }
+        pb::IntentApproval {
+            approver_id: self.id.into(),
+            signature: self.key.sign(request_id.as_bytes()).as_ref().to_vec(),
+        }
     }
 }
 
@@ -636,10 +959,19 @@ impl Approver {
 /// distinct configured approvers, whatever the driver did.
 #[tokio::test]
 async fn an_approval_gated_key_is_refused_at_the_cosigners_without_enough_valid_approvals() {
-    let (alice, bob, carol, mallory) = (Approver::new("alice"), Approver::new("bob"), Approver::new("carol"), Approver::new("mallory"));
+    let (alice, bob, carol, mallory) = (
+        Approver::new("alice"),
+        Approver::new("bob"),
+        Approver::new("carol"),
+        Approver::new("mallory"),
+    );
     let policy = SigningPolicyConfig {
         require_intent: Some(true),
-        rules: vec![ApprovalRuleConfig { key_id_prefix: "frost-participant1-namespace".into(), mode: "quorum".into(), threshold: 2 }],
+        rules: vec![ApprovalRuleConfig {
+            key_id_prefix: "frost-participant1-namespace".into(),
+            mode: "quorum".into(),
+            threshold: 2,
+        }],
         approvers: vec![alice.config(), bob.config(), carol.config()],
         ..Default::default()
     };
@@ -652,29 +984,87 @@ async fn an_approval_gated_key_is_refused_at_the_cosigners_without_enough_valid_
         i.approvals = approvals;
         sign(&c.ids, "driver", i)
     };
-    let req = |intent| pb::SignRequest { key_id: KEY.into(), message: msg.clone(), intent: Some(intent) };
+    let req = |intent| pb::SignRequest {
+        key_id: KEY.into(),
+        message: msg.clone(),
+        intent: Some(intent),
+    };
     let mut driver = c.signer("driver", 0).await;
 
-    denied(driver.sign(req(with(vec![], &nonce, 60))).await, "approval required");
-    denied(driver.sign(req(with(vec![alice.approve(KEY, &msg, &nonce)], &nonce, 61))).await, "carries 1 valid");
-    let twice = vec![alice.approve(KEY, &msg, &nonce), alice.approve(KEY, &msg, &nonce)];
-    denied(driver.sign(req(with(twice, &nonce, 62))).await, "carries 1 valid");
-    let outsider = vec![alice.approve(KEY, &msg, &nonce), mallory.approve(KEY, &msg, &nonce)];
-    denied(driver.sign(req(with(outsider, &nonce, 63))).await, "carries 1 valid");
-    let wrong_nonce = vec![alice.approve(KEY, &msg, &[8; 16]), bob.approve(KEY, &msg, &[8; 16])];
-    denied(driver.sign(req(with(wrong_nonce, &nonce, 64))).await, "carries 0 valid");
-    let other_digest = vec![alice.approve(KEY, &digest(b"x"), &nonce), bob.approve(KEY, &digest(b"x"), &nonce)];
-    denied(driver.sign(req(with(other_digest, &nonce, 65))).await, "carries 0 valid");
+    denied(
+        driver.sign(req(with(vec![], &nonce, 60))).await,
+        "approval required",
+    );
+    denied(
+        driver
+            .sign(req(with(
+                vec![alice.approve(KEY, &msg, &nonce)],
+                &nonce,
+                61,
+            )))
+            .await,
+        "carries 1 valid",
+    );
+    let twice = vec![
+        alice.approve(KEY, &msg, &nonce),
+        alice.approve(KEY, &msg, &nonce),
+    ];
+    denied(
+        driver.sign(req(with(twice, &nonce, 62))).await,
+        "carries 1 valid",
+    );
+    let outsider = vec![
+        alice.approve(KEY, &msg, &nonce),
+        mallory.approve(KEY, &msg, &nonce),
+    ];
+    denied(
+        driver.sign(req(with(outsider, &nonce, 63))).await,
+        "carries 1 valid",
+    );
+    let wrong_nonce = vec![
+        alice.approve(KEY, &msg, &[8; 16]),
+        bob.approve(KEY, &msg, &[8; 16]),
+    ];
+    denied(
+        driver.sign(req(with(wrong_nonce, &nonce, 64))).await,
+        "carries 0 valid",
+    );
+    let other_digest = vec![
+        alice.approve(KEY, &digest(b"x"), &nonce),
+        bob.approve(KEY, &digest(b"x"), &nonce),
+    ];
+    denied(
+        driver.sign(req(with(other_digest, &nonce, 65))).await,
+        "carries 0 valid",
+    );
     // A compromised node forwarding an un-approved intent to a peer: refused there too.
     denied(
-        c.peer_as("cosigner3", 0).await.sign_round1(round1(KEY, "unapproved", Some(&msg), Some(with(vec![], &nonce, 66)))).await,
+        c.peer_as("cosigner3", 0)
+            .await
+            .sign_round1(round1(
+                KEY,
+                "unapproved",
+                Some(&msg),
+                Some(with(vec![], &nonce, 66)),
+            ))
+            .await,
         "approval required",
     );
 
-    let quorum = vec![alice.approve(KEY, &msg, &nonce), carol.approve(KEY, &msg, &nonce)];
+    let quorum = vec![
+        alice.approve(KEY, &msg, &nonce),
+        carol.approve(KEY, &msg, &nonce),
+    ];
     driver.sign(req(with(quorum, &nonce, 67))).await.unwrap();
-    let entry = c.journal(0).into_iter().find(|e| e.request_id == hex::encode([67u8; 16])).unwrap();
-    assert_eq!(entry.approvers, vec!["alice".to_string(), "carol".to_string()]);
+    let entry = c
+        .journal(0)
+        .into_iter()
+        .find(|e| e.request_id == hex::encode([67u8; 16]))
+        .unwrap();
+    assert_eq!(
+        entry.approvers,
+        vec!["alice".to_string(), "carol".to_string()]
+    );
 }
 
 // ── rate limit, journal, rolling upgrade (in-process) ─────────────────────────────────────────
@@ -690,7 +1080,12 @@ impl PeerApi for FlakyOnce {
     fn identifier(&self) -> Identifier {
         self.inner.identifier()
     }
-    async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments> {
+    async fn sign_round1(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        ctx: &Round1Ctx,
+    ) -> Result<SigningCommitments> {
         self.inner.sign_round1(key_id, session_id, ctx).await
     }
     async fn sign_round2(
@@ -705,7 +1100,9 @@ impl PeerApi for FlakyOnce {
             self.inner.abort_sign(key_id, session_id).await?;
             return Err(DaemonError::NotServing("test: flaky peer".into()));
         }
-        self.inner.sign_round2(key_id, session_id, message, commitments, intent_digest).await
+        self.inner
+            .sign_round2(key_id, session_id, message, commitments, intent_digest)
+            .await
     }
     async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()> {
         self.inner.abort_sign(key_id, session_id).await
@@ -719,7 +1116,14 @@ impl PeerApi for FlakyOnce {
     async fn node_info(&self) -> Result<(u16, [u8; 32])> {
         self.inner.node_info().await
     }
-    async fn replicate_key(&self, a: &str, b: &str, s: &str, d: &[u8], w: &rutli_cosigner::wrap::Wrapped) -> Result<Vec<u8>> {
+    async fn replicate_key(
+        &self,
+        a: &str,
+        b: &str,
+        s: &str,
+        d: &[u8],
+        w: &rutli_cosigner::wrap::Wrapped,
+    ) -> Result<Vec<u8>> {
         self.inner.replicate_key(a, b, s, d, w).await
     }
     async fn fetch_key(&self, k: &str) -> Result<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {
@@ -758,7 +1162,12 @@ struct LateOutcome {
 }
 
 fn unknown_session<T>(r: &Result<T>) -> bool {
-    matches!(r, Err(DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))))
+    matches!(
+        r,
+        Err(DaemonError::Core(
+            rutli_frost_core::CoreError::UnknownSession(_)
+        ))
+    )
 }
 
 impl Late {
@@ -778,7 +1187,12 @@ impl PeerApi for Late {
     fn identifier(&self) -> Identifier {
         self.inner.identifier()
     }
-    async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments> {
+    async fn sign_round1(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        ctx: &Round1Ctx,
+    ) -> Result<SigningCommitments> {
         self.inner.sign_round1(key_id, session_id, ctx).await
     }
     async fn sign_round2(
@@ -791,7 +1205,13 @@ impl PeerApi for Late {
     ) -> Result<SignatureShare> {
         self.sessions.lock().unwrap().push(session_id.to_owned());
         let (inner, hold, outcomes) = (self.inner.clone(), self.hold, self.outcomes.clone());
-        let (k, s, m, c, d) = (key_id.to_owned(), session_id.to_owned(), message.to_vec(), commitments.clone(), intent_digest.copied());
+        let (k, s, m, c, d) = (
+            key_id.to_owned(),
+            session_id.to_owned(),
+            message.to_vec(),
+            commitments.clone(),
+            intent_digest.copied(),
+        );
         // Its own task: the leader dropping this call does not stop the member.
         tokio::spawn(async move {
             tokio::time::sleep(hold).await;
@@ -801,7 +1221,10 @@ impl PeerApi for Late {
                 signed: first.is_ok(),
                 first_unknown: unknown_session(&first),
                 replay_unknown: unknown_session(&replay),
-                replay: replay.err().map(|e| e.to_string()).unwrap_or_else(|| "SIGNED TWICE".into()),
+                replay: replay
+                    .err()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "SIGNED TWICE".into()),
             });
             first
         })
@@ -809,7 +1232,12 @@ impl PeerApi for Late {
         .unwrap()
     }
     async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()> {
-        let (inner, hold, k, s) = (self.inner.clone(), self.abort_hold, key_id.to_owned(), session_id.to_owned());
+        let (inner, hold, k, s) = (
+            self.inner.clone(),
+            self.abort_hold,
+            key_id.to_owned(),
+            session_id.to_owned(),
+        );
         tokio::spawn(async move {
             tokio::time::sleep(hold).await;
             inner.abort_sign(&k, &s).await
@@ -826,7 +1254,14 @@ impl PeerApi for Late {
     async fn node_info(&self) -> Result<(u16, [u8; 32])> {
         self.inner.node_info().await
     }
-    async fn replicate_key(&self, a: &str, b: &str, s: &str, d: &[u8], w: &rutli_cosigner::wrap::Wrapped) -> Result<Vec<u8>> {
+    async fn replicate_key(
+        &self,
+        a: &str,
+        b: &str,
+        s: &str,
+        d: &[u8],
+        w: &rutli_cosigner::wrap::Wrapped,
+    ) -> Result<Vec<u8>> {
         self.inner.replicate_key(a, b, s, d, w).await
     }
     async fn fetch_key(&self, k: &str) -> Result<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {
@@ -855,32 +1290,69 @@ impl PeerApi for Late {
 #[tokio::test(start_paused = true)]
 async fn an_abandoned_attempt_never_signs_twice_and_its_intent_is_charged_once() {
     let tmp = tempfile::tempdir().unwrap();
-    let policy =
-        SigningPolicyConfig { require_intent: Some(true), sign_rate_limit_per_min: 2, sign_rate_limit_per_day: 100, ..Default::default() };
+    let policy = SigningPolicyConfig {
+        require_intent: Some(true),
+        sign_rate_limit_per_min: 2,
+        sign_rate_limit_per_day: 100,
+        ..Default::default()
+    };
     let (ids, nodes) = local(tmp.path(), &policy).await;
     let msg = digest(b"abandoned");
     let journal = |i: u16, request: u8| journal_of(tmp.path(), i, request);
-    let markers = rutli_frost_core::nonce_store::NonceStore::open(tmp.path().join(format!("node-2/keys/{KEY}.nonces"))).unwrap();
+    let markers = rutli_frost_core::nonce_store::NonceStore::open(
+        tmp.path().join(format!("node-2/keys/{KEY}.nonces")),
+    )
+    .unwrap();
 
     // The member answers round 2 after the leader's 5 s deadline, the abort ten seconds after that.
     let late = Late::new(peers_for(&nodes, 0)[1].clone(), 6, 10);
     let mut peers = peers_for(&nodes, 0);
     peers[1] = late.clone();
     let started = tokio::time::Instant::now();
-    let sig = sign_with_intent(&nodes[0], &peers, KEY, &msg, Some(&intent_by(&ids, "driver", KEY, &msg, 90))).await.unwrap();
-    assert!(rutli_cosigner::verify_key::signature_verifies(&nodes[0].group_key(KEY).unwrap(), &msg, &sig));
-    assert!(started.elapsed() < std::time::Duration::from_millis(5200), "one round-2 deadline: {:?}", started.elapsed());
+    let sig = sign_with_intent(
+        &nodes[0],
+        &peers,
+        KEY,
+        &msg,
+        Some(&intent_by(&ids, "driver", KEY, &msg, 90)),
+    )
+    .await
+    .unwrap();
+    assert!(rutli_cosigner::verify_key::signature_verifies(
+        &nodes[0].group_key(KEY).unwrap(),
+        &msg,
+        &sig
+    ));
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(5200),
+        "one round-2 deadline: {:?}",
+        started.elapsed()
+    );
     let session = late.sessions.lock().unwrap()[0].clone();
 
     // Leader 1 gave up on node 2's session; its late round 2 has not landed yet. Another leader
     // (node 3) with the same request can neither sign it nor abort it.
     let rival = LocalPeer::new(nodes[1].clone()).on_behalf_of(nodes[2].clone());
-    let owner = |r: &Result<_>| matches!(r, Err(DaemonError::Core(rutli_frost_core::CoreError::NotSessionOwner { .. })));
-    let r2 = rival.sign_round2(KEY, &session, &msg, &BTreeMap::new(), None).await.map(|_| ());
+    let owner = |r: &Result<_>| {
+        matches!(
+            r,
+            Err(DaemonError::Core(
+                rutli_frost_core::CoreError::NotSessionOwner { .. }
+            ))
+        )
+    };
+    let r2 = rival
+        .sign_round2(KEY, &session, &msg, &BTreeMap::new(), None)
+        .await
+        .map(|_| ());
     assert!(owner(&r2), "{r2:?}");
     let abort = rival.abort_sign(KEY, &session).await;
     assert!(owner(&abort), "{abort:?}");
-    assert_eq!(nodes[1].pending_sign_count(KEY), 1, "the session stays with its opener");
+    assert_eq!(
+        nodes[1].pending_sign_count(KEY),
+        1,
+        "the session stays with its opener"
+    );
     assert!(!markers.is_consumed(&session).unwrap());
     assert_eq!(journal(2, 90), 0);
 
@@ -888,8 +1360,15 @@ async fn an_abandoned_attempt_never_signs_twice_and_its_intent_is_charged_once()
     let outcomes = late.outcomes.lock().unwrap().clone();
     assert_eq!(outcomes.len(), 1);
     assert!(outcomes[0].signed, "the late round 2 signed");
-    assert!(outcomes[0].replay_unknown, "a replayed round 2 is an unknown session: {}", outcomes[0].replay);
-    assert!(markers.is_consumed(&session).unwrap(), "the abandoned session's marker is burnt");
+    assert!(
+        outcomes[0].replay_unknown,
+        "a replayed round 2 is an unknown session: {}",
+        outcomes[0].replay
+    );
+    assert!(
+        markers.is_consumed(&session).unwrap(),
+        "the abandoned session's marker is burnt"
+    );
     for n in &nodes {
         assert_eq!(n.pending_sign_count(KEY), 0);
     }
@@ -900,11 +1379,22 @@ async fn an_abandoned_attempt_never_signs_twice_and_its_intent_is_charged_once()
     let late = Late::new(peers_for(&nodes, 0)[1].clone(), 6, 0);
     let mut peers = peers_for(&nodes, 0);
     peers[1] = late.clone();
-    sign_with_intent(&nodes[0], &peers, KEY, &msg, Some(&intent_by(&ids, "driver", KEY, &msg, 91))).await.unwrap();
+    sign_with_intent(
+        &nodes[0],
+        &peers,
+        KEY,
+        &msg,
+        Some(&intent_by(&ids, "driver", KEY, &msg, 91)),
+    )
+    .await
+    .unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     let outcomes = late.outcomes.lock().unwrap().clone();
     assert_eq!(outcomes.len(), 1);
-    assert!(!outcomes[0].signed && outcomes[0].first_unknown, "no nonces left for the abandoned session: {outcomes:?}");
+    assert!(
+        !outcomes[0].signed && outcomes[0].first_unknown,
+        "no nonces left for the abandoned session: {outcomes:?}"
+    );
     assert!(outcomes[0].replay_unknown);
     let session = late.sessions.lock().unwrap()[0].clone();
     assert!(!markers.is_consumed(&session).unwrap());
@@ -912,13 +1402,22 @@ async fn an_abandoned_attempt_never_signs_twice_and_its_intent_is_charged_once()
 
     // Two requests, two charges (the limit is two a minute): attempts and late shares cost nothing
     // more, and the third request is refused.
-    let err = sign_with_intent(&nodes[0], &peers_for(&nodes, 0), KEY, &msg, Some(&intent_by(&ids, "driver", KEY, &msg, 92)))
-        .await
-        .unwrap_err();
+    let err = sign_with_intent(
+        &nodes[0],
+        &peers_for(&nodes, 0),
+        KEY,
+        &msg,
+        Some(&intent_by(&ids, "driver", KEY, &msg, 92)),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(err, DaemonError::RateLimited(_)), "{err:?}");
     for i in 1..=N {
         for request in [90, 91] {
-            assert!(journal(i, request) <= SigningPolicyConfig::default().max_shares_per_request as usize);
+            assert!(
+                journal(i, request)
+                    <= SigningPolicyConfig::default().max_shares_per_request as usize
+            );
         }
     }
 }
@@ -938,7 +1437,12 @@ impl PeerApi for Watched {
     fn identifier(&self) -> Identifier {
         self.inner.identifier()
     }
-    async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments> {
+    async fn sign_round1(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        ctx: &Round1Ctx,
+    ) -> Result<SigningCommitments> {
         self.inner.sign_round1(key_id, session_id, ctx).await
     }
     async fn sign_round2(
@@ -950,7 +1454,9 @@ impl PeerApi for Watched {
         intent_digest: Option<&[u8; 32]>,
     ) -> Result<SignatureShare> {
         self.round2s.lock().unwrap().push(session_id.to_owned());
-        self.inner.sign_round2(key_id, session_id, message, commitments, intent_digest).await
+        self.inner
+            .sign_round2(key_id, session_id, message, commitments, intent_digest)
+            .await
     }
     async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()> {
         self.aborts.lock().unwrap().push(session_id.to_owned());
@@ -965,7 +1471,14 @@ impl PeerApi for Watched {
     async fn node_info(&self) -> Result<(u16, [u8; 32])> {
         self.inner.node_info().await
     }
-    async fn replicate_key(&self, a: &str, b: &str, s: &str, d: &[u8], w: &rutli_cosigner::wrap::Wrapped) -> Result<Vec<u8>> {
+    async fn replicate_key(
+        &self,
+        a: &str,
+        b: &str,
+        s: &str,
+        d: &[u8],
+        w: &rutli_cosigner::wrap::Wrapped,
+    ) -> Result<Vec<u8>> {
         self.inner.replicate_key(a, b, s, d, w).await
     }
     async fn fetch_key(&self, k: &str) -> Result<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {
@@ -1004,41 +1517,92 @@ async fn until(what: &str, done: impl Fn() -> bool) {
 #[tokio::test(start_paused = true)]
 async fn an_abort_during_round_2_finds_nothing_and_the_share_is_journaled_once() {
     let tmp = tempfile::tempdir().unwrap();
-    let policy =
-        SigningPolicyConfig { require_intent: Some(true), sign_rate_limit_per_min: 100, sign_rate_limit_per_day: 1000, ..Default::default() };
+    let policy = SigningPolicyConfig {
+        require_intent: Some(true),
+        sign_rate_limit_per_min: 100,
+        sign_rate_limit_per_day: 1000,
+        ..Default::default()
+    };
     let store = store_fault::StoreFault::new();
     let (ids, nodes) = local_hooked(tmp.path(), &policy, 2, store.hook()).await;
     let msg = digest(b"abort during round 2");
     let journal = |i: u16, request: u8| journal_of(tmp.path(), i, request);
     let (round2s, aborts): (Sessions, Sessions) = Default::default();
     let mut peers = peers_for(&nodes, 0);
-    peers[1] = Arc::new(Watched { inner: peers[1].clone(), round2s: round2s.clone(), aborts: aborts.clone() });
+    peers[1] = Arc::new(Watched {
+        inner: peers[1].clone(),
+        round2s: round2s.clone(),
+        aborts: aborts.clone(),
+    });
 
     // Node 2 is this request's first partner (#193), so its round 2 is the one that holds.
-    assert_eq!(rutli_cosigner::orchestrator::partner_offset(&[99; 16], 2), 0);
+    assert_eq!(
+        rutli_cosigner::orchestrator::partner_offset(&[99; 16], 2),
+        0
+    );
     store.set(store_fault::Store::Hold);
     let signing = {
-        let (leader, peers, intent, msg) = (nodes[0].clone(), peers.clone(), intent_by(&ids, "driver", KEY, &msg, 99), msg.clone());
-        tokio::spawn(async move { sign_with_intent(&leader, &peers, KEY, &msg, Some(&intent)).await })
+        let (leader, peers, intent, msg) = (
+            nodes[0].clone(),
+            peers.clone(),
+            intent_by(&ids, "driver", KEY, &msg, 99),
+            msg.clone(),
+        );
+        tokio::spawn(
+            async move { sign_with_intent(&leader, &peers, KEY, &msg, Some(&intent)).await },
+        )
     };
-    until("node 2's round 2 to hold in its store work", || store.held() == 1).await;
+    until("node 2's round 2 to hold in its store work", || {
+        store.held() == 1
+    })
+    .await;
     let session = round2s.lock().unwrap()[0].clone();
-    assert_eq!(nodes[1].pending_sign_count(KEY), 0, "its nonces are out of memory already");
+    assert_eq!(
+        nodes[1].pending_sign_count(KEY),
+        0,
+        "its nonces are out of memory already"
+    );
     assert_eq!(journal(2, 99), 0);
 
-    tokio::time::advance(rutli_cosigner::peer::ROUND2_DEADLINE + std::time::Duration::from_millis(10)).await;
+    tokio::time::advance(
+        rutli_cosigner::peer::ROUND2_DEADLINE + std::time::Duration::from_millis(10),
+    )
+    .await;
     let sig = signing.await.unwrap().expect("signed with node 3");
-    assert!(rutli_cosigner::verify_key::signature_verifies(&nodes[0].group_key(KEY).unwrap(), &msg, &sig));
-    until("the abort to reach node 2", || aborts.lock().unwrap().contains(&session)).await;
-    let markers = rutli_frost_core::nonce_store::NonceStore::open(tmp.path().join(format!("node-2/keys/{KEY}.nonces"))).unwrap();
-    assert!(!markers.is_consumed(&session).unwrap(), "the abort landed while round 2 held");
+    assert!(rutli_cosigner::verify_key::signature_verifies(
+        &nodes[0].group_key(KEY).unwrap(),
+        &msg,
+        &sig
+    ));
+    until("the abort to reach node 2", || {
+        aborts.lock().unwrap().contains(&session)
+    })
+    .await;
+    let markers = rutli_frost_core::nonce_store::NonceStore::open(
+        tmp.path().join(format!("node-2/keys/{KEY}.nonces")),
+    )
+    .unwrap();
+    assert!(
+        !markers.is_consumed(&session).unwrap(),
+        "the abort landed while round 2 held"
+    );
     assert_eq!(journal(2, 99), 0);
 
     store.set(store_fault::Store::Ok);
-    until("node 2's round 2 to end", || nodes[1].load_now().inflight == 0).await;
-    assert!(markers.is_consumed(&session).unwrap(), "round 2 finished: its marker is burnt");
+    until("node 2's round 2 to end", || {
+        nodes[1].load_now().inflight == 0
+    })
+    .await;
+    assert!(
+        markers.is_consumed(&session).unwrap(),
+        "round 2 finished: its marker is burnt"
+    );
     assert_eq!((journal(1, 99), journal(2, 99), journal(3, 99)), (2, 1, 1));
-    assert_eq!(round2s.lock().unwrap().len(), 1, "the leader never resends a round 2");
+    assert_eq!(
+        round2s.lock().unwrap().len(),
+        1,
+        "the leader never resends a round 2"
+    );
 }
 
 /// With `max_shares_per_request = 1` a second attempt for the same request is refused on a member
@@ -1047,13 +1611,31 @@ async fn an_abort_during_round_2_finds_nothing_and_the_share_is_journaled_once()
 #[tokio::test]
 async fn with_one_share_per_request_a_second_attempt_is_refused_where_a_share_left_already() {
     let tmp = tempfile::tempdir().unwrap();
-    let policy = SigningPolicyConfig { require_intent: Some(true), max_shares_per_request: 1, ..Default::default() };
+    let policy = SigningPolicyConfig {
+        require_intent: Some(true),
+        max_shares_per_request: 1,
+        ..Default::default()
+    };
     let (ids, nodes) = local(tmp.path(), &policy).await;
     let msg = digest(b"one share each");
     let mut peers = peers_for(&nodes, 0);
-    peers[1] = Arc::new(FlakyOnce { inner: peers[1].clone(), failed: Default::default() });
-    let err = sign_with_intent(&nodes[0], &peers, KEY, &msg, Some(&intent_by(&ids, "driver", KEY, &msg, 94))).await.unwrap_err();
-    assert!(matches!(err, DaemonError::RateLimited(ref m) if m.contains("max_shares_per_request")), "{err:?}");
+    peers[1] = Arc::new(FlakyOnce {
+        inner: peers[1].clone(),
+        failed: Default::default(),
+    });
+    let err = sign_with_intent(
+        &nodes[0],
+        &peers,
+        KEY,
+        &msg,
+        Some(&intent_by(&ids, "driver", KEY, &msg, 94)),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, DaemonError::RateLimited(ref m) if m.contains("max_shares_per_request")),
+        "{err:?}"
+    );
     let journal = |i: u16| journal_of(tmp.path(), i, 94);
     assert_eq!((journal(1), journal(2), journal(3)), (1, 0, 0));
     for n in &nodes {
@@ -1078,7 +1660,11 @@ fn peers_for(nodes: &[Arc<Node>], leader: usize) -> Peers {
         .iter()
         .enumerate()
         .map(|(i, n)| {
-            let peer = if i == leader { LocalPeer::new(n.clone()) } else { LocalPeer::new(n.clone()).on_behalf_of(nodes[leader].clone()) };
+            let peer = if i == leader {
+                LocalPeer::new(n.clone())
+            } else {
+                LocalPeer::new(n.clone()).on_behalf_of(nodes[leader].clone())
+            };
             Arc::new(peer) as Arc<dyn PeerApi>
         })
         .collect()
@@ -1095,13 +1681,26 @@ async fn local_hooked(
     let nodes: Vec<Arc<Node>> = (1..=N)
         .map(|i| {
             let ks = KeyStore::open(root.join(format!("node-{i}")).join("keys")).unwrap();
-            let node = Node::new(Identifier::try_from(i).unwrap(), N, T, ks).with_sign_guard(guard(root, &ids, i, policy));
-            Arc::new(if i == hooked { node.with_sign_store_hook(hook.clone()) } else { node })
+            let node = Node::new(Identifier::try_from(i).unwrap(), N, T, ks)
+                .with_sign_guard(guard(root, &ids, i, policy));
+            Arc::new(if i == hooked {
+                node.with_sign_store_hook(hook.clone())
+            } else {
+                node
+            })
         })
         .collect();
     rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
-    let dkg = ceremony_by(&ids, "driver", rutli_cosigner::node::CeremonyKind::Dkg, KEY, 0xd0);
-    run_dkg_with_intent(&peers_of(&nodes), KEY, Some(dkg)).await.unwrap();
+    let dkg = ceremony_by(
+        &ids,
+        "driver",
+        rutli_cosigner::node::CeremonyKind::Dkg,
+        KEY,
+        0xd0,
+    );
+    run_dkg_with_intent(&peers_of(&nodes), KEY, Some(dkg))
+        .await
+        .unwrap();
     (ids, nodes)
 }
 
@@ -1110,9 +1709,18 @@ async fn local(root: &Path, policy: &SigningPolicyConfig) -> (Ids, Vec<Arc<Node>
     let ids = Ids::new(&root.join("certs"));
     let nodes: Vec<Arc<Node>> = (1..=N).map(|i| open_node(root, &ids, i, policy)).collect();
     rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
-    let peers: Peers = nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    let peers: Peers = nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect();
     if policy.ceremony_intent_required(true) {
-        let dkg = ceremony_by(&ids, "driver", rutli_cosigner::node::CeremonyKind::Dkg, KEY, 0xd0);
+        let dkg = ceremony_by(
+            &ids,
+            "driver",
+            rutli_cosigner::node::CeremonyKind::Dkg,
+            KEY,
+            0xd0,
+        );
         run_dkg_with_intent(&peers, KEY, Some(dkg)).await.unwrap();
     } else {
         run_dkg(&peers, KEY).await.unwrap();
@@ -1121,7 +1729,10 @@ async fn local(root: &Path, policy: &SigningPolicyConfig) -> (Ids, Vec<Arc<Node>
 }
 
 fn peers_of(nodes: &[Arc<Node>]) -> Peers {
-    nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect()
+    nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect()
 }
 
 /// One request id is one charge, whatever the retries: with a limit of ONE signature per minute,
@@ -1130,37 +1741,75 @@ fn peers_of(nodes: &[Arc<Node>]) -> Peers {
 #[tokio::test]
 async fn the_rate_limit_is_charged_once_per_request_id_across_retries_and_survives_a_restart() {
     let tmp = tempfile::tempdir().unwrap();
-    let policy = SigningPolicyConfig { require_intent: Some(true), sign_rate_limit_per_min: 1, sign_rate_limit_per_day: 100, ..Default::default() };
+    let policy = SigningPolicyConfig {
+        require_intent: Some(true),
+        sign_rate_limit_per_min: 1,
+        sign_rate_limit_per_day: 100,
+        ..Default::default()
+    };
     let (ids, nodes) = local(tmp.path(), &policy).await;
     let msg = digest(b"retried");
     let i1 = intent_by(&ids, "driver", KEY, &msg, 79);
 
     // Node 2 is this request's first partner (#193), so the flaky one fails the first subset.
-    assert_eq!(rutli_cosigner::orchestrator::partner_offset(&[79; 16], 2), 0);
+    assert_eq!(
+        rutli_cosigner::orchestrator::partner_offset(&[79; 16], 2),
+        0
+    );
     let mut peers = peers_of(&nodes);
-    peers[1] = Arc::new(FlakyOnce { inner: peers[1].clone(), failed: Default::default() });
-    let sig = sign_with_intent(&nodes[0], &peers, KEY, &msg, Some(&i1)).await.unwrap();
-    assert!(rutli_cosigner::verify_key::signature_verifies(&nodes[0].group_key(KEY).unwrap(), &msg, &sig));
-    let leader = read_key_dir(&tmp.path().join("node-1/journal").join(KEY)).unwrap().entries;
-    assert_eq!(leader.len(), 2, "the leader released a share in both attempts");
-    assert!(leader.iter().all(|e| e.request_id == hex::encode([79u8; 16])));
+    peers[1] = Arc::new(FlakyOnce {
+        inner: peers[1].clone(),
+        failed: Default::default(),
+    });
+    let sig = sign_with_intent(&nodes[0], &peers, KEY, &msg, Some(&i1))
+        .await
+        .unwrap();
+    assert!(rutli_cosigner::verify_key::signature_verifies(
+        &nodes[0].group_key(KEY).unwrap(),
+        &msg,
+        &sig
+    ));
+    let leader = read_key_dir(&tmp.path().join("node-1/journal").join(KEY))
+        .unwrap()
+        .entries;
+    assert_eq!(
+        leader.len(),
+        2,
+        "the leader released a share in both attempts"
+    );
+    assert!(leader
+        .iter()
+        .all(|e| e.request_id == hex::encode([79u8; 16])));
 
     // A replay of the same intent is not a new charge...
-    sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, Some(&i1)).await.unwrap();
+    sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, Some(&i1))
+        .await
+        .unwrap();
     // ...a new request id is, and the minute's budget is spent.
     let i2 = intent_by(&ids, "driver", KEY, &msg, 71);
-    let err = sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, Some(&i2)).await.unwrap_err();
+    let err = sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, Some(&i2))
+        .await
+        .unwrap_err();
     assert!(matches!(err, DaemonError::RateLimited(_)), "{err:?}");
     assert_eq!(nodes[0].pending_sign_count(KEY), 0);
 
     // Restart every node (new process: guards and journals reopened over the same directories).
     drop(peers);
     drop(nodes);
-    let nodes: Vec<Arc<Node>> = (1..=N).map(|i| open_node(tmp.path(), &ids, i, &policy)).collect();
+    let nodes: Vec<Arc<Node>> = (1..=N)
+        .map(|i| open_node(tmp.path(), &ids, i, &policy))
+        .collect();
     rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
-    let err = sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, Some(&i2)).await.unwrap_err();
-    assert!(matches!(err, DaemonError::RateLimited(_)), "the charge survived the restart: {err:?}");
-    sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, Some(&i1)).await.unwrap();
+    let err = sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, Some(&i2))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DaemonError::RateLimited(_)),
+        "the charge survived the restart: {err:?}"
+    );
+    sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, Some(&i1))
+        .await
+        .unwrap();
 }
 
 /// The per-request share cap: a valid intent replayed by a compromised leader buys only
@@ -1168,15 +1817,28 @@ async fn the_rate_limit_is_charged_once_per_request_id_across_retries_and_surviv
 #[tokio::test]
 async fn a_replayed_intent_is_capped_per_request() {
     let tmp = tempfile::tempdir().unwrap();
-    let policy = SigningPolicyConfig { require_intent: Some(true), max_shares_per_request: 2, ..Default::default() };
+    let policy = SigningPolicyConfig {
+        require_intent: Some(true),
+        max_shares_per_request: 2,
+        ..Default::default()
+    };
     let (ids, nodes) = local(tmp.path(), &policy).await;
     let msg = digest(b"replayed");
     let i1 = intent_by(&ids, "driver", KEY, &msg, 72);
     let pair: Peers = peers_of(&nodes).into_iter().take(2).collect();
-    sign_with_intent(&nodes[0], &pair, KEY, &msg, Some(&i1)).await.unwrap();
-    sign_with_intent(&nodes[0], &pair, KEY, &msg, Some(&i1)).await.unwrap();
-    let err = sign_with_intent(&nodes[0], &pair, KEY, &msg, Some(&i1)).await.unwrap_err();
-    assert!(matches!(err, DaemonError::RateLimited(ref m) if m.contains("max_shares_per_request")), "{err:?}");
+    sign_with_intent(&nodes[0], &pair, KEY, &msg, Some(&i1))
+        .await
+        .unwrap();
+    sign_with_intent(&nodes[0], &pair, KEY, &msg, Some(&i1))
+        .await
+        .unwrap();
+    let err = sign_with_intent(&nodes[0], &pair, KEY, &msg, Some(&i1))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DaemonError::RateLimited(ref m) if m.contains("max_shares_per_request")),
+        "{err:?}"
+    );
 }
 
 /// A driver that fails over presents the same intent to each leader in turn (one per attempt
@@ -1185,7 +1847,11 @@ async fn a_replayed_intent_is_capped_per_request() {
 #[tokio::test]
 async fn failing_over_across_leaders_under_one_intent_stays_within_the_share_cap() {
     let tmp = tempfile::tempdir().unwrap();
-    let policy = SigningPolicyConfig { require_intent: Some(true), max_shares_per_request: 2, ..Default::default() };
+    let policy = SigningPolicyConfig {
+        require_intent: Some(true),
+        max_shares_per_request: 2,
+        ..Default::default()
+    };
     let (ids, nodes) = local(tmp.path(), &policy).await;
     let msg = digest(b"failed over");
     let i1 = intent_by(&ids, "driver", KEY, &msg, 90);
@@ -1193,12 +1859,19 @@ async fn failing_over_across_leaders_under_one_intent_stays_within_the_share_cap
     let pair = |a: usize, b: usize| -> Peers { vec![all[a].clone(), all[b].clone()] };
     // Each leader signs with itself and the next node: two shares per node in all.
     for (lead, other) in [(0, 1), (1, 2), (2, 0)] {
-        sign_with_intent(&nodes[lead], &pair(lead, other), KEY, &msg, Some(&i1)).await.unwrap();
+        sign_with_intent(&nodes[lead], &pair(lead, other), KEY, &msg, Some(&i1))
+            .await
+            .unwrap();
     }
     // Any further attempt under the same intent finds its nodes at the cap.
     for (lead, other) in [(0, 1), (1, 2), (2, 0)] {
-        let err = sign_with_intent(&nodes[lead], &pair(lead, other), KEY, &msg, Some(&i1)).await.unwrap_err();
-        assert!(matches!(err, DaemonError::RateLimited(ref m) if m.contains("max_shares_per_request")), "{err:?}");
+        let err = sign_with_intent(&nodes[lead], &pair(lead, other), KEY, &msg, Some(&i1))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DaemonError::RateLimited(ref m) if m.contains("max_shares_per_request")),
+            "{err:?}"
+        );
     }
 }
 
@@ -1216,24 +1889,62 @@ async fn a_node_that_cannot_journal_releases_no_share() {
     let tmp = tempfile::tempdir().unwrap();
     let (ids, nodes) = local(tmp.path(), &strict()).await;
     let msg = digest(b"journal first");
-    sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, Some(&intent_by(&ids, "driver", KEY, &msg, 80))).await.unwrap();
-    let seg = rutli_cosigner::journal::segments(&tmp.path().join("node-1/journal").join(KEY)).unwrap().pop().unwrap();
+    sign_with_intent(
+        &nodes[0],
+        &peers_of(&nodes),
+        KEY,
+        &msg,
+        Some(&intent_by(&ids, "driver", KEY, &msg, 80)),
+    )
+    .await
+    .unwrap();
+    let seg = rutli_cosigner::journal::segments(&tmp.path().join("node-1/journal").join(KEY))
+        .unwrap()
+        .pop()
+        .unwrap();
     std::fs::set_permissions(&seg, std::fs::Permissions::from_mode(0o400)).unwrap();
 
-    let markers = |i: u16| std::fs::read_dir(tmp.path().join(format!("node-{i}/keys/{KEY}.nonces"))).unwrap().count();
+    let markers = |i: u16| {
+        std::fs::read_dir(tmp.path().join(format!("node-{i}/keys/{KEY}.nonces")))
+            .unwrap()
+            .count()
+    };
     let before = markers(1);
     let i2 = intent_by(&ids, "driver", KEY, &msg, 81);
-    let ctx = Round1Ctx { message: Some(msg.clone()), signers: Some(vec![1, 2]), intent: Some(i2.clone()), ..Default::default() };
+    let ctx = Round1Ctx {
+        message: Some(msg.clone()),
+        signers: Some(vec![1, 2]),
+        intent: Some(i2.clone()),
+        ..Default::default()
+    };
     let cs = BTreeMap::from([
-        (Identifier::try_from(1u16).unwrap(), nodes[0].sign_round1(KEY, "no-journal", &ctx).unwrap()),
-        (Identifier::try_from(2u16).unwrap(), nodes[1].sign_round1(KEY, "no-journal", &ctx).unwrap()),
+        (
+            Identifier::try_from(1u16).unwrap(),
+            nodes[0].sign_round1(KEY, "no-journal", &ctx).unwrap(),
+        ),
+        (
+            Identifier::try_from(2u16).unwrap(),
+            nodes[1].sign_round1(KEY, "no-journal", &ctx).unwrap(),
+        ),
     ]);
-    let err = nodes[0].sign_round2_with(KEY, "no-journal", &msg, &cs, Some(intent::intent_digest(&i2))).unwrap_err();
+    let err = nodes[0]
+        .sign_round2_with(
+            KEY,
+            "no-journal",
+            &msg,
+            &cs,
+            Some(intent::intent_digest(&i2)),
+        )
+        .unwrap_err();
     // A definite I/O error (EACCES) in round-2 store work: the node marks its key store down at
     // once and answers `keystore-down`, so leaders route around it.
     assert!(matches!(err, DaemonError::KeystoreDown(_)), "{err:?}");
     assert!(nodes[0].keystore_health().is_down());
-    assert_eq!(markers(1), before, "no marker burned for a share that was not journaled");
+    assert_eq!(
+        markers(1),
+        before,
+        "no marker burned for a share that was not journaled"
+    );
     std::fs::set_permissions(&seg, std::fs::Permissions::from_mode(0o600)).unwrap();
     // Not sticky: the next readiness probe that finds the store working clears it.
     nodes[0].check_keystore().unwrap();
@@ -1252,35 +1963,87 @@ async fn a_round2_after_a_restart_is_an_unknown_session_not_a_policy_refusal() {
         let (ids, nodes) = local(tmp.path(), &policy).await;
         let msg = digest(b"restart between the rounds");
         let i1 = intent_by(&ids, "driver", KEY, &msg, 85);
-        let ctx = Round1Ctx { message: Some(msg.clone()), signers: Some(vec![1, 2]), intent: Some(i1.clone()), ..Default::default() };
+        let ctx = Round1Ctx {
+            message: Some(msg.clone()),
+            signers: Some(vec![1, 2]),
+            intent: Some(i1.clone()),
+            ..Default::default()
+        };
         let cs = BTreeMap::from([
-            (Identifier::try_from(1u16).unwrap(), nodes[0].sign_round1(KEY, "restarted", &ctx).unwrap()),
-            (Identifier::try_from(2u16).unwrap(), nodes[1].sign_round1(KEY, "restarted", &ctx).unwrap()),
+            (
+                Identifier::try_from(1u16).unwrap(),
+                nodes[0].sign_round1(KEY, "restarted", &ctx).unwrap(),
+            ),
+            (
+                Identifier::try_from(2u16).unwrap(),
+                nodes[1].sign_round1(KEY, "restarted", &ctx).unwrap(),
+            ),
         ]);
-        let markers = || std::fs::read_dir(tmp.path().join(format!("node-1/keys/{KEY}.nonces"))).map(|d| d.count()).unwrap_or(0);
-        let journaled = || read_key_dir(&tmp.path().join("node-1/journal").join(KEY)).map(|r| r.entries.len()).unwrap_or(0);
+        let markers = || {
+            std::fs::read_dir(tmp.path().join(format!("node-1/keys/{KEY}.nonces")))
+                .map(|d| d.count())
+                .unwrap_or(0)
+        };
+        let journaled = || {
+            read_key_dir(&tmp.path().join("node-1/journal").join(KEY))
+                .map(|r| r.entries.len())
+                .unwrap_or(0)
+        };
         let (burned, entries) = (markers(), journaled());
 
         // Restart every node (new process: guards and journals reopened over the same directories).
         drop(nodes);
-        let nodes: Vec<Arc<Node>> = (1..=N).map(|i| open_node(tmp.path(), &ids, i, &policy)).collect();
+        let nodes: Vec<Arc<Node>> = (1..=N)
+            .map(|i| open_node(tmp.path(), &ids, i, &policy))
+            .collect();
         rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
 
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let err = metrics::with_local_recorder(&recorder, || {
-            nodes[0].sign_round2_with(KEY, "restarted", &msg, &cs, Some(intent::intent_digest(&i1))).unwrap_err()
+            nodes[0]
+                .sign_round2_with(
+                    KEY,
+                    "restarted",
+                    &msg,
+                    &cs,
+                    Some(intent::intent_digest(&i1)),
+                )
+                .unwrap_err()
         });
-        assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))), "{err:?}");
+        assert!(
+            matches!(
+                err,
+                DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))
+            ),
+            "{err:?}"
+        );
         assert_eq!(tonic::Status::from(err).code(), tonic::Code::Aborted);
         let out = handle.render();
-        assert!(out.lines().any(|l| l == "rutli_sign_round2_unknown_session_total 1"), "{out}");
-        assert!(!out.contains("rutli_sign_policy_refusals_total"), "not counted as a policy refusal:\n{out}");
-        assert_eq!((markers(), journaled()), (burned, entries), "nothing burned, nothing journaled");
+        assert!(
+            out.lines()
+                .any(|l| l == "rutli_sign_round2_unknown_session_total 1"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("rutli_sign_policy_refusals_total"),
+            "not counted as a policy refusal:\n{out}"
+        );
+        assert_eq!(
+            (markers(), journaled()),
+            (burned, entries),
+            "nothing burned, nothing journaled"
+        );
 
         // The request itself is fine: a new session signs it.
-        let sig = sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, Some(&i1)).await.unwrap();
-        assert!(rutli_cosigner::verify_key::signature_verifies(&nodes[0].group_key(KEY).unwrap(), &msg, &sig));
+        let sig = sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, Some(&i1))
+            .await
+            .unwrap();
+        assert!(rutli_cosigner::verify_key::signature_verifies(
+            &nodes[0].group_key(KEY).unwrap(),
+            &msg,
+            &sig
+        ));
     }
 }
 
@@ -1293,25 +2056,62 @@ async fn a_round2_without_its_round1_authorization_is_refused_while_the_nonces_a
     let (ids, nodes) = local(tmp.path(), &strict()).await;
     let msg = digest(b"authorization lost");
     let i1 = intent_by(&ids, "driver", KEY, &msg, 86);
-    let ctx = Round1Ctx { message: Some(msg.clone()), signers: Some(vec![1, 2]), intent: Some(i1.clone()), ..Default::default() };
+    let ctx = Round1Ctx {
+        message: Some(msg.clone()),
+        signers: Some(vec![1, 2]),
+        intent: Some(i1.clone()),
+        ..Default::default()
+    };
     let cs = BTreeMap::from([
-        (Identifier::try_from(1u16).unwrap(), nodes[0].sign_round1(KEY, "no-auth", &ctx).unwrap()),
-        (Identifier::try_from(2u16).unwrap(), nodes[1].sign_round1(KEY, "no-auth", &ctx).unwrap()),
+        (
+            Identifier::try_from(1u16).unwrap(),
+            nodes[0].sign_round1(KEY, "no-auth", &ctx).unwrap(),
+        ),
+        (
+            Identifier::try_from(2u16).unwrap(),
+            nodes[1].sign_round1(KEY, "no-auth", &ctx).unwrap(),
+        ),
     ]);
-    let markers = || std::fs::read_dir(tmp.path().join(format!("node-1/keys/{KEY}.nonces"))).map(|d| d.count()).unwrap_or(0);
+    let markers = || {
+        std::fs::read_dir(tmp.path().join(format!("node-1/keys/{KEY}.nonces")))
+            .map(|d| d.count())
+            .unwrap_or(0)
+    };
     let burned = markers();
     // Lose the authorization (as a restart or a poisoned map would), keep the nonces.
     let owner = rutli_cosigner::node::SessionOwner::Local;
-    assert!(nodes[0].sign_guard().unwrap().take_as(KEY, "no-auth", &owner).unwrap().is_some());
+    assert!(nodes[0]
+        .sign_guard()
+        .unwrap()
+        .take_as(KEY, "no-auth", &owner)
+        .unwrap()
+        .is_some());
     assert_eq!(nodes[0].pending_sign_count(KEY), 1);
 
-    let err = nodes[0].sign_round2_with(KEY, "no-auth", &msg, &cs, Some(intent::intent_digest(&i1))).unwrap_err();
-    assert!(matches!(err, DaemonError::PolicyRefused(ref m) if m.contains("no round-1 authorization")), "{err:?}");
-    assert_eq!(nodes[0].pending_sign_count(KEY), 0, "the nonces are dropped");
+    let err = nodes[0]
+        .sign_round2_with(KEY, "no-auth", &msg, &cs, Some(intent::intent_digest(&i1)))
+        .unwrap_err();
+    assert!(
+        matches!(err, DaemonError::PolicyRefused(ref m) if m.contains("no round-1 authorization")),
+        "{err:?}"
+    );
+    assert_eq!(
+        nodes[0].pending_sign_count(KEY),
+        0,
+        "the nonces are dropped"
+    );
     assert_eq!(markers(), burned);
     // And the session is gone for good: a second try finds nothing to sign with.
-    let err = nodes[0].sign_round2_with(KEY, "no-auth", &msg, &cs, Some(intent::intent_digest(&i1))).unwrap_err();
-    assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))), "{err:?}");
+    let err = nodes[0]
+        .sign_round2_with(KEY, "no-auth", &msg, &cs, Some(intent::intent_digest(&i1)))
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))
+        ),
+        "{err:?}"
+    );
     assert_eq!(markers(), burned);
 }
 
@@ -1322,20 +2122,45 @@ async fn a_round2_without_its_round1_authorization_is_refused_while_the_nonces_a
 #[tokio::test]
 async fn a_round2_after_a_commit_is_an_unknown_session_even_with_a_lapsed_intent() {
     let tmp = tempfile::tempdir().unwrap();
-    let policy = SigningPolicyConfig { clock_skew_secs: 0, require_ceremony_intent: Some(false), ..strict() };
+    let policy = SigningPolicyConfig {
+        clock_skew_secs: 0,
+        require_ceremony_intent: Some(false),
+        ..strict()
+    };
     let (ids, nodes) = local(tmp.path(), &policy).await;
     let msg = digest(b"commit between the rounds");
     let not_after = now_ms() + 2_000;
-    let i1 = sign(&ids, "driver", unsigned(KEY, &msg, 87, not_after - 60_000, not_after));
-    let ctx = Round1Ctx { message: Some(msg.clone()), signers: Some(vec![1, 2]), intent: Some(i1.clone()), ..Default::default() };
+    let i1 = sign(
+        &ids,
+        "driver",
+        unsigned(KEY, &msg, 87, not_after - 60_000, not_after),
+    );
+    let ctx = Round1Ctx {
+        message: Some(msg.clone()),
+        signers: Some(vec![1, 2]),
+        intent: Some(i1.clone()),
+        ..Default::default()
+    };
     let cs = BTreeMap::from([
-        (Identifier::try_from(1u16).unwrap(), nodes[0].sign_round1(KEY, "committed", &ctx).unwrap()),
-        (Identifier::try_from(2u16).unwrap(), nodes[1].sign_round1(KEY, "committed", &ctx).unwrap()),
+        (
+            Identifier::try_from(1u16).unwrap(),
+            nodes[0].sign_round1(KEY, "committed", &ctx).unwrap(),
+        ),
+        (
+            Identifier::try_from(2u16).unwrap(),
+            nodes[1].sign_round1(KEY, "committed", &ctx).unwrap(),
+        ),
     ]);
     assert_eq!(nodes[0].pending_sign_count(KEY), 1);
 
-    rutli_cosigner::orchestrator::run_refresh(&peers_of(&nodes), KEY).await.unwrap();
-    assert_eq!(nodes[0].pending_sign_count(KEY), 0, "the commit dropped the cosigner that held the nonces");
+    rutli_cosigner::orchestrator::run_refresh(&peers_of(&nodes), KEY)
+        .await
+        .unwrap();
+    assert_eq!(
+        nodes[0].pending_sign_count(KEY),
+        0,
+        "the commit dropped the cosigner that held the nonces"
+    );
     while now_ms() <= not_after {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
@@ -1343,13 +2168,37 @@ async fn a_round2_after_a_commit_is_an_unknown_session_even_with_a_lapsed_intent
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     let err = metrics::with_local_recorder(&recorder, || {
-        nodes[0].sign_round2_with(KEY, "committed", &msg, &cs, Some(intent::intent_digest(&i1))).unwrap_err()
+        nodes[0]
+            .sign_round2_with(
+                KEY,
+                "committed",
+                &msg,
+                &cs,
+                Some(intent::intent_digest(&i1)),
+            )
+            .unwrap_err()
     });
-    assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))), "{err:?}");
+    assert!(
+        matches!(
+            err,
+            DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))
+        ),
+        "{err:?}"
+    );
     let out = handle.render();
-    assert!(out.lines().any(|l| l == "rutli_sign_round2_unknown_session_total 1"), "{out}");
-    assert!(!out.contains("rutli_sign_policy_refusals_total"), "not counted as a policy refusal:\n{out}");
-    assert!(!nodes[0].sign_guard().unwrap().holds(KEY, "committed"), "the authorization was taken");
+    assert!(
+        out.lines()
+            .any(|l| l == "rutli_sign_round2_unknown_session_total 1"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("rutli_sign_policy_refusals_total"),
+        "not counted as a policy refusal:\n{out}"
+    );
+    assert!(
+        !nodes[0].sign_guard().unwrap().holds(KEY, "committed"),
+        "the authorization was taken"
+    );
 }
 
 /// A round 2 that arrives after the session was aborted (a leader that gave up on this node and
@@ -1360,18 +2209,44 @@ async fn a_round2_after_an_abort_is_an_unknown_session() {
     let (ids, nodes) = local(tmp.path(), &strict()).await;
     let msg = digest(b"aborted");
     let i1 = intent_by(&ids, "driver", KEY, &msg, 88);
-    let ctx = Round1Ctx { message: Some(msg.clone()), signers: Some(vec![1, 2]), intent: Some(i1.clone()), ..Default::default() };
+    let ctx = Round1Ctx {
+        message: Some(msg.clone()),
+        signers: Some(vec![1, 2]),
+        intent: Some(i1.clone()),
+        ..Default::default()
+    };
     let cs = BTreeMap::from([
-        (Identifier::try_from(1u16).unwrap(), nodes[0].sign_round1(KEY, "aborted", &ctx).unwrap()),
-        (Identifier::try_from(2u16).unwrap(), nodes[1].sign_round1(KEY, "aborted", &ctx).unwrap()),
+        (
+            Identifier::try_from(1u16).unwrap(),
+            nodes[0].sign_round1(KEY, "aborted", &ctx).unwrap(),
+        ),
+        (
+            Identifier::try_from(2u16).unwrap(),
+            nodes[1].sign_round1(KEY, "aborted", &ctx).unwrap(),
+        ),
     ]);
-    nodes[0].abort_sign_as(KEY, "aborted", &rutli_cosigner::node::SessionOwner::Local).unwrap();
+    nodes[0]
+        .abort_sign_as(KEY, "aborted", &rutli_cosigner::node::SessionOwner::Local)
+        .unwrap();
     assert_eq!(nodes[0].pending_sign_count(KEY), 0);
-    assert!(!nodes[0].sign_guard().unwrap().holds(KEY, "aborted"), "the abort forgot the authorization");
+    assert!(
+        !nodes[0].sign_guard().unwrap().holds(KEY, "aborted"),
+        "the abort forgot the authorization"
+    );
 
-    let err = nodes[0].sign_round2_with(KEY, "aborted", &msg, &cs, Some(intent::intent_digest(&i1))).unwrap_err();
-    assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))), "{err:?}");
-    assert!(read_key_dir(&tmp.path().join("node-1/journal").join(KEY)).map(|r| r.entries.is_empty()).unwrap_or(true));
+    let err = nodes[0]
+        .sign_round2_with(KEY, "aborted", &msg, &cs, Some(intent::intent_digest(&i1)))
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))
+        ),
+        "{err:?}"
+    );
+    assert!(read_key_dir(&tmp.path().join("node-1/journal").join(KEY))
+        .map(|r| r.entries.is_empty())
+        .unwrap_or(true));
 }
 
 /// The opt-out: with `require_intent: false`, a driver (or leader) that predates intents
@@ -1380,32 +2255,69 @@ async fn a_round2_after_an_abort_is_an_unknown_session() {
 #[tokio::test]
 async fn verify_if_present_accepts_an_old_driver_with_a_metric_and_still_checks_a_present_intent() {
     let tmp = tempfile::tempdir().unwrap();
-    let opt_out = SigningPolicyConfig { require_intent: Some(false), ..Default::default() };
+    let opt_out = SigningPolicyConfig {
+        require_intent: Some(false),
+        ..Default::default()
+    };
     let (ids, nodes) = local(tmp.path(), &opt_out).await;
     let msg = digest(b"old driver");
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     metrics::with_local_recorder(&recorder, || {
-        let ctx = Round1Ctx { message: Some(msg.clone()), signers: Some(vec![1, 2]), ..Default::default() };
+        let ctx = Round1Ctx {
+            message: Some(msg.clone()),
+            signers: Some(vec![1, 2]),
+            ..Default::default()
+        };
         let cs = BTreeMap::from([
-            (Identifier::try_from(1u16).unwrap(), nodes[0].sign_round1(KEY, "old", &ctx).unwrap()),
-            (Identifier::try_from(2u16).unwrap(), nodes[1].sign_round1(KEY, "old", &ctx).unwrap()),
+            (
+                Identifier::try_from(1u16).unwrap(),
+                nodes[0].sign_round1(KEY, "old", &ctx).unwrap(),
+            ),
+            (
+                Identifier::try_from(2u16).unwrap(),
+                nodes[1].sign_round1(KEY, "old", &ctx).unwrap(),
+            ),
         ]);
         nodes[0].sign_round2(KEY, "old", &msg, &cs).unwrap();
     });
     // One per node that took part in round 1.
-    assert!(handle.render().contains("rutli_sign_intent_absent_total 2"), "{}", handle.render());
-    let e = &read_key_dir(&tmp.path().join("node-1/journal").join(KEY)).unwrap().entries[0];
-    assert_eq!((e.purpose.as_str(), e.request_id.as_str()), ("no-intent", ""));
+    assert!(
+        handle.render().contains("rutli_sign_intent_absent_total 2"),
+        "{}",
+        handle.render()
+    );
+    let e = &read_key_dir(&tmp.path().join("node-1/journal").join(KEY))
+        .unwrap()
+        .entries[0];
+    assert_eq!(
+        (e.purpose.as_str(), e.request_id.as_str()),
+        ("no-intent", "")
+    );
 
     // The whole sign path, no intent: works.
-    let sig = sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, None).await.unwrap();
-    assert!(rutli_cosigner::verify_key::signature_verifies(&nodes[0].group_key(KEY).unwrap(), &msg, &sig));
+    let sig = sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, None)
+        .await
+        .unwrap();
+    assert!(rutli_cosigner::verify_key::signature_verifies(
+        &nodes[0].group_key(KEY).unwrap(),
+        &msg,
+        &sig
+    ));
     // A present intent that is invalid is refused even in this mode.
     let long_ago = now_ms() - 3_600_000;
-    let expired = sign(&ids, "driver", unsigned(KEY, &msg, 90, long_ago, long_ago + 60_000));
-    let err = sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, Some(&expired)).await.unwrap_err();
-    assert!(matches!(err, DaemonError::PolicyRefused(ref m) if m.contains("expired")), "{err:?}");
+    let expired = sign(
+        &ids,
+        "driver",
+        unsigned(KEY, &msg, 90, long_ago, long_ago + 60_000),
+    );
+    let err = sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, Some(&expired))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DaemonError::PolicyRefused(ref m) if m.contains("expired")),
+        "{err:?}"
+    );
 }
 
 /// A sign-test round (no intent) is accepted only for the node's own test digest of the key: a
@@ -1415,9 +2327,17 @@ async fn a_sign_test_round_for_another_message_is_refused_at_the_peer() {
     let c = cluster(|_| strict(), None).await;
     let mut req = round1(KEY, "fake-test", Some(&digest(b"anything")), None);
     req.purpose = "sign-test".into();
-    let s = c.peer_as("cosigner3", 0).await.sign_round1(req).await.unwrap_err();
+    let s = c
+        .peer_as("cosigner3", 0)
+        .await
+        .sign_round1(req)
+        .await
+        .unwrap_err();
     // A DKG key has no split-ceremony provenance, so there is no test digest at all.
-    assert!(s.code() == tonic::Code::FailedPrecondition || s.code() == tonic::Code::PermissionDenied, "{s:?}");
+    assert!(
+        s.code() == tonic::Code::FailedPrecondition || s.code() == tonic::Code::PermissionDenied,
+        "{s:?}"
+    );
     assert_eq!(c.nodes[0].pending_sign_count(KEY), 0);
 }
 
@@ -1440,37 +2360,77 @@ async fn signer_dkg_and_refresh_need_the_callers_own_ceremony_intent() {
     };
     let c = cluster(|_| policy.clone(), Some(vec!["refresher".into()])).await;
     let group = c.group_key().to_vec();
-    let refresh = |intent| pb::RefreshRequest { key_id: KEY.into(), intent };
+    let refresh = |intent| pb::RefreshRequest {
+        key_id: KEY.into(),
+        intent,
+    };
 
-    denied(c.signer("refresher", 0).await.refresh(refresh(None)).await, "carries no ceremony intent");
+    denied(
+        c.signer("refresher", 0).await.refresh(refresh(None)).await,
+        "carries no ceremony intent",
+    );
     // A signer-role refresh intent (tenant), presented by the refresher: refused on its own merits
     // (signer_may_refresh off) before the caller check would refuse it.
     denied(
-        c.signer("refresher", 0).await.refresh(refresh(Some(ceremony_by(&c.ids, "tenant", Refresh, KEY, 1)))).await,
+        c.signer("refresher", 0)
+            .await
+            .refresh(refresh(Some(ceremony_by(
+                &c.ids, "tenant", Refresh, KEY, 1,
+            ))))
+            .await,
         "signer_may_refresh is off",
     );
     let before = c.nodes[0].key_epoch(KEY).unwrap().epoch;
     let signed = ceremony_by(&c.ids, "refresher", Refresh, KEY, 2);
-    let reply = c.signer("refresher", 1).await.refresh(refresh(Some(signed.clone()))).await.unwrap();
+    let reply = c
+        .signer("refresher", 1)
+        .await
+        .refresh(refresh(Some(signed.clone())))
+        .await
+        .unwrap();
     assert_eq!(reply.into_inner().group_verifying_key, group);
     for n in &c.nodes {
         assert_eq!(n.key_epoch(KEY).unwrap().epoch, before + 1);
-        assert!(n.ceremony_record(&intent::ceremony_id_for(Refresh, &[2; 16])).is_some());
+        assert!(n
+            .ceremony_record(&intent::ceremony_id_for(Refresh, &[2; 16]))
+            .is_some());
     }
     // The very same signed intent again (byte for byte), through another leader: one intent, one
     // ceremony.
-    let again = c.signer("refresher", 2).await.refresh(refresh(Some(signed))).await;
-    assert!(again.as_ref().is_err_and(|s| s.message().contains("already used")), "{again:?}");
+    let again = c
+        .signer("refresher", 2)
+        .await
+        .refresh(refresh(Some(signed)))
+        .await;
+    assert!(
+        again
+            .as_ref()
+            .is_err_and(|s| s.message().contains("already used")),
+        "{again:?}"
+    );
 
     // DKG: the driver's own intent runs it; tenant's intent on the driver's connection is refused.
     let key = "frost-participant1-second";
-    let dkg = |intent| pb::DkgRequest { key_id: key.into(), intent };
-    denied(c.signer("driver", 0).await.dkg(dkg(None)).await, "carries no ceremony intent");
+    let dkg = |intent| pb::DkgRequest {
+        key_id: key.into(),
+        intent,
+    };
     denied(
-        c.signer("driver", 0).await.dkg(dkg(Some(ceremony_by(&c.ids, "tenant", Dkg, key, 3)))).await,
+        c.signer("driver", 0).await.dkg(dkg(None)).await,
+        "carries no ceremony intent",
+    );
+    denied(
+        c.signer("driver", 0)
+            .await
+            .dkg(dkg(Some(ceremony_by(&c.ids, "tenant", Dkg, key, 3))))
+            .await,
         "only valid on its signer's own connection",
     );
-    c.signer("driver", 0).await.dkg(dkg(Some(ceremony_by(&c.ids, "driver", Dkg, key, 4)))).await.unwrap();
+    c.signer("driver", 0)
+        .await
+        .dkg(dkg(Some(ceremony_by(&c.ids, "driver", Dkg, key, 4))))
+        .await
+        .unwrap();
     assert!(c.nodes[2].key_epoch(key).unwrap().present);
 }
 
@@ -1481,23 +2441,54 @@ async fn signer_dkg_and_refresh_need_the_callers_own_ceremony_intent() {
 #[tokio::test]
 async fn a_refresh_inside_the_interval_is_refused_at_the_leader_over_grpc() {
     use rutli_cosigner::node::CeremonyKind::Refresh;
-    let policy = SigningPolicyConfig { require_ceremony_intent: Some(true), signer_may_refresh: false, ..Default::default() };
-    let refresh = |intent| pb::RefreshRequest { key_id: KEY.into(), intent };
+    let policy = SigningPolicyConfig {
+        require_ceremony_intent: Some(true),
+        signer_may_refresh: false,
+        ..Default::default()
+    };
+    let refresh = |intent| pb::RefreshRequest {
+        key_id: KEY.into(),
+        intent,
+    };
     #[track_caller]
     fn too_soon(r: std::result::Result<impl std::fmt::Debug, tonic::Status>) -> tonic::Status {
         let err = r.unwrap_err();
         assert_eq!(err.code(), tonic::Code::FailedPrecondition, "{err:?}");
-        assert_eq!(err.metadata().get("rutli-error").and_then(|v| v.to_str().ok()), Some("refresh-too-soon"), "{err:?}");
-        assert!(err.message().contains("refresh_min_interval_secs"), "{err:?}");
+        assert_eq!(
+            err.metadata()
+                .get("rutli-error")
+                .and_then(|v| v.to_str().ok()),
+            Some("refresh-too-soon"),
+            "{err:?}"
+        );
+        assert!(
+            err.message().contains("refresh_min_interval_secs"),
+            "{err:?}"
+        );
         err
     }
 
     let c = cluster(|_| policy.clone(), Some(vec!["refresher".into()])).await;
-    c.signer("refresher", 0).await.refresh(refresh(Some(ceremony_by(&c.ids, "refresher", Refresh, KEY, 1)))).await.unwrap();
+    c.signer("refresher", 0)
+        .await
+        .refresh(refresh(Some(ceremony_by(
+            &c.ids,
+            "refresher",
+            Refresh,
+            KEY,
+            1,
+        ))))
+        .await
+        .unwrap();
     let epoch = c.nodes[0].key_epoch(KEY).unwrap().epoch;
     for leader in 0..N as usize {
         let x = ceremony_by(&c.ids, "refresher", Refresh, KEY, 2 + leader as u8);
-        too_soon(c.signer("refresher", leader).await.refresh(refresh(Some(x))).await);
+        too_soon(
+            c.signer("refresher", leader)
+                .await
+                .refresh(refresh(Some(x)))
+                .await,
+        );
     }
     for n in &c.nodes {
         assert_eq!(n.key_epoch(KEY).unwrap().epoch, epoch);
@@ -1506,12 +2497,49 @@ async fn a_refresh_inside_the_interval_is_refused_at_the_leader_over_grpc() {
 
     // Node 1 (endpoint 0) without the interval leads: its own pre-check and fence pass, and node 2,
     // the first peer it fences, refuses over the mesh; the refusal names node 2.
-    let no_interval = SigningPolicyConfig { refresh_min_interval_secs: 0, ..policy.clone() };
-    let c = cluster(|i| if i == 1 { no_interval.clone() } else { policy.clone() }, Some(vec!["refresher".into()])).await;
-    c.signer("refresher", 1).await.refresh(refresh(Some(ceremony_by(&c.ids, "refresher", Refresh, KEY, 1)))).await.unwrap();
+    let no_interval = SigningPolicyConfig {
+        refresh_min_interval_secs: 0,
+        ..policy.clone()
+    };
+    let c = cluster(
+        |i| {
+            if i == 1 {
+                no_interval.clone()
+            } else {
+                policy.clone()
+            }
+        },
+        Some(vec!["refresher".into()]),
+    )
+    .await;
+    c.signer("refresher", 1)
+        .await
+        .refresh(refresh(Some(ceremony_by(
+            &c.ids,
+            "refresher",
+            Refresh,
+            KEY,
+            1,
+        ))))
+        .await
+        .unwrap();
     let epoch = c.nodes[0].key_epoch(KEY).unwrap().epoch;
-    let err = too_soon(c.signer("refresher", 0).await.refresh(refresh(Some(ceremony_by(&c.ids, "refresher", Refresh, KEY, 2)))).await);
-    assert!(err.message().contains("refused by node 2"), "the refusal comes from a peer's fence: {err:?}");
+    let err = too_soon(
+        c.signer("refresher", 0)
+            .await
+            .refresh(refresh(Some(ceremony_by(
+                &c.ids,
+                "refresher",
+                Refresh,
+                KEY,
+                2,
+            ))))
+            .await,
+    );
+    assert!(
+        err.message().contains("refused by node 2"),
+        "the refusal comes from a peer's fence: {err:?}"
+    );
     for n in &c.nodes {
         assert_eq!(n.key_epoch(KEY).unwrap().epoch, epoch);
         assert!(n.staged_records().is_empty());
@@ -1523,7 +2551,10 @@ async fn a_refresh_inside_the_interval_is_refused_at_the_leader_over_grpc() {
 /// protocol error.
 #[tokio::test]
 async fn a_cosigner_cannot_fence_an_honest_peer_without_a_client_intent() {
-    let policy = SigningPolicyConfig { require_ceremony_intent: Some(true), ..Default::default() };
+    let policy = SigningPolicyConfig {
+        require_ceremony_intent: Some(true),
+        ..Default::default()
+    };
     let c = cluster(|_| policy.clone(), Some(vec!["refresher".into()])).await;
     let mut attacker = c.peer_as("cosigner3", 0).await;
     let e = c.nodes[0].key_epoch(KEY).unwrap();
@@ -1537,11 +2568,27 @@ async fn a_cosigner_cannot_fence_an_honest_peer_without_a_client_intent() {
         intent,
         ..Default::default()
     };
-    denied(attacker.ceremony_fence(fence(None, "refresh-attacker")).await, "carries no ceremony intent");
-    // Its own certificate cannot sign one either.
-    let own = ceremony_by(&c.ids, "cosigner3", rutli_cosigner::node::CeremonyKind::Refresh, KEY, 5);
     denied(
-        attacker.ceremony_fence(fence(Some(own.clone()), &intent::ceremony_id_for(rutli_cosigner::node::CeremonyKind::Refresh, &[5; 16]))).await,
+        attacker
+            .ceremony_fence(fence(None, "refresh-attacker"))
+            .await,
+        "carries no ceremony intent",
+    );
+    // Its own certificate cannot sign one either.
+    let own = ceremony_by(
+        &c.ids,
+        "cosigner3",
+        rutli_cosigner::node::CeremonyKind::Refresh,
+        KEY,
+        5,
+    );
+    denied(
+        attacker
+            .ceremony_fence(fence(
+                Some(own.clone()),
+                &intent::ceremony_id_for(rutli_cosigner::node::CeremonyKind::Refresh, &[5; 16]),
+            ))
+            .await,
         "signed by \"cosigner3\"",
     );
     denied(
@@ -1571,8 +2618,21 @@ async fn a_cosigner_cannot_fence_an_honest_peer_without_a_client_intent() {
     // own certificate is on no signer role.
     assert_eq!(hosted.code(), tonic::Code::PermissionDenied, "{hosted:?}");
     // Nothing was fenced: the refresher's real refresh runs at once.
-    let ok = ceremony_by(&c.ids, "refresher", rutli_cosigner::node::CeremonyKind::Refresh, KEY, 6);
-    c.signer("refresher", 0).await.refresh(pb::RefreshRequest { key_id: KEY.into(), intent: Some(ok) }).await.unwrap();
+    let ok = ceremony_by(
+        &c.ids,
+        "refresher",
+        rutli_cosigner::node::CeremonyKind::Refresh,
+        KEY,
+        6,
+    );
+    c.signer("refresher", 0)
+        .await
+        .refresh(pb::RefreshRequest {
+            key_id: KEY.into(),
+            intent: Some(ok),
+        })
+        .await
+        .unwrap();
 }
 
 /// Over the mesh the leader is the fencing caller's certificate CN: a fenced peer that presents the
@@ -1580,7 +2640,10 @@ async fn a_cosigner_cannot_fence_an_honest_peer_without_a_client_intent() {
 #[tokio::test]
 async fn only_the_fencing_cosigner_runs_parts_over_grpc() {
     use rutli_cosigner::node::CeremonyKind::Refresh;
-    let policy = SigningPolicyConfig { require_ceremony_intent: Some(true), ..Default::default() };
+    let policy = SigningPolicyConfig {
+        require_ceremony_intent: Some(true),
+        ..Default::default()
+    };
     let c = cluster(|_| policy.clone(), Some(vec!["refresher".into()])).await;
     let e = c.nodes[1].key_epoch(KEY).unwrap();
     let x = ceremony_by(&c.ids, "refresher", Refresh, KEY, 7);
@@ -1608,27 +2671,55 @@ async fn only_the_fencing_cosigner_runs_parts_over_grpc() {
         protocol,
         intent: Some(x.clone()),
     };
-    let stolen = c.peer_as("cosigner3", 1).await.ceremony_part1(part1()).await.unwrap_err();
+    let stolen = c
+        .peer_as("cosigner3", 1)
+        .await
+        .ceremony_part1(part1())
+        .await
+        .unwrap_err();
     assert_eq!(stolen.code(), tonic::Code::FailedPrecondition, "{stolen:?}");
-    assert!(stolen.message().contains("led by peer \"cosigner1\""), "{stolen:?}");
+    assert!(
+        stolen.message().contains("led by peer \"cosigner1\""),
+        "{stolen:?}"
+    );
     let part3 = c
         .peer_as("cosigner3", 1)
         .await
-        .ceremony_part3(pb::CeremonyPart3Request { ceremony_id: xid.clone(), round1_digest: vec![0; 32] })
+        .ceremony_part3(pb::CeremonyPart3Request {
+            ceremony_id: xid.clone(),
+            round1_digest: vec![0; 32],
+        })
         .await
         .unwrap_err();
-    assert_eq!(part3.code(), tonic::Code::NotFound, "no session yet: {part3:?}");
+    assert_eq!(
+        part3.code(),
+        tonic::Code::NotFound,
+        "no session yet: {part3:?}"
+    );
     // The fencing cosigner's part 1 runs.
-    c.peer_as("cosigner1", 1).await.ceremony_part1(part1()).await.unwrap();
+    c.peer_as("cosigner1", 1)
+        .await
+        .ceremony_part1(part1())
+        .await
+        .unwrap();
     let part3 = c
         .peer_as("cosigner3", 1)
         .await
-        .ceremony_part3(pb::CeremonyPart3Request { ceremony_id: xid.clone(), round1_digest: vec![0; 32] })
+        .ceremony_part3(pb::CeremonyPart3Request {
+            ceremony_id: xid.clone(),
+            round1_digest: vec![0; 32],
+        })
         .await
         .unwrap_err();
-    assert!(part3.message().contains("led by peer \"cosigner1\""), "{part3:?}");
+    assert!(
+        part3.message().contains("led by peer \"cosigner1\""),
+        "{part3:?}"
+    );
     // The refusal left the session alone: the leader can still abort it as its own.
-    assert!(c.nodes[1].ceremony_record(&xid).is_none(), "nothing recorded by the refused part 3");
+    assert!(
+        c.nodes[1].ceremony_record(&xid).is_none(),
+        "nothing recorded by the refused part 3"
+    );
 }
 
 // ── the operator role ─────────────────────────────────────────────────────────────────────────
@@ -1640,7 +2731,8 @@ async fn only_the_fencing_cosigner_runs_parts_over_grpc() {
 /// `rpc` of `service Signer` in the proto must be classified here, so a new RPC cannot slip past
 /// this test unclassified.
 #[tokio::test]
-async fn the_operator_certificate_reaches_only_the_operator_rpcs_and_every_signer_rpc_is_classified() {
+async fn the_operator_certificate_reaches_only_the_operator_rpcs_and_every_signer_rpc_is_classified(
+) {
     use rutli_cosigner::node::CeremonyKind;
     const OPEN: [&str; 2] = ["Health", "Capabilities"];
     const OPERATOR: [&str; 3] = ["KeyStatus", "HostedKeyStatus", "CeremonySignTest"];
@@ -1649,47 +2741,139 @@ async fn the_operator_certificate_reaches_only_the_operator_rpcs_and_every_signe
     let mut op = c.signer("operator", 0).await;
     let key = || KEY.to_string();
     let msg = digest(b"the operator tries to sign");
-    let sign = pb::SignRequest { key_id: key(), message: msg.clone(), intent: Some(intent_by(&c.ids, "driver", KEY, &msg, 40)) };
+    let sign = pb::SignRequest {
+        key_id: key(),
+        message: msg.clone(),
+        intent: Some(intent_by(&c.ids, "driver", KEY, &msg, 40)),
+    };
     let dkg_id = "frost-participant1-new";
-    let dkg = pb::DkgRequest { key_id: dkg_id.into(), intent: Some(ceremony_by(&c.ids, "driver", CeremonyKind::Dkg, dkg_id, 0x41)) };
-    let refresh = pb::RefreshRequest { key_id: key(), intent: Some(ceremony_by(&c.ids, "driver", CeremonyKind::Refresh, KEY, 0x42)) };
+    let dkg = pb::DkgRequest {
+        key_id: dkg_id.into(),
+        intent: Some(ceremony_by(
+            &c.ids,
+            "driver",
+            CeremonyKind::Dkg,
+            dkg_id,
+            0x41,
+        )),
+    };
+    let refresh = pb::RefreshRequest {
+        key_id: key(),
+        intent: Some(ceremony_by(
+            &c.ids,
+            "driver",
+            CeremonyKind::Refresh,
+            KEY,
+            0x42,
+        )),
+    };
     let hosted = || "rutli-enc-1".to_string();
     let calls: Vec<(&str, std::result::Result<(), tonic::Status>)> = vec![
         ("Health", op.health(pb::HealthRequest {}).await.map(drop)),
-        ("Capabilities", op.capabilities(pb::CapabilitiesRequest {}).await.map(drop)),
-        ("KeyStatus", op.key_status(pb::KeyStatusRequest { key_id: key() }).await.map(drop)),
-        ("HostedKeyStatus", op.hosted_key_status(pb::HostedKeyStatusRequest { key_id: hosted() }).await.map(drop)),
+        (
+            "Capabilities",
+            op.capabilities(pb::CapabilitiesRequest {}).await.map(drop),
+        ),
+        (
+            "KeyStatus",
+            op.key_status(pb::KeyStatusRequest { key_id: key() })
+                .await
+                .map(drop),
+        ),
+        (
+            "HostedKeyStatus",
+            op.hosted_key_status(pb::HostedKeyStatusRequest { key_id: hosted() })
+                .await
+                .map(drop),
+        ),
         (
             "CeremonySignTest",
-            op.ceremony_sign_test(pb::CeremonySignTestRequest { key_id: key(), signers: vec![1, 2] }).await.map(drop),
+            op.ceremony_sign_test(pb::CeremonySignTestRequest {
+                key_id: key(),
+                signers: vec![1, 2],
+            })
+            .await
+            .map(drop),
         ),
-        ("GroupKey", op.group_key(pb::GroupKeyRequest { key_id: key() }).await.map(drop)),
+        (
+            "GroupKey",
+            op.group_key(pb::GroupKeyRequest { key_id: key() })
+                .await
+                .map(drop),
+        ),
         ("Dkg", op.dkg(dkg).await.map(drop)),
         ("Sign", op.sign(sign).await.map(drop)),
         ("Refresh", op.refresh(refresh).await.map(drop)),
         (
             "GenerateKey",
-            op.generate_key(pb::GenerateKeyRequest { key_id: hosted(), spec: "ec-p256-ecies".into(), ..Default::default() }).await.map(drop),
+            op.generate_key(pb::GenerateKeyRequest {
+                key_id: hosted(),
+                spec: "ec-p256-ecies".into(),
+                ..Default::default()
+            })
+            .await
+            .map(drop),
         ),
-        ("PublicKey", op.public_key(pb::PublicKeyRequest { key_id: hosted() }).await.map(drop)),
-        ("KeyInfo", op.key_info(pb::KeyInfoRequest { key_id: hosted(), ..Default::default() }).await.map(drop)),
+        (
+            "PublicKey",
+            op.public_key(pb::PublicKeyRequest { key_id: hosted() })
+                .await
+                .map(drop),
+        ),
+        (
+            "KeyInfo",
+            op.key_info(pb::KeyInfoRequest {
+                key_id: hosted(),
+                ..Default::default()
+            })
+            .await
+            .map(drop),
+        ),
         // Refused for every client here (no delete_allowlist on this cluster) — the operator too.
-        ("DeleteKey", op.delete_key(pb::DeleteKeyRequest { key_id: hosted(), intent: None }).await.map(drop)),
+        (
+            "DeleteKey",
+            op.delete_key(pb::DeleteKeyRequest {
+                key_id: hosted(),
+                intent: None,
+            })
+            .await
+            .map(drop),
+        ),
         (
             "Decrypt",
-            op.decrypt(pb::DecryptRequest { key_id: hosted(), ciphertext: vec![0; 256] }).await.map(drop),
+            op.decrypt(pb::DecryptRequest {
+                key_id: hosted(),
+                ciphertext: vec![0; 256],
+            })
+            .await
+            .map(drop),
         ),
         (
             "EcdhDerive",
-            op.ecdh_derive(pb::EcdhDeriveRequest { key_id: hosted(), peer_point: vec![4; 65] }).await.map(drop),
+            op.ecdh_derive(pb::EcdhDeriveRequest {
+                key_id: hosted(),
+                peer_point: vec![4; 65],
+            })
+            .await
+            .map(drop),
         ),
         (
             "SymmetricEncrypt",
-            op.symmetric_encrypt(pb::SymmetricRequest { key_id: hosted(), data: vec![1] }).await.map(drop),
+            op.symmetric_encrypt(pb::SymmetricRequest {
+                key_id: hosted(),
+                data: vec![1],
+            })
+            .await
+            .map(drop),
         ),
         (
             "SymmetricDecrypt",
-            op.symmetric_decrypt(pb::SymmetricRequest { key_id: hosted(), data: vec![1] }).await.map(drop),
+            op.symmetric_decrypt(pb::SymmetricRequest {
+                key_id: hosted(),
+                data: vec![1],
+            })
+            .await
+            .map(drop),
         ),
     ];
 
@@ -1700,8 +2884,15 @@ async fn the_operator_certificate_reaches_only_the_operator_rpcs_and_every_signe
         let path = entry.unwrap().path();
         if path.extension().is_some_and(|e| e == "proto") {
             let text = std::fs::read_to_string(&path).unwrap();
-            let mut lines = text.lines().map(str::trim).skip_while(|l| !l.starts_with("service Signer {"));
-            assert!(lines.next().is_none_or(|l| l == "service Signer {"), "{}", path.display());
+            let mut lines = text
+                .lines()
+                .map(str::trim)
+                .skip_while(|l| !l.starts_with("service Signer {"));
+            assert!(
+                lines.next().is_none_or(|l| l == "service Signer {"),
+                "{}",
+                path.display()
+            );
             for line in lines.take_while(|l| *l != "}") {
                 if let Some(rest) = line.strip_prefix("rpc ") {
                     in_proto.push(rest.split('(').next().unwrap().trim().to_string());
@@ -1713,15 +2904,25 @@ async fn the_operator_certificate_reaches_only_the_operator_rpcs_and_every_signe
     let (mut proto_sorted, mut called_sorted) = (in_proto.clone(), called.clone());
     proto_sorted.sort();
     called_sorted.sort();
-    assert_eq!(proto_sorted, called_sorted, "every Signer rpc must be classified by this test");
-    assert_eq!(in_proto.len(), 17, "service Signer changed: classify the new rpc here deliberately");
+    assert_eq!(
+        proto_sorted, called_sorted,
+        "every Signer rpc must be classified by this test"
+    );
+    assert_eq!(
+        in_proto.len(),
+        17,
+        "service Signer changed: classify the new rpc here deliberately"
+    );
 
     for (name, result) in &calls {
         if OPEN.contains(name) {
             assert!(result.is_ok(), "{name} is open to everyone: {result:?}");
         } else if OPERATOR.contains(name) {
             assert!(
-                result.as_ref().err().is_none_or(|s| s.code() != tonic::Code::PermissionDenied),
+                result
+                    .as_ref()
+                    .err()
+                    .is_none_or(|s| s.code() != tonic::Code::PermissionDenied),
                 "{name} must be open to the operator: {result:?}"
             );
         } else {
@@ -1732,13 +2933,43 @@ async fn the_operator_certificate_reaches_only_the_operator_rpcs_and_every_signe
     // The operator RPCs got past authorization and did their own work: the key's status; the
     // hosted-key status of a node without hosted keys; the sign test's refusal of a DKG key (no
     // split-ceremony provenance), from the leader, before any peer is asked.
-    let status = c.signer("operator", 1).await.key_status(pb::KeyStatusRequest { key_id: key() }).await.unwrap();
-    assert_eq!(status.into_inner().group_verifying_key, c.group_key().to_vec());
-    let code_of = |name: &str| calls.iter().find(|(n, _)| *n == name).unwrap().1.as_ref().err().map(|s| s.code());
+    let status = c
+        .signer("operator", 1)
+        .await
+        .key_status(pb::KeyStatusRequest { key_id: key() })
+        .await
+        .unwrap();
+    assert_eq!(
+        status.into_inner().group_verifying_key,
+        c.group_key().to_vec()
+    );
+    let code_of = |name: &str| {
+        calls
+            .iter()
+            .find(|(n, _)| *n == name)
+            .unwrap()
+            .1
+            .as_ref()
+            .err()
+            .map(|s| s.code())
+    };
     assert_eq!(code_of("KeyStatus"), None);
-    assert_eq!(code_of("HostedKeyStatus"), Some(tonic::Code::FailedPrecondition));
-    let sign_test = calls.iter().find(|(n, _)| *n == "CeremonySignTest").unwrap().1.as_ref().unwrap_err();
-    assert!(sign_test.code() == tonic::Code::FailedPrecondition && sign_test.message().contains("split-ceremony"), "{sign_test:?}");
+    assert_eq!(
+        code_of("HostedKeyStatus"),
+        Some(tonic::Code::FailedPrecondition)
+    );
+    let sign_test = calls
+        .iter()
+        .find(|(n, _)| *n == "CeremonySignTest")
+        .unwrap()
+        .1
+        .as_ref()
+        .unwrap_err();
+    assert!(
+        sign_test.code() == tonic::Code::FailedPrecondition
+            && sign_test.message().contains("split-ceremony"),
+        "{sign_test:?}"
+    );
     // Nothing the operator asked for happened: no new key, no signature journaled, same epoch.
     assert!(!c.nodes[0].has_key(dkg_id));
     assert!((0..3).all(|i| c.journal(i).is_empty()));
@@ -1755,13 +2986,28 @@ async fn by_default_a_sign_round_without_an_intent_is_refused() {
     let (ids, nodes) = local(tmp.path(), &SigningPolicyConfig::default()).await;
     assert!(nodes[1].sign_guard().unwrap().require_intent());
     let msg = digest(b"no intent, default policy");
-    let ctx = Round1Ctx { message: Some(msg.clone()), signers: Some(vec![1, 2]), ..Default::default() };
+    let ctx = Round1Ctx {
+        message: Some(msg.clone()),
+        signers: Some(vec![1, 2]),
+        ..Default::default()
+    };
     let err = nodes[1].sign_round1(KEY, "no-intent", &ctx).unwrap_err();
-    assert!(matches!(err, DaemonError::PolicyRefused(ref m) if m.contains("no signing intent")), "{err:?}");
+    assert!(
+        matches!(err, DaemonError::PolicyRefused(ref m) if m.contains("no signing intent")),
+        "{err:?}"
+    );
     assert_eq!(nodes[1].pending_sign_count(KEY), 0);
-    let err = sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, None).await.unwrap_err();
+    let err = sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, None)
+        .await
+        .unwrap_err();
     assert!(matches!(err, DaemonError::PolicyRefused(_)), "{err:?}");
     let i1 = intent_by(&ids, "driver", KEY, &msg, 86);
-    let sig = sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, Some(&i1)).await.unwrap();
-    assert!(rutli_cosigner::verify_key::signature_verifies(&nodes[0].group_key(KEY).unwrap(), &msg, &sig));
+    let sig = sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, Some(&i1))
+        .await
+        .unwrap();
+    assert!(rutli_cosigner::verify_key::signature_verifies(
+        &nodes[0].group_key(KEY).unwrap(),
+        &msg,
+        &sig
+    ));
 }

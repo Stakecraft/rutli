@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # shellcheck shell=bash
 # Helpers shared by the scripts/quality/<area>.sh collectors. Sourced, not run.

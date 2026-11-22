@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 #
 # The three end-to-end ceremony scripts, each against a local 2-of-3 cosigner cluster on 127.0.0.1:

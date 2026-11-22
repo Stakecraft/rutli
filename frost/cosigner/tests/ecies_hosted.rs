@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! EC P-256 (ECIES) hosted keys — milestone C1 (docs/roadmap-migration.md, Track C):
@@ -55,8 +55,10 @@ fn hosted_cluster(tmp: &tempfile::TempDir) -> (Vec<Arc<Node>>, Peers) {
             .unwrap();
         nodes.push(Arc::new(node));
     }
-    let peers: Peers =
-        nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    let peers: Peers = nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect();
     rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     (nodes, peers)
 }
@@ -66,7 +68,9 @@ fn hosted_cluster(tmp: &tempfile::TempDir) -> (Vec<Arc<Node>>, Peers) {
 fn view_of(nodes: &[Arc<Node>], me: usize) -> Peers {
     nodes
         .iter()
-        .map(|n| Arc::new(LocalPeer::new(n.clone()).on_behalf_of(nodes[me].clone())) as Arc<dyn PeerApi>)
+        .map(|n| {
+            Arc::new(LocalPeer::new(n.clone()).on_behalf_of(nodes[me].clone())) as Arc<dyn PeerApi>
+        })
         .collect()
 }
 
@@ -104,10 +108,15 @@ async fn an_ec_key_replicates_and_every_replica_derives_the_same_secret() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = hosted_cluster(&tmp);
 
-    let (key, created, replicas) =
-        generate_hosted_key(&nodes[0], &peers, "rutli-enc-ec-1", HostedSpec::EcP256, DEFAULT_WRITE_QUORUM)
-            .await
-            .unwrap();
+    let (key, created, replicas) = generate_hosted_key(
+        &nodes[0],
+        &peers,
+        "rutli-enc-ec-1",
+        HostedSpec::EcP256,
+        DEFAULT_WRITE_QUORUM,
+    )
+    .await
+    .unwrap();
     assert!(created);
     assert_eq!(replicas, N as usize);
 
@@ -116,8 +125,15 @@ async fn an_ec_key_replicates_and_every_replica_derives_the_same_secret() {
     for n in &nodes {
         let replica = n.hosted_load("rutli-enc-ec-1").unwrap();
         assert_eq!(replica.spec, HostedSpec::EcP256);
-        assert_eq!(replica.public_key_der().unwrap(), spki, "every node serves one public key");
-        assert_eq!(n.hosted_ecdh("rutli-enc-ec-1", &v()).unwrap().as_ref(), z.as_ref());
+        assert_eq!(
+            replica.public_key_der().unwrap(),
+            spki,
+            "every node serves one public key"
+        );
+        assert_eq!(
+            n.hosted_ecdh("rutli-enc-ec-1", &v()).unwrap().as_ref(),
+            z.as_ref()
+        );
     }
 
     // Sealed at rest like every hosted key.
@@ -126,15 +142,22 @@ async fn an_ec_key_replicates_and_every_replica_derives_the_same_secret() {
     assert!(!String::from_utf8_lossy(&raw).contains("private_der"));
 
     // Idempotent: a retry returns the same key, and a retry under another spec is refused.
-    let (again, created, _) =
-        generate_hosted_key(&nodes[1], &peers, "rutli-enc-ec-1", HostedSpec::EcP256, DEFAULT_WRITE_QUORUM)
-            .await
-            .unwrap();
+    let (again, created, _) = generate_hosted_key(
+        &nodes[1],
+        &peers,
+        "rutli-enc-ec-1",
+        HostedSpec::EcP256,
+        DEFAULT_WRITE_QUORUM,
+    )
+    .await
+    .unwrap();
     assert!(!created);
     assert_eq!(again.public_key_der().unwrap(), spki);
-    assert!(generate_hosted_key(&nodes[1], &peers, "rutli-enc-ec-1", HostedSpec::Rsa2048, 2)
-        .await
-        .is_err());
+    assert!(
+        generate_hosted_key(&nodes[1], &peers, "rutli-enc-ec-1", HostedSpec::Rsa2048, 2)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -144,20 +167,41 @@ async fn anti_entropy_and_read_repair_carry_ec_keys() {
 
     // Nodes 2 and 3 have it (node 1 was down for the write): node 1's sweep pulls it, since two
     // peers agree.
-    let (key, _) = nodes[2].hosted_generate("rutli-enc-ec-2", HostedSpec::EcP256).unwrap();
+    let (key, _) = nodes[2]
+        .hosted_generate("rutli-enc-ec-2", HostedSpec::EcP256)
+        .unwrap();
     nodes[1].hosted_store("rutli-enc-ec-2", &key).unwrap();
-    assert_eq!(anti_entropy_sweep(&nodes[0], &view_of(&nodes, 0)).await.unwrap(), 1);
+    assert_eq!(
+        anti_entropy_sweep(&nodes[0], &view_of(&nodes, 0))
+            .await
+            .unwrap(),
+        1
+    );
     // Read-repair likewise, for a second key.
-    let (other, _) = nodes[2].hosted_generate("rutli-enc-ec-3", HostedSpec::EcP256).unwrap();
+    let (other, _) = nodes[2]
+        .hosted_generate("rutli-enc-ec-3", HostedSpec::EcP256)
+        .unwrap();
     nodes[0].hosted_store("rutli-enc-ec-3", &other).unwrap();
-    assert!(repair_hosted_key(&nodes[1], &view_of(&nodes, 1), "rutli-enc-ec-3").await.unwrap());
+    assert!(
+        repair_hosted_key(&nodes[1], &view_of(&nodes, 1), "rutli-enc-ec-3")
+            .await
+            .unwrap()
+    );
     let z = key.ecdh_p256(&v()).unwrap();
     for n in &nodes {
-        assert_eq!(n.hosted_ecdh("rutli-enc-ec-2", &v()).unwrap().as_ref(), z.as_ref());
-        assert_eq!(n.hosted_ecdh("rutli-enc-ec-3", &v()).unwrap().as_ref(), other.ecdh_p256(&v()).unwrap().as_ref());
+        assert_eq!(
+            n.hosted_ecdh("rutli-enc-ec-2", &v()).unwrap().as_ref(),
+            z.as_ref()
+        );
+        assert_eq!(
+            n.hosted_ecdh("rutli-enc-ec-3", &v()).unwrap().as_ref(),
+            other.ecdh_p256(&v()).unwrap().as_ref()
+        );
     }
     // A key only one node holds is not pulled: one peer's word is not enough.
-    nodes[2].hosted_generate("rutli-enc-ec-4", HostedSpec::EcP256).unwrap();
+    nodes[2]
+        .hosted_generate("rutli-enc-ec-4", HostedSpec::EcP256)
+        .unwrap();
     assert!(matches!(
         repair_hosted_key(&nodes[0], &view_of(&nodes, 0), "rutli-enc-ec-4").await,
         Err(rutli_cosigner::DaemonError::HostedUnconfirmed { .. })
@@ -172,10 +216,17 @@ async fn a_replica_whose_public_key_is_not_its_own_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, _) = hosted_cluster(&tmp);
     let mut forged = HostedKey::generate(HostedSpec::EcP256, 1).unwrap();
-    forged.public_der = HostedKey::generate(HostedSpec::EcP256, 1).unwrap().public_der.clone();
+    forged.public_der = HostedKey::generate(HostedSpec::EcP256, 1)
+        .unwrap()
+        .public_der
+        .clone();
     let to = nodes[1].dist_public_key().unwrap();
-    let wrapped = nodes[0].hosted_wrap_for("rutli-enc-forged", &forged, 2, &to).unwrap();
-    assert!(nodes[1].hosted_unwrap("rutli-enc-forged", HostedSpec::EcP256, &wrapped).is_err());
+    let wrapped = nodes[0]
+        .hosted_wrap_for("rutli-enc-forged", &forged, 2, &to)
+        .unwrap();
+    assert!(nodes[1]
+        .hosted_unwrap("rutli-enc-forged", HostedSpec::EcP256, &wrapped)
+        .is_err());
 }
 
 // ── mixed-version clusters (review M1) ─────────────────────────────────────────────────────────
@@ -200,20 +251,39 @@ async fn an_ec_key_is_not_created_while_a_peer_does_not_report_the_spec() {
         Arc::new(LocalPeer::new(old)),
     ];
 
-    let err = generate_hosted_key(&nodes[0], &peers, "rutli-enc-ec-mixed", HostedSpec::EcP256, 2)
-        .await
-        .unwrap_err();
+    let err = generate_hosted_key(
+        &nodes[0],
+        &peers,
+        "rutli-enc-ec-mixed",
+        HostedSpec::EcP256,
+        2,
+    )
+    .await
+    .unwrap_err();
     let status = tonic::Status::from(err);
     assert_eq!(status.code(), Code::FailedPrecondition, "{status:?}");
-    assert!(status.message().contains("cosigner 3 does not support it"), "{status:?}");
-    assert!(status.message().contains("upgrade") || status.message().contains("release"), "{status:?}");
+    assert!(
+        status.message().contains("cosigner 3 does not support it"),
+        "{status:?}"
+    );
+    assert!(
+        status.message().contains("upgrade") || status.message().contains("release"),
+        "{status:?}"
+    );
     // Nothing was written anywhere, and no fence is left behind.
     assert!(!nodes[0].hosted_exists("rutli-enc-ec-mixed"));
     assert!(!nodes[1].hosted_exists("rutli-enc-ec-mixed"));
 
     // v1 specs are unaffected: an RSA key still commits at the write quorum.
-    let (_, created, replicas) =
-        generate_hosted_key(&nodes[0], &peers, "rutli-enc-rsa-mixed", HostedSpec::Rsa2048, 2).await.unwrap();
+    let (_, created, replicas) = generate_hosted_key(
+        &nodes[0],
+        &peers,
+        "rutli-enc-rsa-mixed",
+        HostedSpec::Rsa2048,
+        2,
+    )
+    .await
+    .unwrap();
     assert!(created);
     assert_eq!(replicas, 2);
 }
@@ -234,14 +304,31 @@ async fn an_ec_key_is_not_created_while_a_peer_cannot_be_asked() {
         Arc::new(LocalPeer::new(nodes[1].clone())),
         Arc::new(down),
     ];
-    let err = generate_hosted_key(&nodes[0], &peers, "rutli-enc-ec-down", HostedSpec::EcP256, 2)
-        .await
-        .unwrap_err();
+    let err = generate_hosted_key(
+        &nodes[0],
+        &peers,
+        "rutli-enc-ec-down",
+        HostedSpec::EcP256,
+        2,
+    )
+    .await
+    .unwrap_err();
     let status = tonic::Status::from(err);
     assert_eq!(status.code(), Code::FailedPrecondition, "{status:?}");
-    assert!(status.message().contains("cosigner 3 could not be asked"), "{status:?}");
+    assert!(
+        status.message().contains("cosigner 3 could not be asked"),
+        "{status:?}"
+    );
     // An RSA write still goes through with the node down (2-of-3 write quorum).
-    generate_hosted_key(&nodes[0], &peers, "rutli-enc-rsa-down", HostedSpec::Rsa2048, 2).await.unwrap();
+    generate_hosted_key(
+        &nodes[0],
+        &peers,
+        "rutli-enc-rsa-down",
+        HostedSpec::Rsa2048,
+        2,
+    )
+    .await
+    .unwrap();
 }
 
 #[test]
@@ -265,17 +352,35 @@ async fn ecdh_derive_answers_the_known_vector_and_any_node_serves_it() {
     let svc = signer(&nodes[1], &view_of(&nodes, 1), 0);
     let e = ecdh(&svc, "rutli-enc-kat", &v()).await.unwrap_err();
     assert_eq!(e.code(), Code::Unavailable, "{e:?}");
-    assert_eq!(e.metadata().get("rutli-error").and_then(|v| v.to_str().ok()), Some("hosted-unconfirmed"));
+    assert_eq!(
+        e.metadata()
+            .get("rutli-error")
+            .and_then(|v| v.to_str().ok()),
+        Some("hosted-unconfirmed")
+    );
     assert!(!nodes[1].hosted_exists("rutli-enc-kat"));
 
     // Two peers hold it: the RPC read-repairs before answering.
     nodes[2].hosted_store("rutli-enc-kat", &kat).unwrap();
-    assert_eq!(hex::encode(ecdh(&svc, "rutli-enc-kat", &v()).await.unwrap()), KAT_Z);
-    assert!(nodes[1].hosted_exists("rutli-enc-kat"), "read-repair stored the key");
+    assert_eq!(
+        hex::encode(ecdh(&svc, "rutli-enc-kat", &v()).await.unwrap()),
+        KAT_Z
+    );
+    assert!(
+        nodes[1].hosted_exists("rutli-enc-kat"),
+        "read-repair stored the key"
+    );
 
     // Capabilities advertises the spec, so the driver can offer EcP256 to Canton.
-    let caps = svc.capabilities(Request::new(pb::CapabilitiesRequest {})).await.unwrap().into_inner();
-    assert!(caps.hosted_key_specs.contains(&"ec-p256-ecies".to_string()), "{caps:?}");
+    let caps = svc
+        .capabilities(Request::new(pb::CapabilitiesRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        caps.hosted_key_specs.contains(&"ec-p256-ecies".to_string()),
+        "{caps:?}"
+    );
 
     // An unknown key is NOT_FOUND (authoritative after read-repair), never a guess.
     let err = ecdh(&svc, "rutli-enc-nobody", &v()).await.unwrap_err();
@@ -287,9 +392,15 @@ async fn ecdh_derive_refuses_bad_points_reserved_ids_and_non_ec_keys() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = hosted_cluster(&tmp);
     let svc = signer(&nodes[0], &peers, 0);
-    generate_hosted_key(&nodes[0], &peers, "rutli-enc-ec", HostedSpec::EcP256, 2).await.unwrap();
-    generate_hosted_key(&nodes[0], &peers, "rutli-enc-rsa", HostedSpec::Rsa2048, 2).await.unwrap();
-    generate_hosted_key(&nodes[0], &peers, "rutli-sym-aes", HostedSpec::Aes256Gcm, 2).await.unwrap();
+    generate_hosted_key(&nodes[0], &peers, "rutli-enc-ec", HostedSpec::EcP256, 2)
+        .await
+        .unwrap();
+    generate_hosted_key(&nodes[0], &peers, "rutli-enc-rsa", HostedSpec::Rsa2048, 2)
+        .await
+        .unwrap();
+    generate_hosted_key(&nodes[0], &peers, "rutli-sym-aes", HostedSpec::Aes256Gcm, 2)
+        .await
+        .unwrap();
 
     let mut compressed = vec![0x03];
     compressed.extend_from_slice(&v()[1..33]);
@@ -323,14 +434,25 @@ async fn ecdh_derive_refuses_bad_points_reserved_ids_and_non_ec_keys() {
 async fn ecdh_derive_spends_the_decryption_budget_but_malformed_requests_do_not() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = hosted_cluster(&tmp);
-    generate_hosted_key(&nodes[0], &peers, "rutli-enc-ec", HostedSpec::EcP256, 2).await.unwrap();
+    generate_hosted_key(&nodes[0], &peers, "rutli-enc-ec", HostedSpec::EcP256, 2)
+        .await
+        .unwrap();
     // A budget of two per minute (the bucket starts full).
     let svc = signer(&nodes[0], &peers, 2);
 
     // Refused from the request alone: no budget spent.
     for _ in 0..5 {
-        assert_eq!(ecdh(&svc, "rutli-enc-ec", &[0x04; 64]).await.unwrap_err().code(), Code::InvalidArgument);
-        assert_eq!(ecdh(&svc, "frost-import-x", &v()).await.unwrap_err().code(), Code::AlreadyExists);
+        assert_eq!(
+            ecdh(&svc, "rutli-enc-ec", &[0x04; 64])
+                .await
+                .unwrap_err()
+                .code(),
+            Code::InvalidArgument
+        );
+        assert_eq!(
+            ecdh(&svc, "frost-import-x", &v()).await.unwrap_err().code(),
+            Code::AlreadyExists
+        );
     }
     ecdh(&svc, "rutli-enc-ec", &v()).await.unwrap();
     ecdh(&svc, "rutli-enc-ec", &v()).await.unwrap();
@@ -339,7 +461,10 @@ async fn ecdh_derive_spends_the_decryption_budget_but_malformed_requests_do_not(
 
     // The budget is the same one Decrypt draws on: per key, shared across both RPCs.
     let err = svc
-        .decrypt(Request::new(pb::DecryptRequest { key_id: "rutli-enc-ec".into(), ciphertext: vec![0; 256] }))
+        .decrypt(Request::new(pb::DecryptRequest {
+            key_id: "rutli-enc-ec".into(),
+            ciphertext: vec![0; 256],
+        }))
         .await
         .unwrap_err();
     assert_eq!(err.code(), Code::ResourceExhausted, "{err:?}");
@@ -353,7 +478,8 @@ const PASS: &str = "a sufficiently long export passphrase";
 fn an_ec_key_survives_a_portable_export_into_another_cluster() {
     let key = HostedKey::generate(HostedSpec::EcP256, 42).unwrap();
     let z = key.ecdh_p256(&v()).unwrap();
-    let env = rutli_cosigner::export::export_encrypted("rutli-enc-ec-portable", &key, PASS).unwrap();
+    let env =
+        rutli_cosigner::export::export_encrypted("rutli-enc-ec-portable", &key, PASS).unwrap();
     let back = rutli_cosigner::export::import(&env, Some(PASS)).unwrap();
     assert_eq!(back.spec, HostedSpec::EcP256);
     assert_eq!(back.ecdh_p256(&v()).unwrap().as_ref(), z.as_ref());
@@ -361,7 +487,10 @@ fn an_ec_key_survives_a_portable_export_into_another_cluster() {
 
     // An artifact whose EC public key was swapped is refused on import.
     let mut forged = key.clone();
-    forged.public_der = HostedKey::generate(HostedSpec::EcP256, 1).unwrap().public_der.clone();
+    forged.public_der = HostedKey::generate(HostedSpec::EcP256, 1)
+        .unwrap()
+        .public_der
+        .clone();
     let env = rutli_cosigner::export::export_plaintext("rutli-enc-ec-forged", &forged).unwrap();
     assert!(rutli_cosigner::export::import(&env, None).is_err());
 }
@@ -375,7 +504,12 @@ fn manifest() -> serde_json::Value {
 }
 
 fn fingerprint_of(name: &str) -> String {
-    manifest()["keys"].as_array().unwrap().iter().find(|k| k["name"] == name).unwrap()["fingerprint"]
+    manifest()["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["name"] == name)
+        .unwrap()["fingerprint"]
         .as_str()
         .unwrap()
         .to_string()
@@ -398,13 +532,22 @@ fn a_canton_ecies_key_imports_with_the_exact_public_key_canton_recorded() {
     assert_eq!(canton_pub.fingerprint(), fp);
 
     let plain = import_canton(&read("encryption.export.bin"), None, &fp, 1).unwrap();
-    let pw = import_canton(&read("encryption.export-pw.bin"), Some(password().as_bytes()), &fp, 1).unwrap();
+    let pw = import_canton(
+        &read("encryption.export-pw.bin"),
+        Some(password().as_bytes()),
+        &fp,
+        1,
+    )
+    .unwrap();
     let stored = import_canton(&read("encryption.stored.bin"), None, &fp, 1).unwrap();
     for imported in [&plain, &pw, &stored] {
         assert_eq!(imported.fingerprint, fp);
         assert_eq!(imported.key.spec, HostedSpec::EcP256);
         // Byte-identical SPKI: Canton re-registers the key by the fingerprint of these bytes.
-        assert_eq!(imported.key.public_key_der().unwrap(), canton_pub.public.spki_der());
+        assert_eq!(
+            imported.key.public_key_der().unwrap(),
+            canton_pub.public.spki_der()
+        );
         imported.key.validate().unwrap();
     }
     // All three forms are the same key (same deterministic encoding, same ECDH).
@@ -413,7 +556,9 @@ fn a_canton_ecies_key_imports_with_the_exact_public_key_canton_recorded() {
 
     // And it is the key B1's parser reads: ECDH with the parsed scalar agrees.
     let parsed = rutli_canton_key::parse(&read("encryption.export.bin"), None).unwrap();
-    let rutli_canton_key::PrivateKeyMaterial::EcP256 { scalar } = &parsed.material else { panic!() };
+    let rutli_canton_key::PrivateKeyMaterial::EcP256 { scalar } = &parsed.material else {
+        panic!()
+    };
     let reference = HostedKey::ec_p256_from_scalar(scalar.as_ref(), 1).unwrap();
     assert_eq!(
         plain.key.ecdh_p256(&v()).unwrap().as_ref(),
@@ -428,11 +573,17 @@ fn canton_import_refuses_every_key_that_is_not_the_expected_ecies_key() {
     use rutli_cosigner::export::import_canton;
     let fp = fingerprint_of("encryption");
     let refused = |input: &[u8], pw: Option<&[u8]>, expect: &str| {
-        import_canton(input, pw, expect, 1).expect_err("must be refused").to_string()
+        import_canton(input, pw, expect, 1)
+            .expect_err("must be refused")
+            .to_string()
     };
 
     // The right file, the wrong expected key.
-    let e = refused(&read("encryption.export.bin"), None, &fingerprint_of("extra-ecp256-signing"));
+    let e = refused(
+        &read("encryption.export.bin"),
+        None,
+        &fingerprint_of("extra-ecp256-signing"),
+    );
     assert!(e.contains("not the expected"), "{e}");
     // A P-256 signing key is never turned into an ECDH oracle, even when it is the expected key.
     let e = refused(
@@ -442,22 +593,39 @@ fn canton_import_refuses_every_key_that_is_not_the_expected_ecies_key() {
     );
     assert!(e.contains("signing key"), "{e}");
     // Ed25519 goes through the split ceremony; RSA is not imported at all (B3 dropped).
-    let e = refused(&read("namespace.export.bin"), None, &fingerprint_of("namespace"));
+    let e = refused(
+        &read("namespace.export.bin"),
+        None,
+        &fingerprint_of("namespace"),
+    );
     assert!(e.contains("split ceremony"), "{e}");
     let e = refused(
         &read("extra-rsa2048-encryption.export.bin"),
         None,
         &fingerprint_of("extra-rsa2048-encryption"),
     );
-    assert!(e.contains("RSA-2048 import is not supported") && e.contains("fresh encryption key"), "{e}");
+    assert!(
+        e.contains("RSA-2048 import is not supported") && e.contains("fresh encryption key"),
+        "{e}"
+    );
     // Password handling is the parser's: required when protected, refused when not, checked.
     assert!(refused(&read("encryption.export-pw.bin"), None, &fp).contains("password"));
-    assert!(refused(&read("encryption.export-pw.bin"), Some(b"wrong password"), &fp).contains("password"));
+    assert!(refused(
+        &read("encryption.export-pw.bin"),
+        Some(b"wrong password"),
+        &fp
+    )
+    .contains("password"));
     assert!(refused(&read("encryption.export.bin"), Some(b"x"), &fp).contains("password"));
     // Plain PKCS#8 carries no purpose, so it cannot be told from a signing key.
     let parsed = rutli_canton_key::parse(&read("encryption.export.bin"), None).unwrap();
-    let rutli_canton_key::PrivateKeyMaterial::EcP256 { scalar } = &parsed.material else { panic!() };
-    let pkcs8 = HostedKey::ec_p256_from_scalar(scalar.as_ref(), 1).unwrap().private_der.clone();
+    let rutli_canton_key::PrivateKeyMaterial::EcP256 { scalar } = &parsed.material else {
+        panic!()
+    };
+    let pkcs8 = HostedKey::ec_p256_from_scalar(scalar.as_ref(), 1)
+        .unwrap()
+        .private_der
+        .clone();
     let e = refused(&hex::decode(pkcs8).unwrap(), None, &fp);
     assert!(e.contains("PKCS#8"), "{e}");
     // Garbage.
@@ -467,11 +635,17 @@ fn canton_import_refuses_every_key_that_is_not_the_expected_ecies_key() {
 // ── verify-hosted ──────────────────────────────────────────────────────────────────────────────
 
 /// Every node's own `HostedKeyStatus`, as `verify-hosted` collects it.
-async fn hosted_views(nodes: &[Arc<Node>], peers: &Peers, key_id: &str) -> Vec<rutli_cosigner::verify_hosted::HostedView> {
+async fn hosted_views(
+    nodes: &[Arc<Node>],
+    peers: &Peers,
+    key_id: &str,
+) -> Vec<rutli_cosigner::verify_hosted::HostedView> {
     let mut views = Vec::new();
     for (i, n) in nodes.iter().enumerate() {
         let status = signer(n, peers, 0)
-            .hosted_key_status(Request::new(pb::HostedKeyStatusRequest { key_id: key_id.into() }))
+            .hosted_key_status(Request::new(pb::HostedKeyStatusRequest {
+                key_id: key_id.into(),
+            }))
             .await
             .map(|r| r.into_inner())
             .map_err(|s| format!("{:?}: {}", s.code(), s.message()));
@@ -491,44 +665,100 @@ async fn verify_hosted_sees_each_nodes_own_copy_and_the_canton_fingerprint() {
     use rutli_cosigner::verify_hosted::check_hosted_views;
     let fp = fingerprint_of("encryption");
     let id = "rutli-enc-imported-1220afe2";
-    let imported = rutli_cosigner::export::import_canton(&read("encryption.export.bin"), None, &fp, 1).unwrap();
+    let imported =
+        rutli_cosigner::export::import_canton(&read("encryption.export.bin"), None, &fp, 1)
+            .unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = hosted_cluster(&tmp);
     nodes[0].hosted_store(id, &imported.key).unwrap();
 
     // Only node 1 holds it. Asking node 2 does not repair it there.
-    let r = check_hosted_views(id, Some(&fp), &[1, 2, 3], &hosted_views(&nodes, &peers, id).await);
+    let r = check_hosted_views(
+        id,
+        Some(&fp),
+        &[1, 2, 3],
+        &hosted_views(&nodes, &peers, id).await,
+    );
     assert!(!r.ok);
-    assert!(r.problems.iter().any(|p| p == "node 2: does not hold the key"), "{:?}", r.problems);
-    assert!(!nodes[1].hosted_exists(id), "HostedKeyStatus must not read-repair");
+    assert!(
+        r.problems
+            .iter()
+            .any(|p| p == "node 2: does not hold the key"),
+        "{:?}",
+        r.problems
+    );
+    assert!(
+        !nodes[1].hosted_exists(id),
+        "HostedKeyStatus must not read-repair"
+    );
 
     // Node 1's sweep pushes nothing. Imported on a second node, the third pulls it (two agree);
     // now the cluster agrees on Canton's key.
-    anti_entropy_sweep(&nodes[0], &view_of(&nodes, 0)).await.unwrap();
+    anti_entropy_sweep(&nodes[0], &view_of(&nodes, 0))
+        .await
+        .unwrap();
     assert!(!nodes[1].hosted_exists(id), "the sweep no longer pushes");
     nodes[1].hosted_store(id, &imported.key).unwrap();
-    assert_eq!(anti_entropy_sweep(&nodes[2], &view_of(&nodes, 2)).await.unwrap(), 1);
-    let r = check_hosted_views(id, Some(&fp), &[1, 2, 3], &hosted_views(&nodes, &peers, id).await);
+    assert_eq!(
+        anti_entropy_sweep(&nodes[2], &view_of(&nodes, 2))
+            .await
+            .unwrap(),
+        1
+    );
+    let r = check_hosted_views(
+        id,
+        Some(&fp),
+        &[1, 2, 3],
+        &hosted_views(&nodes, &peers, id).await,
+    );
     assert!(r.ok, "{:?}", r.problems);
     let canton_pub = rutli_canton_key::parse_public_key(&read("encryption.pub.bin")).unwrap();
-    assert_eq!(r.public_key_der, Some(hex::encode(canton_pub.public.spki_der())));
+    assert_eq!(
+        r.public_key_der,
+        Some(hex::encode(canton_pub.public.spki_der()))
+    );
     // ... but not the key some other fingerprint names.
-    assert!(!check_hosted_views(id, Some(&fingerprint_of("namespace")), &[1, 2, 3], &hosted_views(&nodes, &peers, id).await).ok);
+    assert!(
+        !check_hosted_views(
+            id,
+            Some(&fingerprint_of("namespace")),
+            &[1, 2, 3],
+            &hosted_views(&nodes, &peers, id).await
+        )
+        .ok
+    );
 
     // A node that holds other material under the id (a second import of the wrong file before the
     // sweep): anti-entropy refuses to merge, verify-hosted names it.
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = hosted_cluster(&tmp);
     nodes[0].hosted_store(id, &imported.key).unwrap();
-    nodes[2].hosted_store(id, &HostedKey::generate(HostedSpec::EcP256, 1).unwrap()).unwrap();
+    nodes[2]
+        .hosted_store(id, &HostedKey::generate(HostedSpec::EcP256, 1).unwrap())
+        .unwrap();
     anti_entropy_sweep(&nodes[0], &peers).await.unwrap();
-    let r = check_hosted_views(id, Some(&fp), &[1, 2, 3], &hosted_views(&nodes, &peers, id).await);
-    assert!(r.problems.iter().any(|p| p.contains("2 different public keys")), "{:?}", r.problems);
-    assert!(r.problems.iter().any(|p| p.starts_with("node 3: its public key has Canton fingerprint")));
+    let r = check_hosted_views(
+        id,
+        Some(&fp),
+        &[1, 2, 3],
+        &hosted_views(&nodes, &peers, id).await,
+    );
+    assert!(
+        r.problems
+            .iter()
+            .any(|p| p.contains("2 different public keys")),
+        "{:?}",
+        r.problems
+    );
+    assert!(r
+        .problems
+        .iter()
+        .any(|p| p.starts_with("node 3: its public key has Canton fingerprint")));
 
     // A FROST share under an id reads as absent, not as an error: the reply never tells which ids
     // hold shares.
-    let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&[5u8; 32], &[1, 2, 3], T).unwrap();
+    let (shares, pkp) =
+        rutli_frost_core::dealer::split_ed25519_seed(&[5u8; 32], &[1, 2, 3], T).unwrap();
     let share = rutli_cosigner::keystore::Share {
         key_package: frost_ed25519::keys::KeyPackage::try_from(shares[0].clone()).unwrap(),
         public_key_package: pkp,
@@ -537,12 +767,19 @@ async fn verify_hosted_sees_each_nodes_own_copy_and_the_canton_fingerprint() {
         key_id: String::new(),
     };
     let node1_store = || {
-        KeyStore::open_with_sealer(tmp.path().join("node-1"), Some(Arc::new(Sealer::from_master_secret(MASTER, 1))))
-            .unwrap()
+        KeyStore::open_with_sealer(
+            tmp.path().join("node-1"),
+            Some(Arc::new(Sealer::from_master_secret(MASTER, 1))),
+        )
+        .unwrap()
     };
-    node1_store().create("frost-participant1-namespace", &share).unwrap();
+    node1_store()
+        .create("frost-participant1-namespace", &share)
+        .unwrap();
     let reply = signer(&nodes[0], &peers, 0)
-        .hosted_key_status(Request::new(pb::HostedKeyStatusRequest { key_id: "frost-participant1-namespace".into() }))
+        .hosted_key_status(Request::new(pb::HostedKeyStatusRequest {
+            key_id: "frost-participant1-namespace".into(),
+        }))
         .await
         .unwrap()
         .into_inner();
@@ -556,20 +793,38 @@ async fn verify_hosted_sees_each_nodes_own_copy_and_the_canton_fingerprint() {
         let id = format!("rutli-enc-forged-{}", spec.as_str());
         node1_store().create_hosted(&id, &forged).unwrap();
         let e = signer(&nodes[0], &peers, 0)
-            .hosted_key_status(Request::new(pb::HostedKeyStatusRequest { key_id: id.clone() }))
+            .hosted_key_status(Request::new(pb::HostedKeyStatusRequest {
+                key_id: id.clone(),
+            }))
             .await
             .unwrap_err();
         assert!(e.message().contains("inconsistent"), "{spec:?}: {e:?}");
-        let r = check_hosted_views(&id, Some(&fp), &[1, 2, 3], &hosted_views(&nodes, &peers, &id).await);
-        assert!(r.problems.iter().any(|p| p.starts_with("node 1:") && p.contains("inconsistent")), "{:?}", r.problems);
+        let r = check_hosted_views(
+            &id,
+            Some(&fp),
+            &[1, 2, 3],
+            &hosted_views(&nodes, &peers, &id).await,
+        );
+        assert!(
+            r.problems
+                .iter()
+                .any(|p| p.starts_with("node 1:") && p.contains("inconsistent")),
+            "{:?}",
+            r.problems
+        );
         // A consistent key reports its derived SPKI.
         let honest = HostedKey::generate(spec, 1).unwrap();
-        assert_eq!(honest.derived_public_key_der().unwrap(), honest.public_key_der().unwrap());
+        assert_eq!(
+            honest.derived_public_key_der().unwrap(),
+            honest.public_key_der().unwrap()
+        );
     }
 
     // Ids reserved for the split ceremony are never hosted keys.
     let e = signer(&nodes[0], &peers, 0)
-        .hosted_key_status(Request::new(pb::HostedKeyStatusRequest { key_id: "frost-import-sig-x".into() }))
+        .hosted_key_status(Request::new(pb::HostedKeyStatusRequest {
+            key_id: "frost-import-sig-x".into(),
+        }))
         .await
         .unwrap_err();
     assert_eq!(e.code(), Code::AlreadyExists);
@@ -584,7 +839,9 @@ async fn import_key_into_a_running_node_races_safely_with_anti_entropy() {
     use rutli_cosigner::export::{install_imported, Installed};
     let fp = fingerprint_of("encryption");
     let id = "rutli-enc-imported-1220afe2";
-    let key = rutli_cosigner::export::import_canton(&read("encryption.export.bin"), None, &fp, 1).unwrap().key;
+    let key = rutli_cosigner::export::import_canton(&read("encryption.export.bin"), None, &fp, 1)
+        .unwrap()
+        .key;
     // What the CLI opens: the same directory and seal secret as node 1's daemon, a separate handle.
     let cli_store = |tmp: &tempfile::TempDir| {
         let sealer = Arc::new(Sealer::from_master_secret(MASTER, 1));
@@ -603,44 +860,73 @@ async fn import_key_into_a_running_node_races_safely_with_anti_entropy() {
         let view = view_of(&nodes, 0);
         let (sweep, cli) = tokio::join!(anti_entropy_sweep(&nodes[0], &view), cli);
         sweep.unwrap();
-        *outcomes.entry(format!("{:?}", cli.unwrap().unwrap())).or_insert(0) += 1;
-        assert_eq!(nodes[0].hosted_load(id).unwrap().private_der, key.private_der);
+        *outcomes
+            .entry(format!("{:?}", cli.unwrap().unwrap()))
+            .or_insert(0) += 1;
+        assert_eq!(
+            nodes[0].hosted_load(id).unwrap().private_der,
+            key.private_der
+        );
     }
     // Which side wins is up to the scheduler; both outcomes are success.
     assert_eq!(outcomes.values().sum::<i32>(), 25, "{outcomes:?}");
 
     // The CLI losing the race, deterministically: the daemon's create lands between the CLI's
     // existence check and its own create (the key store's IO hook fires before each touch).
-    for (daemon_key, wins) in [(key.clone(), true), (HostedKey::generate(HostedSpec::EcP256, 1).unwrap(), false)] {
+    for (daemon_key, wins) in [
+        (key.clone(), true),
+        (HostedKey::generate(HostedSpec::EcP256, 1).unwrap(), false),
+    ] {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let tmp = tempfile::tempdir().unwrap();
         let (nodes, _) = hosted_cluster(&tmp);
         let touches = Arc::new(AtomicUsize::new(0));
         let (node, theirs, seen) = (nodes[0].clone(), daemon_key.clone(), touches.clone());
         let hook: rutli_cosigner::keystore::IoHook = Arc::new(move |p: &Path| {
-            if p.file_name().is_some_and(|f| f == format!("{id}.json").as_str()) && seen.fetch_add(1, Ordering::SeqCst) == 1 {
+            if p.file_name()
+                .is_some_and(|f| f == format!("{id}.json").as_str())
+                && seen.fetch_add(1, Ordering::SeqCst) == 1
+            {
                 node.hosted_store(id, &theirs).unwrap();
             }
         });
         let outcome = install_imported(&cli_store(&tmp).with_io_hook(hook), id, &key);
-        assert!(touches.load(Ordering::SeqCst) >= 2, "the hook never fired between check and create");
+        assert!(
+            touches.load(Ordering::SeqCst) >= 2,
+            "the hook never fired between check and create"
+        );
         if wins {
             assert_eq!(outcome.unwrap(), Installed::AlreadyPresent);
         } else {
-            assert!(matches!(outcome, Err(rutli_cosigner::DaemonError::KeyExists(_))), "{outcome:?}");
+            assert!(
+                matches!(outcome, Err(rutli_cosigner::DaemonError::KeyExists(_))),
+                "{outcome:?}"
+            );
         }
         // Either way the daemon's copy stands.
-        assert_eq!(nodes[0].hosted_load(id).unwrap().private_der, daemon_key.private_der);
+        assert_eq!(
+            nodes[0].hosted_load(id).unwrap().private_der,
+            daemon_key.private_der
+        );
     }
 
     // Other material under the id, against the running node's copy: refused, nothing replaced.
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = hosted_cluster(&tmp);
     let store = cli_store(&tmp);
-    assert_eq!(install_imported(&store, id, &key).unwrap(), Installed::Created);
+    assert_eq!(
+        install_imported(&store, id, &key).unwrap(),
+        Installed::Created
+    );
     let other = HostedKey::generate(HostedSpec::EcP256, 1).unwrap();
-    assert!(matches!(install_imported(&store, id, &other), Err(rutli_cosigner::DaemonError::KeyExists(_))));
-    assert_eq!(install_imported(&store, id, &key).unwrap(), Installed::AlreadyPresent);
+    assert!(matches!(
+        install_imported(&store, id, &other),
+        Err(rutli_cosigner::DaemonError::KeyExists(_))
+    ));
+    assert_eq!(
+        install_imported(&store, id, &key).unwrap(),
+        Installed::AlreadyPresent
+    );
     assert!(matches!(
         install_imported(&store, "frost-import-sig-x", &key),
         Err(rutli_cosigner::DaemonError::ReservedKeyId(_))
@@ -660,11 +946,24 @@ async fn import_key_into_a_running_node_races_safely_with_anti_entropy() {
         .unwrap()
         .into_inner();
     assert_eq!(served.public_key_der, canton_pub.public.spki_der());
-    assert_eq!(anti_entropy_sweep(&nodes[0], &view_of(&nodes, 0)).await.unwrap(), 0, "nothing to pull, nothing pushed");
+    assert_eq!(
+        anti_entropy_sweep(&nodes[0], &view_of(&nodes, 0))
+            .await
+            .unwrap(),
+        0,
+        "nothing to pull, nothing pushed"
+    );
     nodes[1].hosted_store(id, &key).unwrap();
-    assert_eq!(anti_entropy_sweep(&nodes[2], &view_of(&nodes, 2)).await.unwrap(), 1);
+    assert_eq!(
+        anti_entropy_sweep(&nodes[2], &view_of(&nodes, 2))
+            .await
+            .unwrap(),
+        1
+    );
     let views = hosted_views(&nodes, &peers, id).await;
-    assert!(rutli_cosigner::verify_hosted::check_hosted_views(id, Some(&fp), &[1, 2, 3], &views).ok);
+    assert!(
+        rutli_cosigner::verify_hosted::check_hosted_views(id, Some(&fp), &[1, 2, 3], &views).ok
+    );
 }
 
 // ── the import-key CLI ─────────────────────────────────────────────────────────────────────────
@@ -704,7 +1003,11 @@ fn import_key(cfg: &Path, args: &[&str]) -> (bool, String) {
         .env(PW_ENV, password())
         .output()
         .unwrap();
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     (out.status.success(), text)
 }
 
@@ -723,24 +1026,62 @@ fn import_key_cli_installs_a_canton_ecies_key_once() {
     // An id the driver could never route to the cluster.
     let (ok, out) = import_key(
         &cfg,
-        &["--in", input, "--passphrase-env", PW_ENV, "--key-id", "enc-1", "--expect-fingerprint", &fp],
+        &[
+            "--in",
+            input,
+            "--passphrase-env",
+            PW_ENV,
+            "--key-id",
+            "enc-1",
+            "--expect-fingerprint",
+            &fp,
+        ],
     );
     assert!(!ok && out.contains("routing tag"), "{out}");
     // An id reserved for the split ceremony.
     let (ok, out) = import_key(
         &cfg,
-        &["--in", input, "--passphrase-env", PW_ENV, "--key-id", "rutli-frost-import-x", "--expect-fingerprint", &fp],
+        &[
+            "--in",
+            input,
+            "--passphrase-env",
+            PW_ENV,
+            "--key-id",
+            "rutli-frost-import-x",
+            "--expect-fingerprint",
+            &fp,
+        ],
     );
     assert!(!ok && out.contains("FROST routing tag"), "{out}");
     // --key-prefix must match the id.
     let (ok, out) = import_key(
         &cfg,
-        &["--in", input, "--passphrase-env", PW_ENV, "--key-id", id, "--expect-fingerprint", &fp, "--key-prefix", "soak2-"],
+        &[
+            "--in",
+            input,
+            "--passphrase-env",
+            PW_ENV,
+            "--key-id",
+            id,
+            "--expect-fingerprint",
+            &fp,
+            "--key-prefix",
+            "soak2-",
+        ],
     );
     assert!(!ok && out.contains("soak2-rutli-"), "{out}");
 
     let args = [
-        "--in", input, "--passphrase-env", PW_ENV, "--key-id", id, "--expect-fingerprint", &fp, "--key-prefix", "soak1-",
+        "--in",
+        input,
+        "--passphrase-env",
+        PW_ENV,
+        "--key-id",
+        id,
+        "--expect-fingerprint",
+        &fp,
+        "--key-prefix",
+        "soak1-",
     ];
     let (ok, out) = import_key(&cfg, &args);
     assert!(ok, "{out}");
@@ -756,7 +1097,9 @@ fn import_key_cli_installs_a_canton_ecies_key_once() {
     let key = ks.load_hosted(id).unwrap();
     let canton_pub = rutli_canton_key::parse_public_key(&read("encryption.pub.bin")).unwrap();
     assert_eq!(key.public_key_der().unwrap(), canton_pub.public.spki_der());
-    assert!(Sealer::is_sealed(&std::fs::read(tmp.path().join("keys").join(format!("{id}.json"))).unwrap()));
+    assert!(Sealer::is_sealed(
+        &std::fs::read(tmp.path().join("keys").join(format!("{id}.json"))).unwrap()
+    ));
 
     // A second, identical import is a no-op; the same id with another key is refused.
     let (ok, out) = import_key(&cfg, &args);
@@ -768,7 +1111,10 @@ fn import_key_cli_installs_a_canton_ecies_key_once() {
     let (ok, out) = import_key(&cfg, &["--in", artifact.to_str().unwrap()]);
     assert!(!ok && out.contains("different material"), "{out}");
     // A Rütli artifact carries its own id: the Canton-only flags are refused for it.
-    let (ok, out) = import_key(&cfg, &["--in", artifact.to_str().unwrap(), "--key-id", "rutli-x"]);
+    let (ok, out) = import_key(
+        &cfg,
+        &["--in", artifact.to_str().unwrap(), "--key-id", "rutli-x"],
+    );
     assert!(!ok && out.contains("carries its own key id"), "{out}");
 }
 
@@ -777,12 +1123,25 @@ fn verify_hosted_cli_fails_loudly_when_nodes_cannot_be_asked() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = cli_config(tmp.path());
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_rutli-cosigner"))
-        .args(["--config", cfg.to_str().unwrap(), "verify-hosted", "--key-id", "rutli-enc-x"])
+        .args([
+            "--config",
+            cfg.to_str().unwrap(),
+            "verify-hosted",
+            "--key-id",
+            "rutli-enc-x",
+        ])
         .args(["--expect-fingerprint", &fingerprint_of("encryption")])
         .env_remove("RUTLI_COSIGNER_CONFIG")
         .output()
         .unwrap();
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(!out.status.success(), "{text}");
-    assert!(text.contains("node 1 http://127.0.0.1:1: unreachable") && text.contains("FAILED"), "{text}");
+    assert!(
+        text.contains("node 1 http://127.0.0.1:1: unreachable") && text.contains("FAILED"),
+        "{text}"
+    );
 }

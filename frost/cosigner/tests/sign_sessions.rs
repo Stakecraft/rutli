@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! A member of a signature cannot make the leader exclude an honest node, over in-process clusters
@@ -38,7 +38,10 @@ async fn cluster_of(dir: &std::path::Path, n: u16, t: u16) -> (Vec<Arc<Node>>, [
         })
         .collect();
     rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
-    let peers: Peers = nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    let peers: Peers = nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect();
     let group = run_dkg(&peers, KEY).await.unwrap();
     (nodes, group)
 }
@@ -56,7 +59,12 @@ fn derived(own: &str) -> Vec<String> {
     let mut flipped = own.to_string();
     let last = flipped.pop().unwrap();
     flipped.push(if last == '0' { '1' } else { '0' });
-    vec![own.to_string(), flipped, own.replace("sign-", "signtest-"), own.to_uppercase()]
+    vec![
+        own.to_string(),
+        flipped,
+        own.replace("sign-", "signtest-"),
+        own.to_uppercase(),
+    ]
 }
 
 /// A compromised member. At its round 1 it learns its own session id and at once, on every other
@@ -80,20 +88,47 @@ impl PeerApi for Intruder {
     fn identifier(&self) -> Identifier {
         self.inner.identifier()
     }
-    async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments> {
+    async fn sign_round1(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        ctx: &Round1Ctx,
+    ) -> Result<SigningCommitments> {
         let mine = self.inner.sign_round1(key_id, session_id, ctx).await?;
         self.own.lock().unwrap().push(session_id.to_string());
         let forged = BTreeMap::from([(self.identifier(), mine)]);
         let msg = ctx.message.clone().unwrap_or_default();
         for (id, target) in &self.targets {
             for guess in derived(session_id) {
-                let r2 = target.sign_round2(key_id, &guess, &msg, &forged, None).await;
+                let r2 = target
+                    .sign_round2(key_id, &guess, &msg, &forged, None)
+                    .await;
                 let abort = target.abort_sign(key_id, &guess).await;
                 let squat = target.sign_round1(key_id, &guess, ctx).await;
                 let mut answers = self.answers.lock().unwrap();
-                answers.push((*id, "round2", r2.err().map(|e| format!("{e:?}")).unwrap_or_else(|| "signed".into())));
-                answers.push((*id, "abort", abort.err().map(|e| format!("{e:?}")).unwrap_or_else(|| "ok".into())));
-                answers.push((*id, "round1", squat.err().map(|e| format!("{e:?}")).unwrap_or_else(|| "opened".into())));
+                answers.push((
+                    *id,
+                    "round2",
+                    r2.err()
+                        .map(|e| format!("{e:?}"))
+                        .unwrap_or_else(|| "signed".into()),
+                ));
+                answers.push((
+                    *id,
+                    "abort",
+                    abort
+                        .err()
+                        .map(|e| format!("{e:?}"))
+                        .unwrap_or_else(|| "ok".into()),
+                ));
+                answers.push((
+                    *id,
+                    "round1",
+                    squat
+                        .err()
+                        .map(|e| format!("{e:?}"))
+                        .unwrap_or_else(|| "opened".into()),
+                ));
             }
         }
         Ok(mine)
@@ -108,14 +143,23 @@ impl PeerApi for Intruder {
     ) -> Result<SignatureShare> {
         self.round2s.fetch_add(1, Ordering::SeqCst);
         if self.refuse_round2.load(Ordering::SeqCst) {
-            return Err(DaemonError::Status(tonic::Status::unavailable("transport error")));
+            return Err(DaemonError::Status(tonic::Status::unavailable(
+                "transport error",
+            )));
         }
-        self.inner.sign_round2(key_id, session_id, message, commitments, intent_digest).await
+        self.inner
+            .sign_round2(key_id, session_id, message, commitments, intent_digest)
+            .await
     }
     async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()> {
         self.inner.abort_sign(key_id, session_id).await
     }
-    async fn ceremony_fence(&self, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<()> {
+    async fn ceremony_fence(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        kind: &'static str,
+    ) -> Result<()> {
         self.inner.ceremony_fence(ceremony_id, key_id, kind).await
     }
     async fn ceremony_release(&self, ceremony_id: &str, key_id: &str) -> Result<()> {
@@ -132,9 +176,14 @@ impl PeerApi for Intruder {
         public_key_der: &[u8],
         wrapped: &rutli_cosigner::wrap::Wrapped,
     ) -> Result<Vec<u8>> {
-        self.inner.replicate_key(ceremony_id, key_id, spec, public_key_der, wrapped).await
+        self.inner
+            .replicate_key(ceremony_id, key_id, spec, public_key_der, wrapped)
+            .await
     }
-    async fn fetch_key(&self, key_id: &str) -> Result<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {
+    async fn fetch_key(
+        &self,
+        key_id: &str,
+    ) -> Result<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {
         self.inner.fetch_key(key_id).await
     }
     async fn list_keys(&self) -> Result<Vec<(String, String, Vec<u8>)>> {
@@ -174,9 +223,17 @@ async fn a_member_that_tries_the_ids_it_can_derive_on_other_nodes_gains_nothing(
     ];
 
     let msg = rutli_frost_core::dealer::canton_test_message(b"through an intruder");
-    let sig = sign(&nodes[0], &peers, KEY, &msg).await.expect("the honest members sign");
-    assert!(rutli_cosigner::verify_key::signature_verifies(&group, &msg, &sig));
-    assert_eq!(intruder.round2s.load(Ordering::SeqCst), 1, "one attempt: nobody was excluded");
+    let sig = sign(&nodes[0], &peers, KEY, &msg)
+        .await
+        .expect("the honest members sign");
+    assert!(rutli_cosigner::verify_key::signature_verifies(
+        &group, &msg, &sig
+    ));
+    assert_eq!(
+        intruder.round2s.load(Ordering::SeqCst),
+        1,
+        "one attempt: nobody was excluded"
+    );
 
     let answers = answers.lock().unwrap().clone();
     let guesses = derived("sign-x").len();
@@ -192,21 +249,39 @@ async fn a_member_that_tries_the_ids_it_can_derive_on_other_nodes_gains_nothing(
     // The ids of the attempt: one per member, all distinct, none of them one it could make.
     let own = intruder.own.lock().unwrap().clone();
     assert_eq!(own.len(), 1);
-    let honest_ids: Vec<(u16, String)> =
-        log.lock().unwrap().iter().filter(|(_, c, _)| *c == "round1").map(|(n, _, s)| (*n, s.clone())).collect();
-    assert_eq!(honest_ids.iter().map(|(n, _)| *n).collect::<Vec<_>>(), vec![1, 3]);
+    let honest_ids: Vec<(u16, String)> = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, c, _)| *c == "round1")
+        .map(|(n, _, s)| (*n, s.clone()))
+        .collect();
+    assert_eq!(
+        honest_ids.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+        vec![1, 3]
+    );
     let mut all: Vec<&String> = honest_ids.iter().map(|(_, s)| s).chain(&own).collect();
     all.sort();
     all.dedup();
-    assert_eq!(all.len(), 3, "one distinct id per member: {honest_ids:?} {own:?}");
+    assert_eq!(
+        all.len(),
+        3,
+        "one distinct id per member: {honest_ids:?} {own:?}"
+    );
     let guessed = derived(&own[0]);
     // The leader's sessions on nodes 1 and 3 lived through every try and signed: each burned its
     // own id there. The intruder's sessions sit under its guesses only, until the TTL.
     for (n, id) in &honest_ids {
         assert!(!guessed.contains(id), "node {n}: {id} was guessable");
-        assert!(marker_exists(tmp.path(), *n, id), "node {n} signed under its own id");
+        assert!(
+            marker_exists(tmp.path(), *n, id),
+            "node {n} signed under its own id"
+        );
         for g in &guessed {
-            assert!(!marker_exists(tmp.path(), *n, g), "node {n} burned nothing under {g}");
+            assert!(
+                !marker_exists(tmp.path(), *n, g),
+                "node {n} burned nothing under {g}"
+            );
         }
     }
     for (i, n) in nodes.iter().enumerate() {
@@ -224,30 +299,60 @@ async fn a_member_that_knows_another_members_session_id_still_cannot_use_it() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, group) = cluster_of(tmp.path(), 3, 2).await;
     let msg = rutli_frost_core::dealer::canton_test_message(b"known id");
-    let ctx = Round1Ctx { message: Some(msg.to_vec()), signers: Some(vec![1, 2]), ..Default::default() };
+    let ctx = Round1Ctx {
+        message: Some(msg.to_vec()),
+        signers: Some(vec![1, 2]),
+        ..Default::default()
+    };
     let leader = SessionOwner::Peer("cosigner1".into());
     let cs = BTreeMap::from([
-        (nodes[0].identifier, nodes[0].sign_round1(KEY, "leaders-own", &ctx).unwrap()),
-        (nodes[1].identifier, nodes[1].sign_round1_as(KEY, "for-cosigner1", &ctx, &leader).unwrap()),
+        (
+            nodes[0].identifier,
+            nodes[0].sign_round1(KEY, "leaders-own", &ctx).unwrap(),
+        ),
+        (
+            nodes[1].identifier,
+            nodes[1]
+                .sign_round1_as(KEY, "for-cosigner1", &ctx, &leader)
+                .unwrap(),
+        ),
     ]);
-    for (node, session, owner) in [(0usize, "leaders-own", "this node's own leader"), (1, "for-cosigner1", "peer 'cosigner1'")] {
+    for (node, session, owner) in [
+        (0usize, "leaders-own", "this node's own leader"),
+        (1, "for-cosigner1", "peer 'cosigner1'"),
+    ] {
         let by3 = as_seen_by(&nodes, node, 2);
         for err in [
             by3.abort_sign(KEY, session).await.unwrap_err(),
-            by3.sign_round2(KEY, session, &msg, &cs, None).await.unwrap_err(),
+            by3.sign_round2(KEY, session, &msg, &cs, None)
+                .await
+                .unwrap_err(),
         ] {
             let text = format!("{err:?}");
-            assert!(matches!(err, DaemonError::Core(CoreError::NotSessionOwner { .. })), "{text}");
+            assert!(
+                matches!(err, DaemonError::Core(CoreError::NotSessionOwner { .. })),
+                "{text}"
+            );
             assert!(text.contains(owner) && text.contains("cosigner3"), "{text}");
         }
         assert_eq!(nodes[node].pending_sign_count(KEY), 1);
     }
     let shares = BTreeMap::from([
-        (nodes[0].identifier, nodes[0].sign_round2(KEY, "leaders-own", &msg, &cs).unwrap()),
-        (nodes[1].identifier, nodes[1].sign_round2_as(KEY, "for-cosigner1", &msg, &cs, None, &leader).unwrap()),
+        (
+            nodes[0].identifier,
+            nodes[0].sign_round2(KEY, "leaders-own", &msg, &cs).unwrap(),
+        ),
+        (
+            nodes[1].identifier,
+            nodes[1]
+                .sign_round2_as(KEY, "for-cosigner1", &msg, &cs, None, &leader)
+                .unwrap(),
+        ),
     ]);
     let sig = nodes[0].aggregate(KEY, &msg, &cs, &shares).unwrap();
-    assert!(rutli_cosigner::verify_key::signature_verifies(&group, &msg, &sig));
+    assert!(rutli_cosigner::verify_key::signature_verifies(
+        &group, &msg, &sig
+    ));
 }
 
 /// The opener still aborts its own sessions: when node 2 fails its round 2, node 3 still holds
@@ -273,11 +378,20 @@ async fn the_leader_still_aborts_its_own_sessions_and_retries_without_the_failin
         Arc::new(as_seen_by(&nodes, 4, 0)),
     ];
     let msg = rutli_frost_core::dealer::canton_test_message(b"retry without the failing member");
-    let sig = sign(&nodes[0], &peers, KEY, &msg).await.expect("the next subset signs");
-    assert!(rutli_cosigner::verify_key::signature_verifies(&group, &msg, &sig));
+    let sig = sign(&nodes[0], &peers, KEY, &msg)
+        .await
+        .expect("the next subset signs");
+    assert!(rutli_cosigner::verify_key::signature_verifies(
+        &group, &msg, &sig
+    ));
     assert_eq!(intruder.round2s.load(Ordering::SeqCst), 1);
     for n in &nodes {
-        assert_eq!(n.pending_sign_count(KEY), 0, "node {:?}: the aborted attempt left nothing", n.identifier);
+        assert_eq!(
+            n.pending_sign_count(KEY),
+            0,
+            "node {:?}: the aborted attempt left nothing",
+            n.identifier
+        );
     }
 }
 
@@ -290,18 +404,26 @@ async fn unidentified_callers_share_their_sessions_but_never_the_leaders_own() {
     let (nodes, _) = cluster(tmp.path()).await;
     let n = &nodes[1];
     let ctx = Round1Ctx::default();
-    n.sign_round1_as(KEY, "plain", &ctx, &SessionOwner::Unidentified).unwrap();
-    n.abort_sign_as(KEY, "plain", &SessionOwner::Unidentified).unwrap();
+    n.sign_round1_as(KEY, "plain", &ctx, &SessionOwner::Unidentified)
+        .unwrap();
+    n.abort_sign_as(KEY, "plain", &SessionOwner::Unidentified)
+        .unwrap();
     assert_eq!(n.pending_sign_count(KEY), 0);
 
     n.sign_round1(KEY, "own", &ctx).unwrap();
-    let err = n.abort_sign_as(KEY, "own", &SessionOwner::Unidentified).unwrap_err();
-    assert!(matches!(err, DaemonError::Core(CoreError::NotSessionOwner { .. })), "{err:?}");
+    let err = n
+        .abort_sign_as(KEY, "own", &SessionOwner::Unidentified)
+        .unwrap_err();
+    assert!(
+        matches!(err, DaemonError::Core(CoreError::NotSessionOwner { .. })),
+        "{err:?}"
+    );
     assert_eq!(n.pending_sign_count(KEY), 1);
 }
 
 fn marker_exists(dir: &std::path::Path, node: u16, session: &str) -> bool {
-    dir.join(format!("node-{node}/{KEY}.nonces/{session}.used")).exists()
+    dir.join(format!("node-{node}/{KEY}.nonces/{session}.used"))
+        .exists()
 }
 
 /// (node, call, session id) for every call a [`Scripted`] peer forwarded.
@@ -329,11 +451,19 @@ struct Scripted {
 
 impl Scripted {
     fn new(inner: LocalPeer, mode: Mode, log: &Log) -> Self {
-        Self { inner, mode, log: log.clone(), round1s: AtomicUsize::new(0) }
+        Self {
+            inner,
+            mode,
+            log: log.clone(),
+            round1s: AtomicUsize::new(0),
+        }
     }
     fn note(&self, call: &'static str, session: &str) {
         let id = rutli_cosigner::hosted::identifier_index(self.inner.identifier()).unwrap();
-        self.log.lock().unwrap().push((id, call, session.to_string()));
+        self.log
+            .lock()
+            .unwrap()
+            .push((id, call, session.to_string()));
     }
 }
 
@@ -346,7 +476,12 @@ impl PeerApi for Scripted {
     fn identifier(&self) -> Identifier {
         self.inner.identifier()
     }
-    async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments> {
+    async fn sign_round1(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        ctx: &Round1Ctx,
+    ) -> Result<SigningCommitments> {
         let first = self.round1s.fetch_add(1, Ordering::SeqCst) == 0;
         match &self.mode {
             Mode::Down => return Err(unavailable()),
@@ -380,13 +515,20 @@ impl PeerApi for Scripted {
         intent_digest: Option<&[u8; 32]>,
     ) -> Result<SignatureShare> {
         self.note("round2", session_id);
-        self.inner.sign_round2(key_id, session_id, message, commitments, intent_digest).await
+        self.inner
+            .sign_round2(key_id, session_id, message, commitments, intent_digest)
+            .await
     }
     async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()> {
         self.note("abort", session_id);
         self.inner.abort_sign(key_id, session_id).await
     }
-    async fn ceremony_fence(&self, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<()> {
+    async fn ceremony_fence(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        kind: &'static str,
+    ) -> Result<()> {
         self.inner.ceremony_fence(ceremony_id, key_id, kind).await
     }
     async fn ceremony_release(&self, ceremony_id: &str, key_id: &str) -> Result<()> {
@@ -403,9 +545,14 @@ impl PeerApi for Scripted {
         public_key_der: &[u8],
         wrapped: &rutli_cosigner::wrap::Wrapped,
     ) -> Result<Vec<u8>> {
-        self.inner.replicate_key(ceremony_id, key_id, spec, public_key_der, wrapped).await
+        self.inner
+            .replicate_key(ceremony_id, key_id, spec, public_key_der, wrapped)
+            .await
     }
-    async fn fetch_key(&self, key_id: &str) -> Result<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {
+    async fn fetch_key(
+        &self,
+        key_id: &str,
+    ) -> Result<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {
         self.inner.fetch_key(key_id).await
     }
     async fn list_keys(&self) -> Result<Vec<(String, String, Vec<u8>)>> {
@@ -425,19 +572,36 @@ async fn a_dropped_attempt_leaves_no_session_on_any_member() {
     let (nodes, _) = cluster(tmp.path()).await;
     let log: Log = Default::default();
     let peers: Peers = vec![
-        Arc::new(Scripted::new(LocalPeer::new(nodes[0].clone()), Mode::Normal, &log)),
+        Arc::new(Scripted::new(
+            LocalPeer::new(nodes[0].clone()),
+            Mode::Normal,
+            &log,
+        )),
         Arc::new(Scripted::new(as_seen_by(&nodes, 1, 0), Mode::Normal, &log)),
-        Arc::new(Scripted::new(as_seen_by(&nodes, 2, 0), Mode::OpenThenHang, &log)),
+        Arc::new(Scripted::new(
+            as_seen_by(&nodes, 2, 0),
+            Mode::OpenThenHang,
+            &log,
+        )),
         Arc::new(as_seen_by(&nodes, 3, 0)),
         Arc::new(as_seen_by(&nodes, 4, 0)),
     ];
     let msg = rutli_frost_core::dealer::canton_test_message(b"caller went away");
-    let aborts = || log.lock().unwrap().iter().filter(|(_, c, _)| *c == "abort").count();
+    let aborts = || {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, c, _)| *c == "abort")
+            .count()
+    };
     // Waits on a condition, not on a fixed time: a loaded runner can be slow at every step.
     async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
         let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while !done() {
-            assert!(std::time::Instant::now() < until, "timed out waiting for {what}");
+            assert!(
+                std::time::Instant::now() < until,
+                "timed out waiting for {what}"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
@@ -447,8 +611,14 @@ async fn a_dropped_attempt_leaves_no_session_on_any_member() {
     };
     // The caller goes away only once node 3 has opened its session and hangs, so that every
     // member of the attempt holds a session to abort.
-    eventually("node 3 to open its session", || nodes[2].pending_sign_count(KEY) == 1).await;
-    assert!(!signing.is_finished(), "the sign is still waiting on node 3");
+    eventually("node 3 to open its session", || {
+        nodes[2].pending_sign_count(KEY) == 1
+    })
+    .await;
+    assert!(
+        !signing.is_finished(),
+        "the sign is still waiting on node 3"
+    );
     signing.abort();
     assert!(signing.await.unwrap_err().is_cancelled());
     // The aborts run as their own task.
@@ -459,7 +629,11 @@ async fn a_dropped_attempt_leaves_no_session_on_any_member() {
     for (i, n) in nodes.iter().enumerate() {
         assert_eq!(n.pending_sign_count(KEY), 0, "node {} holds nothing", i + 1);
     }
-    assert_eq!(aborts(), 3, "nodes 1, 2 and the hanging node 3 are each aborted once");
+    assert_eq!(
+        aborts(),
+        3,
+        "nodes 1, 2 and the hanging node 3 are each aborted once"
+    );
 }
 
 /// A member whose round 1 reply never came may still have opened the session: the leader aborts
@@ -471,16 +645,35 @@ async fn a_round1_that_failed_after_opening_is_aborted() {
     let log: Log = Default::default();
     let peers: Peers = vec![
         Arc::new(LocalPeer::new(nodes[0].clone())),
-        Arc::new(Scripted::new(as_seen_by(&nodes, 1, 0), Mode::OpenThenFail, &log)),
+        Arc::new(Scripted::new(
+            as_seen_by(&nodes, 1, 0),
+            Mode::OpenThenFail,
+            &log,
+        )),
         Arc::new(as_seen_by(&nodes, 2, 0)),
         Arc::new(as_seen_by(&nodes, 3, 0)),
         Arc::new(as_seen_by(&nodes, 4, 0)),
     ];
     let msg = rutli_frost_core::dealer::canton_test_message(b"lost round 1 reply");
-    let sig = sign(&nodes[0], &peers, KEY, &msg).await.expect("another subset signs");
-    assert!(rutli_cosigner::verify_key::signature_verifies(&group, &msg, &sig));
-    assert_eq!(nodes[1].pending_sign_count(KEY), 0, "node 2's session was aborted");
-    assert_eq!(log.lock().unwrap().iter().filter(|(n, c, _)| *n == 2 && *c == "abort").count(), 1);
+    let sig = sign(&nodes[0], &peers, KEY, &msg)
+        .await
+        .expect("another subset signs");
+    assert!(rutli_cosigner::verify_key::signature_verifies(
+        &group, &msg, &sig
+    ));
+    assert_eq!(
+        nodes[1].pending_sign_count(KEY),
+        0,
+        "node 2's session was aborted"
+    );
+    assert_eq!(
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|(n, c, _)| *n == 2 && *c == "abort")
+            .count(),
+        1
+    );
 }
 
 /// A member with no room left for this leader's sessions is not failing: the leader tries another
@@ -494,9 +687,13 @@ async fn a_member_at_its_cap_for_this_leader_is_not_excluded() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, group) = cluster_of(tmp.path(), 3, 2).await;
     let leader = SessionOwner::Peer("cosigner1".into());
-    let fillers: Vec<String> = (0..MAX_PENDING_SIGN_SESSIONS_PER_OPENER).map(|i| format!("fill-{i}")).collect();
+    let fillers: Vec<String> = (0..MAX_PENDING_SIGN_SESSIONS_PER_OPENER)
+        .map(|i| format!("fill-{i}"))
+        .collect();
     for f in &fillers {
-        nodes[1].sign_round1_as(KEY, f, &Round1Ctx::default(), &leader).unwrap();
+        nodes[1]
+            .sign_round1_as(KEY, f, &Round1Ctx::default(), &leader)
+            .unwrap();
     }
     let log: Log = Default::default();
     let node2 = Arc::new(Scripted::new(
@@ -511,19 +708,34 @@ async fn a_member_at_its_cap_for_this_leader_is_not_excluded() {
     ];
     let msg = rutli_frost_core::dealer::canton_test_message(b"full, then room");
     let err = sign(&nodes[0], &peers, KEY, &msg).await.unwrap_err();
-    assert!(matches!(err, DaemonError::NotServing(ref m) if m.contains("no room")), "{err:?}");
-    let sig = sign(&nodes[0], &peers, KEY, &msg).await.expect("node 2 is asked again and signs");
-    assert!(rutli_cosigner::verify_key::signature_verifies(&group, &msg, &sig));
-    assert_eq!(node2.round1s.load(Ordering::SeqCst), 2, "refused once for room, then asked again");
+    assert!(
+        matches!(err, DaemonError::NotServing(ref m) if m.contains("no room")),
+        "{err:?}"
+    );
+    let sig = sign(&nodes[0], &peers, KEY, &msg)
+        .await
+        .expect("node 2 is asked again and signs");
+    assert!(rutli_cosigner::verify_key::signature_verifies(
+        &group, &msg, &sig
+    ));
+    assert_eq!(
+        node2.round1s.load(Ordering::SeqCst),
+        2,
+        "refused once for room, then asked again"
+    );
     for n in &nodes {
         assert_eq!(n.pending_sign_count(KEY), 0);
     }
 
     // Full for good: the answer is UNAVAILABLE (another leader has its own room), not a refusal
     // naming node 2.
-    let fillers: Vec<String> = (0..MAX_PENDING_SIGN_SESSIONS_PER_OPENER).map(|i| format!("full-{i}")).collect();
+    let fillers: Vec<String> = (0..MAX_PENDING_SIGN_SESSIONS_PER_OPENER)
+        .map(|i| format!("full-{i}"))
+        .collect();
     for f in &fillers {
-        nodes[1].sign_round1_as(KEY, f, &Round1Ctx::default(), &leader).unwrap();
+        nodes[1]
+            .sign_round1_as(KEY, f, &Round1Ctx::default(), &leader)
+            .unwrap();
     }
     let peers: Peers = vec![
         Arc::new(LocalPeer::new(nodes[0].clone())),
@@ -531,6 +743,9 @@ async fn a_member_at_its_cap_for_this_leader_is_not_excluded() {
         Arc::new(Scripted::new(as_seen_by(&nodes, 2, 0), Mode::Down, &log)),
     ];
     let err = sign(&nodes[0], &peers, KEY, &msg).await.unwrap_err();
-    assert!(matches!(err, DaemonError::NotServing(ref m) if m.contains("no room")), "{err:?}");
+    assert!(
+        matches!(err, DaemonError::NotServing(ref m) if m.contains("no room")),
+        "{err:?}"
+    );
     assert_eq!(tonic::Status::from(err).code(), tonic::Code::Unavailable);
 }

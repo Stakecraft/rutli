@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Cluster-hosted (non-FROST) key material: RSA-2048 encryption keypairs, EC P-256 (ECIES)
@@ -89,14 +89,20 @@ impl HostedSpec {
     }
 
     /// Every spec this build can generate and serve, in the order `Capabilities` reports them.
-    pub const ALL: [HostedSpec; 3] = [HostedSpec::Rsa2048, HostedSpec::Aes256Gcm, HostedSpec::EcP256];
+    pub const ALL: [HostedSpec; 3] = [
+        HostedSpec::Rsa2048,
+        HostedSpec::Aes256Gcm,
+        HostedSpec::EcP256,
+    ];
 
     pub fn parse(s: &str) -> Result<Self> {
         match s {
             "rsa-2048-oaep-sha256" | "rsa2048" => Ok(HostedSpec::Rsa2048),
             "aes-256-gcm" | "aes256-gcm" => Ok(HostedSpec::Aes256Gcm),
             "ec-p256-ecies" => Ok(HostedSpec::EcP256),
-            other => Err(DaemonError::Config(format!("unsupported hosted key spec: {other}"))),
+            other => Err(DaemonError::Config(format!(
+                "unsupported hosted key spec: {other}"
+            ))),
         }
     }
 
@@ -157,7 +163,9 @@ impl HostedKey {
     /// The time a delete intent must postdate to beat this copy (Unix ms): its creation, or its
     /// undelete.
     pub fn live_since_ms(&self) -> u64 {
-        self.created_at.saturating_mul(1000).max(self.undeleted_at_ms.unwrap_or(0))
+        self.created_at
+            .saturating_mul(1000)
+            .max(self.undeleted_at_ms.unwrap_or(0))
     }
 }
 
@@ -191,10 +199,18 @@ impl Tombstone {
     /// The delete intent, decoded.
     pub fn intent(&self) -> Result<crate::pb::SignedIntent> {
         use prost::Message;
-        let bytes = hex::decode(&self.delete_intent)
-            .map_err(|_| DaemonError::KeyFile(format!("tombstone {}: delete intent is not hex", self.key_id)))?;
-        crate::pb::SignedIntent::decode(bytes.as_slice())
-            .map_err(|e| DaemonError::KeyFile(format!("tombstone {}: delete intent does not decode: {e}", self.key_id)))
+        let bytes = hex::decode(&self.delete_intent).map_err(|_| {
+            DaemonError::KeyFile(format!(
+                "tombstone {}: delete intent is not hex",
+                self.key_id
+            ))
+        })?;
+        crate::pb::SignedIntent::decode(bytes.as_slice()).map_err(|e| {
+            DaemonError::KeyFile(format!(
+                "tombstone {}: delete intent does not decode: {e}",
+                self.key_id
+            ))
+        })
     }
 
     /// SHA-256 of the delete intent's intent bytes ([`crate::intent::intent_digest`]): what a v2
@@ -314,7 +330,9 @@ impl HostedKey {
             }
             HostedSpec::Aes256Gcm => {
                 if self.private_bytes()?.len() != 32 {
-                    return Err(DaemonError::Config("aes-256-gcm key material is not 32 bytes".into()));
+                    return Err(DaemonError::Config(
+                        "aes-256-gcm key material is not 32 bytes".into(),
+                    ));
                 }
             }
         }
@@ -365,7 +383,9 @@ impl HostedKey {
             DaemonError::InvalidPoint("the peer point is not on P-256".into()),
             |z| {
                 if z.len() != P256_SHARED_SECRET_LEN {
-                    return Err(DaemonError::InvalidPoint("unexpected ECDH output length".into()));
+                    return Err(DaemonError::InvalidPoint(
+                        "unexpected ECDH output length".into(),
+                    ));
                 }
                 let mut out = Zeroizing::new([0u8; P256_SHARED_SECRET_LEN]);
                 out.copy_from_slice(z);
@@ -418,9 +438,9 @@ impl HostedKey {
     }
 
     fn private_bytes(&self) -> Result<Zeroizing<Vec<u8>>> {
-        Ok(Zeroizing::new(hex::decode(&self.private_der).map_err(|e| {
-            DaemonError::Config(format!("corrupt stored private key material: {e}"))
-        })?))
+        Ok(Zeroizing::new(hex::decode(&self.private_der).map_err(
+            |e| DaemonError::Config(format!("corrupt stored private key material: {e}")),
+        )?))
     }
 
     /// RSAES-OAEP-SHA256 decryption. The **whole** operation happens here, not just the modular
@@ -502,12 +522,15 @@ impl HostedKey {
         use aes_gcm::aead::{Aead, KeyInit};
         use aes_gcm::{Aes256Gcm, Key, Nonce};
 
-        let malformed = || DaemonError::Config("malformed symmetric ciphertext (bad version or too short)".into());
+        let malformed = || {
+            DaemonError::Config("malformed symmetric ciphertext (bad version or too short)".into())
+        };
         let (version, rest) = blob.split_first().ok_or_else(malformed)?;
         if *version != SYM_FORMAT_V1 {
             return Err(malformed());
         }
-        let (nonce_bytes, ciphertext) = rest.split_at_checked(SYM_NONCE_LEN).ok_or_else(malformed)?;
+        let (nonce_bytes, ciphertext) =
+            rest.split_at_checked(SYM_NONCE_LEN).ok_or_else(malformed)?;
         let key_bytes = self.symmetric_key()?;
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
         let nonce = Nonce::from_slice(nonce_bytes);
@@ -598,7 +621,11 @@ mod tests {
     fn identifier_index_inverts_identifier_try_from() {
         for n in [1u16, 2, 3, 255, 256, 300, u16::MAX] {
             let id = frost_ed25519::Identifier::try_from(n).unwrap();
-            assert_eq!(identifier_index(id).unwrap(), n, "id {n} must map back exactly");
+            assert_eq!(
+                identifier_index(id).unwrap(),
+                n,
+                "id {n} must map back exactly"
+            );
         }
         // Distinct nodes must not collapse onto one index (the bug: every node read as 0).
         let a = identifier_index(frost_ed25519::Identifier::try_from(1).unwrap()).unwrap();
@@ -622,7 +649,11 @@ mod tests {
     fn rsa_roundtrip_and_public_key_shape() {
         let k = HostedKey::generate(HostedSpec::Rsa2048, 1).unwrap();
         let spki = k.public_key_der().unwrap();
-        assert!(spki.len() > 250, "SPKI DER for RSA-2048 is ~294 bytes, got {}", spki.len());
+        assert!(
+            spki.len() > 250,
+            "SPKI DER for RSA-2048 is ~294 bytes, got {}",
+            spki.len()
+        );
 
         let msg = b"canton view session key";
         let ct = k.encrypt_oaep(msg).unwrap();
@@ -638,26 +669,37 @@ mod tests {
 
         let json = serde_json::to_vec(&k).unwrap();
         let reloaded: HostedKey = serde_json::from_slice(&json).unwrap();
-        assert_eq!(reloaded.decrypt_oaep(&ct).unwrap().as_slice(), b"before restart");
+        assert_eq!(
+            reloaded.decrypt_oaep(&ct).unwrap().as_slice(),
+            b"before restart"
+        );
     }
 
     #[test]
     fn rsa_rejects_wrong_length_and_foreign_ciphertext() {
         let k = HostedKey::generate(HostedSpec::Rsa2048, 1).unwrap();
-        assert!(k.decrypt_oaep(&[0u8; 128]).is_err(), "short ciphertext must be refused");
+        assert!(
+            k.decrypt_oaep(&[0u8; 128]).is_err(),
+            "short ciphertext must be refused"
+        );
 
         // A ciphertext under a different key must fail — and with the opaque error, not a
         // padding-specific one (a distinguishable failure is an oracle).
         let other = HostedKey::generate(HostedSpec::Rsa2048, 1).unwrap();
         let ct = other.encrypt_oaep(b"not for you").unwrap();
-        assert!(matches!(k.decrypt_oaep(&ct), Err(DaemonError::DecryptFailed)));
+        assert!(matches!(
+            k.decrypt_oaep(&ct),
+            Err(DaemonError::DecryptFailed)
+        ));
     }
 
     #[test]
     fn rsa_enforces_the_oaep_plaintext_bound() {
         let k = HostedKey::generate(HostedSpec::Rsa2048, 1).unwrap();
         assert!(k.encrypt_oaep(&[0u8; RSA2048_MAX_PLAINTEXT_LEN]).is_ok());
-        assert!(k.encrypt_oaep(&[0u8; RSA2048_MAX_PLAINTEXT_LEN + 1]).is_err());
+        assert!(k
+            .encrypt_oaep(&[0u8; RSA2048_MAX_PLAINTEXT_LEN + 1])
+            .is_err());
     }
 
     #[test]
@@ -666,10 +708,16 @@ mod tests {
         // Empty, one byte, version byte plus a nonce one byte short, and a wrong version.
         assert!(k.decrypt_symmetric(&[]).is_err());
         assert!(k.decrypt_symmetric(&[SYM_FORMAT_V1]).is_err());
-        assert!(k.decrypt_symmetric(&[SYM_FORMAT_V1; SYM_NONCE_LEN]).is_err());
-        assert!(k.decrypt_symmetric(&[SYM_FORMAT_V1.wrapping_add(1); 1 + SYM_NONCE_LEN + 16]).is_err());
+        assert!(k
+            .decrypt_symmetric(&[SYM_FORMAT_V1; SYM_NONCE_LEN])
+            .is_err());
+        assert!(k
+            .decrypt_symmetric(&[SYM_FORMAT_V1.wrapping_add(1); 1 + SYM_NONCE_LEN + 16])
+            .is_err());
         // Exactly version + nonce and no ciphertext: reaches the AEAD, which refuses it.
-        assert!(k.decrypt_symmetric(&[SYM_FORMAT_V1; 1 + SYM_NONCE_LEN]).is_err());
+        assert!(k
+            .decrypt_symmetric(&[SYM_FORMAT_V1; 1 + SYM_NONCE_LEN])
+            .is_err());
     }
 
     #[test]
@@ -677,11 +725,20 @@ mod tests {
         assert!(check_uncompressed_p256_point(&[]).is_err());
         assert!(check_uncompressed_p256_point(&[0x04]).is_err());
         let mut point = vec![0x02; P256_UNCOMPRESSED_POINT_LEN];
-        assert!(check_uncompressed_p256_point(&point).is_err(), "compressed tag");
+        assert!(
+            check_uncompressed_p256_point(&point).is_err(),
+            "compressed tag"
+        );
         point[0] = 0x04;
-        assert!(check_uncompressed_p256_point(&point).is_ok(), "syntax only; the curve check is aws-lc's");
+        assert!(
+            check_uncompressed_p256_point(&point).is_ok(),
+            "syntax only; the curve check is aws-lc's"
+        );
         point.push(0);
-        assert!(check_uncompressed_p256_point(&point).is_err(), "one byte too long");
+        assert!(
+            check_uncompressed_p256_point(&point).is_err(),
+            "one byte too long"
+        );
     }
 
     #[test]
@@ -710,9 +767,18 @@ mod tests {
     fn specs_do_not_cross_over() {
         let rsa = HostedKey::generate(HostedSpec::Rsa2048, 1).unwrap();
         let aes = HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
-        assert!(rsa.encrypt_symmetric(b"x").is_err(), "RSA key must not serve symmetric ops");
-        assert!(aes.decrypt_oaep(&[0u8; 256]).is_err(), "AES key must not serve RSA ops");
-        assert!(aes.public_key_der().is_err(), "symmetric keys have no public half");
+        assert!(
+            rsa.encrypt_symmetric(b"x").is_err(),
+            "RSA key must not serve symmetric ops"
+        );
+        assert!(
+            aes.decrypt_oaep(&[0u8; 256]).is_err(),
+            "AES key must not serve RSA ops"
+        );
+        assert!(
+            aes.public_key_der().is_err(),
+            "symmetric keys have no public half"
+        );
     }
 
     #[test]
@@ -720,14 +786,26 @@ mod tests {
         // These strings live in sealed files; a rename would orphan existing keys.
         assert_eq!(HostedSpec::Rsa2048.as_str(), "rsa-2048-oaep-sha256");
         assert_eq!(HostedSpec::Aes256Gcm.as_str(), "aes-256-gcm");
-        assert_eq!(HostedSpec::parse("rsa-2048-oaep-sha256").unwrap(), HostedSpec::Rsa2048);
-        assert_eq!(HostedSpec::parse("aes-256-gcm").unwrap(), HostedSpec::Aes256Gcm);
+        assert_eq!(
+            HostedSpec::parse("rsa-2048-oaep-sha256").unwrap(),
+            HostedSpec::Rsa2048
+        );
+        assert_eq!(
+            HostedSpec::parse("aes-256-gcm").unwrap(),
+            HostedSpec::Aes256Gcm
+        );
         assert!(HostedSpec::parse("rsa-4096").is_err());
         let json = serde_json::to_string(&HostedSpec::Rsa2048).unwrap();
         assert_eq!(json, "\"rsa-2048-oaep-sha256\"");
         assert_eq!(HostedSpec::EcP256.as_str(), "ec-p256-ecies");
-        assert_eq!(HostedSpec::parse("ec-p256-ecies").unwrap(), HostedSpec::EcP256);
-        assert_eq!(serde_json::to_string(&HostedSpec::EcP256).unwrap(), "\"ec-p256-ecies\"");
+        assert_eq!(
+            HostedSpec::parse("ec-p256-ecies").unwrap(),
+            HostedSpec::EcP256
+        );
+        assert_eq!(
+            serde_json::to_string(&HostedSpec::EcP256).unwrap(),
+            "\"ec-p256-ecies\""
+        );
         // The curve alone is not a spec: the usage is part of it.
         assert!(HostedSpec::parse("ec-p256").is_err());
         assert!(HostedSpec::parse("ec-p256-ecdsa").is_err());
@@ -751,10 +829,12 @@ mod tests {
     const SMALL_X: &str = "040000000000000000000000000000000000000000000000000000000000000005\
                            459243b9aa581806fe913bce99817ade11ca503c64d9a3c533415c083248fbcc";
     /// …and the same point with x written as x + p: a non-reduced field element.
-    const SMALL_X_PLUS_P: &str = "04ffffffff00000001000000000000000000000001000000000000000000000004\
+    const SMALL_X_PLUS_P: &str =
+        "04ffffffff00000001000000000000000000000001000000000000000000000004\
                                   459243b9aa581806fe913bce99817ade11ca503c64d9a3c533415c083248fbcc";
     /// A point on y² = x³ − 3x (b = 0), the classic invalid-curve-attack input.
-    const INVALID_CURVE: &str = "040000000000000000000000000000000000000000000000000000000000000002\
+    const INVALID_CURVE: &str =
+        "040000000000000000000000000000000000000000000000000000000000000002\
                                  af8bbdfe8cdd5577acbf345b543d28cf402f4e94d3865b97ea0787f2d3aa5d22";
 
     fn kat_key() -> HostedKey {
@@ -786,7 +866,11 @@ mod tests {
         // Byte-identical to the encoding Canton/BouncyCastle use, as rutli-canton-key builds it.
         let point: [u8; 65] = hex::decode(KAT_Q).unwrap().try_into().unwrap();
         assert_eq!(spki, rutli_canton_key::PublicKey::EcP256(point).spki_der());
-        assert_eq!(spki.len(), 91, "P-256 SPKI with a named curve and uncompressed point");
+        assert_eq!(
+            spki.len(),
+            91,
+            "P-256 SPKI with a named curve and uncompressed point"
+        );
         k.validate().unwrap();
     }
 
@@ -798,11 +882,20 @@ mod tests {
         let reloaded: HostedKey = serde_json::from_slice(&json).unwrap();
         // Same key: the same peer point gives the same Z before and after the reload.
         let v = hex::decode(KAT_V).unwrap();
-        assert_eq!(k.ecdh_p256(&v).unwrap().as_ref(), reloaded.ecdh_p256(&v).unwrap().as_ref());
-        assert_eq!(reloaded.public_key_der().unwrap(), k.public_key_der().unwrap());
+        assert_eq!(
+            k.ecdh_p256(&v).unwrap().as_ref(),
+            reloaded.ecdh_p256(&v).unwrap().as_ref()
+        );
+        assert_eq!(
+            reloaded.public_key_der().unwrap(),
+            k.public_key_der().unwrap()
+        );
         // Two generations are two keys.
         let other = HostedKey::generate(HostedSpec::EcP256, 7).unwrap();
-        assert_ne!(other.ecdh_p256(&v).unwrap().as_ref(), k.ecdh_p256(&v).unwrap().as_ref());
+        assert_ne!(
+            other.ecdh_p256(&v).unwrap().as_ref(),
+            k.ecdh_p256(&v).unwrap().as_ref()
+        );
     }
 
     #[test]
@@ -816,13 +909,20 @@ mod tests {
         long.push(0);
         let spki = kat_key().public_key_der().unwrap();
         for bad in [&[][..], &[0x00][..], &compressed, &v[..64], &long, &spki] {
-            assert!(invalid_point(k.ecdh_p256(bad)), "{}-byte input must be refused", bad.len());
+            assert!(
+                invalid_point(k.ecdh_p256(bad)),
+                "{}-byte input must be refused",
+                bad.len()
+            );
         }
         // Right length, wrong tag: compressed tags, hybrid tags, infinity tag, garbage.
         for tag in [0x00u8, 0x02, 0x03, 0x05, 0x06, 0x07, 0xff] {
             let mut p = v.clone();
             p[0] = tag;
-            assert!(invalid_point(k.ecdh_p256(&p)), "tag 0x{tag:02x} must be refused");
+            assert!(
+                invalid_point(k.ecdh_p256(&p)),
+                "tag 0x{tag:02x} must be refused"
+            );
         }
     }
 
@@ -862,13 +962,14 @@ mod tests {
         let mut hybrid = v.clone();
         hybrid[0] = if odd { 0x07 } else { 0x06 };
         for (what, enc) in [("compressed", compressed), ("hybrid", hybrid)] {
-            let z = agreement::agree(
-                &sk,
-                UnparsedPublicKey::new(&ECDH_P256, &enc),
-                (),
-                |z| Ok(z.to_vec()),
+            let z = agreement::agree(&sk, UnparsedPublicKey::new(&ECDH_P256, &enc), (), |z| {
+                Ok(z.to_vec())
+            });
+            assert_eq!(
+                z.map(hex::encode).as_deref(),
+                Ok(KAT_Z),
+                "aws-lc accepts {what}"
             );
-            assert_eq!(z.map(hex::encode).as_deref(), Ok(KAT_Z), "aws-lc accepts {what}");
             assert!(invalid_point(k.ecdh_p256(&enc)), "Rütli must refuse {what}");
         }
     }
@@ -878,8 +979,14 @@ mod tests {
         let v = hex::decode(KAT_V).unwrap();
         let rsa = HostedKey::generate(HostedSpec::Rsa2048, 1).unwrap();
         let aes = HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
-        assert!(rsa.ecdh_p256(&v).is_err(), "an RSA key is not an ECDH oracle");
-        assert!(aes.ecdh_p256(&v).is_err(), "an AES key is not an ECDH oracle");
+        assert!(
+            rsa.ecdh_p256(&v).is_err(),
+            "an RSA key is not an ECDH oracle"
+        );
+        assert!(
+            aes.ecdh_p256(&v).is_err(),
+            "an AES key is not an ECDH oracle"
+        );
         let ec = kat_key();
         assert!(ec.decrypt_oaep(&[0u8; 256]).is_err());
         assert!(ec.encrypt_oaep(b"x").is_err());
@@ -890,25 +997,42 @@ mod tests {
     #[test]
     fn validate_catches_a_public_key_that_is_not_the_private_keys() {
         let mut k = kat_key();
-        k.public_der = HostedKey::generate(HostedSpec::EcP256, 1).unwrap().public_der.clone();
+        k.public_der = HostedKey::generate(HostedSpec::EcP256, 1)
+            .unwrap()
+            .public_der
+            .clone();
         assert!(k.validate().is_err());
         let mut k = kat_key();
         k.public_der = String::new();
         assert!(k.validate().is_err());
         // Not a valid scalar: zero, and the group order n itself.
         assert!(HostedKey::ec_p256_from_scalar(&[0u8; 32], 1).is_err());
-        let n = hex::decode("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551").unwrap();
+        let n = hex::decode("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551")
+            .unwrap();
         assert!(HostedKey::ec_p256_from_scalar(&n, 1).is_err());
-        assert!(HostedKey::ec_p256_from_scalar(&[1u8; 31], 1).is_err(), "wrong length");
+        assert!(
+            HostedKey::ec_p256_from_scalar(&[1u8; 31], 1).is_err(),
+            "wrong length"
+        );
     }
 
     #[test]
     fn debug_never_prints_the_private_material() {
-        for spec in [HostedSpec::Aes256Gcm, HostedSpec::EcP256, HostedSpec::Rsa2048] {
+        for spec in [
+            HostedSpec::Aes256Gcm,
+            HostedSpec::EcP256,
+            HostedSpec::Rsa2048,
+        ] {
             let key = HostedKey::generate(spec, 1).unwrap();
-            assert!(key.private_der.len() >= 64, "{spec:?}: test needs real material to look for");
+            assert!(
+                key.private_der.len() >= 64,
+                "{spec:?}: test needs real material to look for"
+            );
             let shown = format!("{key:?} {key:#?}");
-            assert!(!shown.contains(&key.private_der), "{spec:?}: Debug leaked private_der");
+            assert!(
+                !shown.contains(&key.private_der),
+                "{spec:?}: Debug leaked private_der"
+            );
             // No 16-byte (32 hex) window of the material either, at any byte offset, in case a
             // format ever truncates or shifts it. PKCS#8 embeds the public half (the EC point, the
             // RSA modulus) and shares OID bytes with the SPKI, which is printed on purpose, so
@@ -916,12 +1040,18 @@ mod tests {
             for w in key.private_der.as_bytes().windows(32).step_by(2) {
                 let w = std::str::from_utf8(w).unwrap();
                 if !key.public_der.contains(w) {
-                    assert!(!shown.contains(w), "{spec:?}: Debug leaked part of private_der");
+                    assert!(
+                        !shown.contains(w),
+                        "{spec:?}: Debug leaked part of private_der"
+                    );
                 }
             }
             assert!(shown.contains("<redacted>"));
             if spec.is_asymmetric() {
-                assert!(shown.contains(&key.public_der), "{spec:?}: the public half stays visible");
+                assert!(
+                    shown.contains(&key.public_der),
+                    "{spec:?}: the public half stays visible"
+                );
             }
 
             // A tombstone within its grace period holds the key; its derived Debug goes through the
@@ -937,7 +1067,10 @@ mod tests {
                 retained: Some(key.clone()),
             };
             let shown = format!("{t:?} {t:#?}");
-            assert!(!shown.contains(&key.private_der), "{spec:?}: Tombstone Debug leaked private_der");
+            assert!(
+                !shown.contains(&key.private_der),
+                "{spec:?}: Tombstone Debug leaked private_der"
+            );
             assert!(shown.contains("<redacted>"));
         }
     }

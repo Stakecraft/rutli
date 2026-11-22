@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 """What the cluster suite's diagnostic pass (`cluster.py --diagnose`) computes, as pure functions:
 reading a container's cgroup v2 files, the flush probe, and the verdicts. cluster.py collects the
