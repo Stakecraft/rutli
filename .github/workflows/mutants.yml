@@ -125,6 +125,11 @@ jobs:
           path: mutants-summary.json
           if-no-files-found: error
           retention-days: 90
+      # A run that is missing a module, or has a failed baseline, is not a result: say so in red.
+      - name: Every module reported
+        run: |
+          jq -e '.complete' mutants-summary.json > /dev/null \
+            || { echo "::error::mutation testing is incomplete: a module is missing or its baseline failed (see mutants-summary.json)"; exit 1; }
 
   # A scheduled run that could not do its job (a baseline failure, a cargo-mutants error, a job out
   # of time, no results) needs a person: one open issue, updated by later failures. Missed mutants

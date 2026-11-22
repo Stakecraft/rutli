@@ -36,6 +36,10 @@ case "$module" in
 esac
 tests="${MUTANTS_TESTS-$tests}"
 
-cd "$(dirname "$0")/../frost"
+# cargo-mutants runs the tests in a copy of frost/; tests that read files from elsewhere in the
+# repository (the shipped configs under deploy/) find them through this.
+RUTLI_REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export RUTLI_REPO_ROOT
+cd "$RUTLI_REPO_ROOT/frost"
 # shellcheck disable=SC2086 # $tests is a list of cargo test arguments
 exec cargo mutants --no-shuffle --file "$file" --test-package "$pkg" "$@" -- --locked $tests
