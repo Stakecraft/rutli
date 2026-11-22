@@ -408,7 +408,7 @@ fn spied(nodes: &[Arc<Node>], faults: &[Fault]) -> (Peers, Log) {
 /// seen through [`spied`] with `faults`; node 1 signs `digest(tag)` over them and the signature must
 /// verify under the group key (asserted here, in every test that calls this). Returns the temp dir, the nodes, the
 /// spied peers, the log and the group key.
-async fn spied_cluster_signing(
+async fn spied_cluster_signing_asserts_valid_signature(
     (n, t): (u16, u16),
     faults: &[Fault],
     tag: &[u8],
@@ -460,7 +460,7 @@ fn marker_exists(dir: &Path, node: usize, session: &str) -> bool {
 
 #[tokio::test]
 async fn a_peer_failing_round2_is_routed_around_with_a_fresh_session_and_fresh_commitments() {
-    let (tmp, nodes, _peers, log, _group) = spied_cluster_signing(
+    let (tmp, nodes, _peers, log, _group) = spied_cluster_signing_asserts_valid_signature(
         (3, 2),
         &[Fault::None, Fault::Round2, Fault::None],
         b"retry after round 2",
@@ -507,7 +507,7 @@ async fn a_peer_failing_round2_is_routed_around_with_a_fresh_session_and_fresh_c
 
 #[tokio::test]
 async fn an_invalid_signature_share_is_attributed_and_routed_around() {
-    let (_tmp, nodes, peers, log, _group) = spied_cluster_signing(
+    let (_tmp, nodes, peers, log, _group) = spied_cluster_signing_asserts_valid_signature(
         (3, 2),
         &[Fault::None, Fault::BadShare, Fault::None],
         b"bad share",
@@ -542,7 +542,7 @@ async fn an_invalid_signature_share_is_attributed_and_routed_around() {
 #[tokio::test]
 async fn three_of_five_retries_through_subsets_until_one_works() {
     // Node 2 is down in round 1 and node 3 fails round 2: the leader works through the subsets.
-    let (_tmp, nodes, _peers, log, group) = spied_cluster_signing(
+    let (_tmp, nodes, _peers, log, group) = spied_cluster_signing_asserts_valid_signature(
         (5, 3),
         &[
             Fault::None,
@@ -696,7 +696,7 @@ async fn a_node_refuses_round2_for_another_message_or_commitment_set_than_round1
 
 #[tokio::test]
 async fn a_round2_tampered_in_transit_is_refused_by_the_node_and_routed_around() {
-    let (tmp, _nodes, _peers, log, _group) = spied_cluster_signing(
+    let (tmp, _nodes, _peers, log, _group) = spied_cluster_signing_asserts_valid_signature(
         (3, 2),
         &[Fault::None, Fault::SwapMessage, Fault::None],
         b"the real message",
