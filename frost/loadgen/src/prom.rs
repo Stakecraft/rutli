@@ -16,6 +16,24 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// The histogram whose percentiles a run reports.
 pub const SIGN_DURATION: &str = "rutli_sign_duration_seconds";
+/// Per-call durations at the calling leader, by `call` (the peer-liveness deadlines, #249).
+pub const PEER_CALL_DURATION: &str = rutli_cosigner::metrics::PEER_CALL_DURATION;
+
+/// The deadline of a `call` value of [`PEER_CALL_DURATION`], or `None` (the leader's own share has
+/// none). `control` also covers the liveness probe, whose deadline (2 s) is shorter than the 3 s
+/// used here; its calls are few next to `NodeInfo`, `KeyEpoch` and `CeremonyStatus`.
+pub fn peer_call_deadline(call: &str) -> Option<Duration> {
+    use rutli_cosigner::peer::{
+        ABORT_DEADLINE, CONTROL_DEADLINE, ROUND1_DEADLINE, ROUND2_DEADLINE,
+    };
+    match call {
+        "sign_round1" => Some(ROUND1_DEADLINE),
+        "sign_round2" => Some(ROUND2_DEADLINE),
+        "abort" => Some(ABORT_DEADLINE),
+        "control" => Some(CONTROL_DEADLINE),
+        _ => None,
+    }
+}
 
 /// One parsed `/metrics` page.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -131,6 +149,24 @@ pub struct HistogramReport {
     pub p99_ms: f64,
 }
 
+/// One `call` class of [`PEER_CALL_DURATION`] over the run, summed over the cosigners.
+#[derive(Debug, Default, Clone, Serialize, PartialEq)]
+pub struct PeerCallReport {
+    pub count: f64,
+    /// Bucket-interpolated, as `histogram_quantile()`.
+    pub p50_ms: f64,
+    pub p99_ms: f64,
+    pub p999_ms: f64,
+    /// The call's deadline, if it has one.
+    pub deadline_ms: Option<f64>,
+    /// Share of the calls that finished within a third of the deadline, read at the bucket edge
+    /// there (the buckets have one at every deadline/3), so no interpolation is involved. `None`
+    /// without a deadline, or if the page has no bucket at that edge.
+    pub within_third: Option<f64>,
+    /// The 3x margin rule of #249: at least 99.9 % of the calls within a third of the deadline.
+    pub margin_3x: Option<bool>,
+}
+
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct TargetReport {
     pub scraped_before: bool,
@@ -152,6 +188,9 @@ pub struct ServerReport {
     pub sign_duration: Option<HistogramReport>,
     /// Counter deltas summed over the cosigners (zero deltas left out).
     pub counters: BTreeMap<String, f64>,
+    /// [`PEER_CALL_DURATION`] by `call`, over the cosigners scraped before and after (or restarted
+    /// in between). Empty when no cosigner reports it (before 0.5.0) or none made a peer call.
+    pub peer_calls: BTreeMap<String, PeerCallReport>,
     pub targets: BTreeMap<String, TargetReport>,
     /// Scrapes that failed, in words.
     pub scrape_errors: Vec<String>,
@@ -174,9 +213,7 @@ pub fn report(
         scrape_errors,
         ..Default::default()
     };
-    // le -> cumulative count over the cosigners, and the histogram's sum and count.
-    let mut buckets: BTreeMap<String, f64> = BTreeMap::new();
-    let (mut hist_sum, mut hist_count) = (0.0, 0.0);
+    let mut histograms = Histograms::default();
     for name in names {
         let mut target = TargetReport {
             scraped_before: before.contains_key(name),
@@ -249,43 +286,118 @@ pub fn report(
                     target.counters.insert(series.clone(), delta);
                     *out.counters.entry(series.clone()).or_default() += delta;
                 }
-            } else if base == Some(SIGN_DURATION) && label(series, "result") == Some("ok") {
-                if metric.ends_with("_bucket") {
-                    if let Some(le) = label(series, "le") {
-                        *buckets.entry(le.to_string()).or_default() += delta;
-                    }
-                } else if metric.ends_with("_sum") {
-                    hist_sum += delta;
-                } else {
-                    hist_count += delta;
-                }
+            } else {
+                histograms.add(series, metric, base, delta);
             }
         }
         out.targets.insert(name.clone(), target);
     }
-    if hist_count > 0.0 {
-        let mut cumulative: Vec<(f64, f64)> = buckets
-            .iter()
-            .filter_map(|(le, &n)| {
-                let bound = if le == "+Inf" {
-                    f64::INFINITY
-                } else {
-                    le.parse().ok()?
-                };
-                Some((bound, n))
-            })
-            .collect();
-        cumulative.sort_by(|x, y| x.0.total_cmp(&y.0));
-        let q = |q: f64| round3(quantile(q, &cumulative) * 1000.0);
-        out.sign_duration = Some(HistogramReport {
-            count: hist_count,
-            mean_ms: round3(hist_sum / hist_count * 1000.0),
+    out.peer_calls = histograms.peer_calls();
+    out.sign_duration = histograms.sign_duration();
+    out
+}
+
+/// The histogram deltas a report reads, summed over the cosigners.
+#[derive(Default)]
+struct Histograms {
+    /// [`SIGN_DURATION`] with `result="ok"`: le -> cumulative count, and its sum and count.
+    sign_buckets: BTreeMap<String, f64>,
+    sign_sum: f64,
+    sign_count: f64,
+    /// [`PEER_CALL_DURATION`]: call -> le -> cumulative count.
+    peer: BTreeMap<String, BTreeMap<String, f64>>,
+}
+
+impl Histograms {
+    /// Add one histogram series' delta (`metric` is its name, `base` the histogram it belongs to).
+    fn add(&mut self, series: &str, metric: &str, base: Option<&str>, delta: f64) {
+        let le = label(series, "le");
+        if base == Some(PEER_CALL_DURATION) {
+            if let (Some(call), Some(le)) = (label(series, "call"), le) {
+                let calls = self.peer.entry(call.to_string()).or_default();
+                *calls.entry(le.to_string()).or_default() += delta;
+            }
+            return;
+        }
+        if base != Some(SIGN_DURATION) || label(series, "result") != Some("ok") {
+            return;
+        }
+        match le {
+            Some(le) => *self.sign_buckets.entry(le.to_string()).or_default() += delta,
+            None if metric.ends_with("_sum") => self.sign_sum += delta,
+            None => self.sign_count += delta,
+        }
+    }
+
+    fn sign_duration(&self) -> Option<HistogramReport> {
+        if self.sign_count <= 0.0 {
+            return None;
+        }
+        let cumulative = sorted_cumulative(&self.sign_buckets);
+        let q = |q: f64| round3(quantile(q, &cumulative) * MS_PER_SEC);
+        Some(HistogramReport {
+            count: self.sign_count,
+            mean_ms: round3(self.sign_sum / self.sign_count * MS_PER_SEC),
             p50_ms: q(0.50),
             p95_ms: q(0.95),
             p99_ms: q(0.99),
-        });
+        })
     }
-    out
+
+    fn peer_calls(&self) -> BTreeMap<String, PeerCallReport> {
+        self.peer
+            .iter()
+            .filter_map(|(call, buckets)| Some((call.clone(), peer_call_report(call, buckets)?)))
+            .collect()
+    }
+}
+
+const MS_PER_SEC: f64 = 1000.0;
+/// The share of calls that must finish within a third of their deadline (#249).
+const MARGIN_SHARE: f64 = 0.999;
+/// How far a bucket edge may sit from the exact third of a deadline (the edges are rounded: 0.33,
+/// 0.67, 1.67, each a little above, which makes the rule that much lenient).
+const THIRD_EDGE_TOLERANCE_SECS: f64 = 0.005;
+
+/// Cumulative buckets (`le` -> count) as (upper bound, count) sorted by bound; `+Inf` is infinite,
+/// an unparsable `le` is left out.
+fn sorted_cumulative(buckets: &BTreeMap<String, f64>) -> Vec<(f64, f64)> {
+    let mut cumulative: Vec<(f64, f64)> = buckets
+        .iter()
+        .filter_map(|(le, &n)| {
+            let bound = if le == "+Inf" {
+                f64::INFINITY
+            } else {
+                le.parse().ok()?
+            };
+            Some((bound, n))
+        })
+        .collect();
+    cumulative.sort_by(|x, y| x.0.total_cmp(&y.0));
+    cumulative
+}
+
+/// One call class from its summed cumulative buckets (`le` -> count), or `None` if it saw no call.
+fn peer_call_report(call: &str, buckets: &BTreeMap<String, f64>) -> Option<PeerCallReport> {
+    let cumulative = sorted_cumulative(buckets);
+    let total = cumulative.last().map(|&(_, n)| n).filter(|&n| n > 0.0)?;
+    let deadline = peer_call_deadline(call).map(|d| d.as_secs_f64());
+    let within_third = deadline.and_then(|d| {
+        cumulative
+            .iter()
+            .find(|(bound, _)| (bound - d / 3.0).abs() < THIRD_EDGE_TOLERANCE_SECS)
+            .map(|&(_, n)| n / total)
+    });
+    let q = |q: f64| round3(quantile(q, &cumulative) * MS_PER_SEC);
+    Some(PeerCallReport {
+        count: total,
+        p50_ms: q(0.50),
+        p99_ms: q(0.99),
+        p999_ms: q(MARGIN_SHARE),
+        deadline_ms: deadline.map(|d| round3(d * MS_PER_SEC)),
+        within_third: within_third.map(|w| (w * 1e6).round() / 1e6),
+        margin_3x: within_third.map(|w| w >= MARGIN_SHARE),
+    })
 }
 
 fn round3(v: f64) -> f64 {
@@ -455,6 +567,70 @@ rutli_untyped_thing 7
             0.0
         );
         assert_eq!(r.scrape_errors.len(), 1);
+    }
+
+    /// The per-call readout behind #249: per `call`, summed over cosigners, the delta of the run,
+    /// quantiles, and the share within a third of the deadline read at that bucket edge.
+    #[test]
+    fn peer_call_durations_are_read_per_call_with_the_3x_margin() {
+        let page = |r1: [u64; 4], r2: [u64; 3], local: u64| {
+            parse(&format!(
+                "# TYPE rutli_peer_call_duration_seconds histogram\n\
+                 rutli_peer_call_duration_seconds_bucket{{call=\"sign_round1\",le=\"0.25\"}} {}\n\
+                 rutli_peer_call_duration_seconds_bucket{{call=\"sign_round1\",le=\"0.67\"}} {}\n\
+                 rutli_peer_call_duration_seconds_bucket{{call=\"sign_round1\",le=\"2\"}} {}\n\
+                 rutli_peer_call_duration_seconds_bucket{{call=\"sign_round1\",le=\"+Inf\"}} {}\n\
+                 rutli_peer_call_duration_seconds_bucket{{call=\"sign_round2\",le=\"0.5\"}} {}\n\
+                 rutli_peer_call_duration_seconds_bucket{{call=\"sign_round2\",le=\"1.67\"}} {}\n\
+                 rutli_peer_call_duration_seconds_bucket{{call=\"sign_round2\",le=\"+Inf\"}} {}\n\
+                 rutli_peer_call_duration_seconds_bucket{{call=\"local_share\",le=\"+Inf\"}} {local}\n",
+                r1[0], r1[1], r1[2], r1[3], r2[0], r2[1], r2[2]
+            ))
+        };
+        let names = vec!["c1".to_string(), "c2".to_string()];
+        let before = BTreeMap::from([
+            ("c1".to_string(), page([5, 5, 5, 5], [5, 5, 5], 9)),
+            ("c2".to_string(), page([0; 4], [0; 3], 0)),
+        ]);
+        // Run: round 1 on c1 10000 calls, 9995 within 0.67 s; c2 adds 990 of 1000 within 0.25 s.
+        // Round 2: every call within 1.67 s.
+        let after = BTreeMap::from([
+            (
+                "c1".to_string(),
+                page([9005, 10000, 10005, 10005], [2005, 2005, 2005], 9),
+            ),
+            ("c2".to_string(), page([990, 1000, 1000, 1000], [0; 3], 0)),
+        ]);
+        let r = report(&before, &after, &names, &[], Vec::new());
+        let r1 = &r.peer_calls["sign_round1"];
+        assert_eq!(r1.count, 11000.0);
+        assert_eq!(r1.deadline_ms, Some(2000.0));
+        // 10995 of 11000 within 0.67 s: 99.95 %, the rule holds.
+        assert_eq!(r1.within_third, Some(0.999545));
+        assert_eq!(r1.margin_3x, Some(true));
+        // 99.95 % within 0.67 s puts p99.9 inside that bucket.
+        assert!(r1.p999_ms > 250.0 && r1.p999_ms <= 670.0, "{r1:?}");
+        let r2 = &r.peer_calls["sign_round2"];
+        assert_eq!(
+            (r2.count, r2.within_third, r2.margin_3x),
+            (2000.0, Some(1.0), Some(true))
+        );
+        // The leader's own share has no deadline, and a call class that saw no call is left out.
+        assert!(
+            !r.peer_calls.contains_key("local_share"),
+            "{:?}",
+            r.peer_calls
+        );
+
+        // One call in 500 past a third of the deadline breaks the rule.
+        let after = BTreeMap::from([
+            ("c1".to_string(), page([5, 4995, 5005, 5005], [5, 5, 5], 9)),
+            ("c2".to_string(), page([0; 4], [0; 3], 0)),
+        ]);
+        let r1 = &report(&before, &after, &names, &[], Vec::new()).peer_calls["sign_round1"];
+        assert_eq!(r1.margin_3x, Some(false), "{r1:?}");
+        assert_eq!(peer_call_deadline("local_share"), None);
+        assert_eq!(peer_call_deadline("control"), Some(Duration::from_secs(3)));
     }
 
     #[test]
