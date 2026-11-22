@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Semgrep findings by severity, on a copy of the tracked files without the generated gRPC Java.
 # Rules: the rust, scala, java, bash, dockerfile and yaml sets of semgrep-rules at the commit

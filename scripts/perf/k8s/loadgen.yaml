@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 #
 # The cluster suite's own objects in the test namespace (scripts/perf/k8s-deploy.sh applies this

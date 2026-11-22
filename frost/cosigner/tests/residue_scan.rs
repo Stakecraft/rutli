@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! `residue-scan`: one fixture per finding class, tars (mixed epochs, unreadable), the legacy

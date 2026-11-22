@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Protobuf metrics: buf lint findings (buf's default rules), and buf breaking against the same
 # directory in the last release tag (the newest v* tag without a pre-release suffix that is an

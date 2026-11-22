@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 #
 # Local 2-of-3 FROST cosigner cluster (dev: plaintext gRPC, unsealed shares).

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Write the baseline a Quality run compares with: the metrics of the last successful Quality run on
 # main, taken from its quality-metrics artifact. Main measures itself after every merge, so the

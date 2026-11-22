@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! EC P-256 (ECIES) hosted keys — milestone C1 (docs/roadmap-migration.md, Track C):

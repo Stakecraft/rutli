@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Readiness must follow the key store (2026-10-07 DevNet incident): a cosigner whose `/data/keys`

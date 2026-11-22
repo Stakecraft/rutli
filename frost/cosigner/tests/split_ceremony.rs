@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! The split ceremony across a 3-node in-process cluster (LocalPeer), on B1's real Canton 3.6.1

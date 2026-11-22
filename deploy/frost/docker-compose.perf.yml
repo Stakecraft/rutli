@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Overlay for the load tests (scripts/perf-load.sh): no host port binds (the load generator runs on
 # the compose network), and the configs from ./config-tls-perf — the examples with the sign rate

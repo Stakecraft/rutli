@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # End-to-end: the whole migration procedure of docs/migration.md (Flow 2b) on a real Canton 3.6.1
 # participant, as far as open-source Canton goes without Splice.

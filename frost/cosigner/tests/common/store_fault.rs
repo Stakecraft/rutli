@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! A node's sign round-2 store work on request ([`Node::with_sign_store_hook`]): pass, fail with an

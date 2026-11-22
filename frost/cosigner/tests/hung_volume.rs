@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! A *hung* data volume — a dead NFS/CSI mount, a snapshot hook's fsfreeze — must cost a parked

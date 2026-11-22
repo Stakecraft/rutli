@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Repository-wide metrics on a copy of the tracked files (no build output): gitleaks findings,
 # typos findings, and lines of code per language (tokei). Run by collect.sh.

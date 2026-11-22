@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 #
 # Chart values deploy/k8s/cosigner.yaml is rendered with (scripts/render-k8s.sh). Edit here, then

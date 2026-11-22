@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Dockerfile metrics: hadolint findings on every tracked Dockerfile (Dockerfile, Dockerfile.*,
 # *.Dockerfile). Run by collect.sh.

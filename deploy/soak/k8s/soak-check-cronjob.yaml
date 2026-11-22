@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 #
 # Daily soak gate on Kubernetes: runs deploy/soak/soak-check.sh (from the ConfigMap the

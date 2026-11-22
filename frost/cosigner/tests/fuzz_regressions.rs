@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! The fuzz targets (`frost/fuzz`), run in the normal test suite on stable Rust: each target's

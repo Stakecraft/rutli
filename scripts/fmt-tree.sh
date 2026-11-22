@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Format (or check) every Rust file of the repository with the pinned toolchain's rustfmt: the
 # frost/ workspace and the separate frost/fuzz crate.
