@@ -1506,7 +1506,7 @@ impl PeerApi for GrpcPeer {
                 "peer sent no (or a malformed) distribution key — hosted keys off there?".into(),
             )
         })?;
-        Ok((reply.identifier as u16, pk))
+        Ok((node_number(reply.identifier)?, pk))
     }
 
     async fn hosted_specs(&self) -> Result<Vec<String>> {
@@ -1995,10 +1995,20 @@ pub fn to_pb_wrapped(w: &crate::wrap::Wrapped) -> pb::WrappedKey {
     }
 }
 
+/// A node number from the wire (a `u32` field) as the `u16` this code uses everywhere. A number that
+/// does not fit is an error: reading 65537 as node 1 would accept a deviant identifier.
+fn node_number(raw: u32) -> Result<u16> {
+    u16::try_from(raw).map_err(|_| {
+        crate::DaemonError::Config(format!(
+            "node number {raw} does not fit 16 bits (cosigner ids are 1..=65535)"
+        ))
+    })
+}
+
 pub fn from_pb_wrapped(w: Option<pb::WrappedKey>) -> Result<crate::wrap::Wrapped> {
     let w = w.ok_or_else(|| crate::DaemonError::Config("missing wrapped key envelope".into()))?;
     Ok(crate::wrap::Wrapped {
-        recipient: w.recipient as u16,
+        recipient: node_number(w.recipient)?,
         encapsulated_key: w.encapsulated_key,
         ciphertext: w.ciphertext,
         version: w.wrap_version,
@@ -2010,4 +2020,33 @@ fn to_group_key(bytes: Vec<u8>) -> Result<[u8; 32]> {
         .as_slice()
         .try_into()
         .map_err(|_| crate::DaemonError::Disagreement("group key not 32 bytes".into()))
+}
+
+#[cfg(test)]
+mod node_number_tests {
+    use super::*;
+
+    #[test]
+    fn a_wire_node_number_must_fit_16_bits() {
+        assert_eq!(node_number(1).unwrap(), 1);
+        assert_eq!(node_number(65535).unwrap(), 65535);
+        // 65537 used to be read as node 1.
+        assert!(node_number(65537).is_err());
+        assert!(node_number(u32::MAX).is_err());
+    }
+
+    #[test]
+    fn a_key_envelope_with_a_recipient_over_16_bits_is_refused() {
+        let wrapped = |recipient| {
+            Some(pb::WrappedKey {
+                recipient,
+                encapsulated_key: vec![1],
+                ciphertext: vec![2],
+                wrap_version: 1,
+            })
+        };
+        assert_eq!(from_pb_wrapped(wrapped(2)).unwrap().recipient, 2);
+        assert!(from_pb_wrapped(wrapped(65538)).is_err());
+        assert!(from_pb_wrapped(None).is_err());
+    }
 }

@@ -102,7 +102,7 @@ fn id(kind: CeremonyKind, rid: u8) -> String {
 fn refused_with(r: rutli_cosigner::Result<impl std::fmt::Debug>, needle: &str) {
     match r {
         Err(DaemonError::PolicyRefused(m)) => {
-            assert!(m.contains(needle), "expected {needle:?} in {m:?}")
+            assert!(m.contains(needle), "expected {needle:?} in {m:?}");
         }
         other => panic!("expected a ceremony-intent refusal containing {needle:?}, got {other:?}"),
     }
@@ -823,8 +823,7 @@ async fn malformed_ids_are_refused_before_the_intent_check_and_never_echoed_in_f
     for n in &r.nodes {
         for (cid, key) in cases {
             for result in [
-                n.ceremony_begin(cid, key, CeremonyKind::Refresh, None, None)
-                    .map(|_| ()),
+                n.ceremony_begin(cid, key, CeremonyKind::Refresh, None, None),
                 n.ceremony_part1(cid, key, CeremonyKind::Refresh, &[1, 2, 3], None)
                     .map(|_| ()),
             ] {
@@ -1270,7 +1269,7 @@ async fn without_enforcement_an_absent_intent_is_counted_and_a_present_one_verif
 fn not_the_leader(r: rutli_cosigner::Result<impl std::fmt::Debug>) {
     match r {
         Err(DaemonError::CeremonyRefused(m)) => {
-            assert!(m.contains("only the leader that fenced"), "{m:?}")
+            assert!(m.contains("only the leader that fenced"), "{m:?}");
         }
         other => panic!(
             "expected a refusal of a caller that is not the ceremony's leader, got {other:?}"
@@ -1684,7 +1683,7 @@ impl RollbackRacer {
             self.log.lock().unwrap().push((n, ok));
         }
         let mut map = BTreeMap::new();
-        for p in a.iter() {
+        for p in a {
             match p
                 .ceremony_part1(&cid, KEY, kind, &[1, 2, 3], Some(&intent))
                 .await
@@ -1694,18 +1693,18 @@ impl RollbackRacer {
             };
         }
         let mut digest = [0u8; 32];
-        for p in a.iter() {
+        for p in a {
             match p.ceremony_part2(&cid, &map).await {
                 Ok(out) => digest = out.round1_digest,
                 Err(_) => return,
             }
         }
-        for p in a.iter() {
+        for p in a {
             if p.ceremony_part3(&cid, &digest).await.is_err() {
                 return;
             }
         }
-        for p in a.iter() {
+        for p in a {
             let _ = p.ceremony_commit(&cid).await;
         }
         self.ran.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1997,7 +1996,7 @@ async fn a_fence_mark_survives_a_restart() {
             .await
         {
             Err(DaemonError::CeremonyRefused(m)) => {
-                assert!(m.contains("already fenced"), "{who}: {m}")
+                assert!(m.contains("already fenced"), "{who}: {m}");
             }
             other => panic!("{who}: a fence under a marked id must be refused, got {other:?}"),
         }
@@ -2121,7 +2120,7 @@ async fn a_same_id_guard_on_another_key_cannot_stand_in_for_the_leaders() {
             .await
         {
             Err(DaemonError::CeremonyRefused(m)) => {
-                assert!(m.contains("one ceremony id guards one key"), "{m}")
+                assert!(m.contains("one ceremony id guards one key"), "{m}");
             }
             other => panic!("a second key under the ceremony id must be refused, got {other:?}"),
         }
@@ -2249,7 +2248,10 @@ impl Rig {
     fn assert_on_epoch(&self, epoch: u64) {
         for n in &self.nodes {
             assert_eq!(n.key_epoch(KEY).unwrap().epoch, epoch);
-            assert!(n.staged_records().is_empty());
+            assert_eq!(
+                n.staged_records(),
+                [] as [rutli_cosigner::ceremony_record::CeremonyRecord; 0]
+            );
         }
     }
 }

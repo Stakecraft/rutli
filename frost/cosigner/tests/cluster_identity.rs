@@ -112,7 +112,10 @@ fn serve(config: &Path) -> (Child, Receiver<String>) {
     ] {
         let tx = tx.clone();
         std::thread::spawn(move || {
-            for line in BufReader::new(stream).lines().map_while(|l| l.ok()) {
+            for line in BufReader::new(stream)
+                .lines()
+                .map_while(std::result::Result::ok)
+            {
                 let _ = tx.send(line);
             }
         });

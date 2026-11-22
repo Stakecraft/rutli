@@ -228,7 +228,7 @@ pub fn plan(
     if live.is_empty() {
         return closed("this node lists no key files");
     }
-    if live.values().any(|i| i.is_none()) {
+    if live.values().any(std::option::Option::is_none) {
         return cap_only(
             &names,
             s,
@@ -552,7 +552,7 @@ pub fn read_dir(dir: &Path, node: u16) -> Result<Vec<Archive>, String> {
     let prefix = format!("node-{node}-");
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .map_err(|e| format!("cannot list {}: {e}", dir.display()))?
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| n.starts_with(&prefix) && n.ends_with(".tar"))
         .collect();

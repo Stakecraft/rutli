@@ -212,7 +212,7 @@ impl KeystoreHealth {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The current verdict, as Health reports it (healthy until the first probe says otherwise).
@@ -345,7 +345,7 @@ impl KeystoreHealth {
             let (s, _) = self
                 .finished
                 .wait_timeout_while(s, slice, |s| s.is_running(seq))
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if !s.is_running(seq) {
                 return; // it returned, and published before freeing the slot
             }
@@ -410,7 +410,7 @@ impl KeystoreHealth {
                 match me.start_with(true) {
                     Started::Cached(_) => {}
                     Started::InFlight { seq, since } | Started::Probing { seq, since } => {
-                        me.wait_blocking(seq, since, patience)
+                        me.wait_blocking(seq, since, patience);
                     }
                 }
                 me.kicking.store(false, Ordering::Release);
@@ -429,7 +429,7 @@ impl KeystoreHealth {
         match self.start() {
             Started::Cached(verdict) => return verdict,
             Started::InFlight { seq, since } | Started::Probing { seq, since } => {
-                self.wait_blocking(seq, since, patience)
+                self.wait_blocking(seq, since, patience);
             }
         }
         self.current()

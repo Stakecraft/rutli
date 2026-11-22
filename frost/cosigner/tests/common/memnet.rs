@@ -305,8 +305,7 @@ impl MemNet {
             .unwrap()
             .live
             .get(&format!("{from}->{authority}"))
-            .map(|l| l.load(Ordering::SeqCst))
-            .unwrap_or(0)
+            .map_or(0, |l| l.load(Ordering::SeqCst))
     }
 
     /// A connector that opens a new in-memory connection to the listener at the URI's authority.
@@ -353,7 +352,9 @@ impl tonic::codegen::Service<Uri> for MemDial {
     }
 
     fn call(&mut self, uri: Uri) -> Self::Future {
-        let authority = uri.authority().map(|a| a.to_string()).unwrap_or_default();
+        let authority = uri
+            .authority()
+            .map_or_default(std::string::ToString::to_string);
         let link = self.from.as_ref().map(|f| self.net.link(f, &authority));
         let counter = format!("{}->{authority}", self.from.as_deref().unwrap_or(""));
         let net = self.net.clone();

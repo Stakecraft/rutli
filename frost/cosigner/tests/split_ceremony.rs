@@ -535,10 +535,7 @@ async fn the_sign_test_catches_a_node_with_a_broken_secret_share() {
     ];
     let msg = rutli_frost_core::dealer::canton_test_message(b"node 1 lost");
     let r = sign(&nodes[1], &degraded, KEY, &msg).await;
-    assert!(!r
-        .as_ref()
-        .map(|s| verifies(&public, &msg, s))
-        .unwrap_or(false));
+    assert!(!r.as_ref().is_ok_and(|s| verifies(&public, &msg, s)));
 }
 
 /// Review MEDIUM-2: the sign test signs one fixed, server-computed digest, only for imported keys,

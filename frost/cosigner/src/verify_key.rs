@@ -203,12 +203,10 @@ pub fn signature_verifies(public: &[u8; 32], message: &[u8], signature: &[u8]) -
     let Ok(sig) = <[u8; 64]>::try_from(signature) else {
         return false;
     };
-    ed25519_dalek::VerifyingKey::from_bytes(public)
-        .map(|vk| {
-            vk.verify_strict(message, &ed25519_dalek::Signature::from_bytes(&sig))
-                .is_ok()
-        })
-        .unwrap_or(false)
+    ed25519_dalek::VerifyingKey::from_bytes(public).is_ok_and(|vk| {
+        vk.verify_strict(message, &ed25519_dalek::Signature::from_bytes(&sig))
+            .is_ok()
+    })
 }
 
 /// Check every node's view against the expectation and against each other. `roster` and
@@ -440,7 +438,7 @@ mod tests {
             vec![1, 2, 3],
             "the leader rotates"
         );
-        assert!(sign_test_plan(&[], 2).is_empty());
+        assert_eq!(sign_test_plan(&[], 2), [] as [(u16, std::vec::Vec<u16>); 0]);
         assert!(
             sign_test_plan(&[1, 2], 3).is_empty(),
             "a threshold above the roster has no subset"

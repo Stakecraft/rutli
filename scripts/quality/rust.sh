@@ -49,7 +49,12 @@ else
   tail -20 "$W/clippy.err" >&2
   q_null rust.clippy.warnings "cargo clippy failed"
 fi
+# pedantic, without four lints that are noise for this code base (binaries and an internal library;
+# every file name compared is one this software wrote itself): missing_errors_doc, doc_markdown,
+# must_use_candidate, case_sensitive_file_extension_comparisons. A later -A wins over -W of the group.
 if cargo clippy --workspace --all-targets --locked --message-format=json -- -W clippy::pedantic \
+  -A clippy::missing_errors_doc -A clippy::doc_markdown -A clippy::must_use_candidate \
+  -A clippy::case_sensitive_file_extension_comparisons \
   >"$W/pedantic.json" 2>"$W/pedantic.err"; then
   q_metric rust.clippy.pedantic "$(count_warnings "$W/pedantic.json")"
 else

@@ -235,8 +235,7 @@ pub fn report(
             let kind = a
                 .types
                 .get(base.unwrap_or(metric))
-                .map(String::as_str)
-                .unwrap_or("untyped");
+                .map_or("untyped", String::as_str);
             if kind == "gauge" {
                 target.gauges.insert(series.clone(), value);
                 continue;

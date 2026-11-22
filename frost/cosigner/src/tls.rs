@@ -273,7 +273,7 @@ impl PeerDial {
             let leaf = session
                 .peer_certificates()
                 .and_then(|c| c.first())
-                .map(|c| c.as_ref());
+                .map(std::convert::AsRef::as_ref);
             let seen = leaf.and_then(spki_sha256);
             if !seen.is_some_and(|h| pins.contains(&h)) {
                 metrics::counter!(crate::metrics::PEER_PIN_REFUSALS, "direction" => "outbound")
@@ -282,9 +282,7 @@ impl PeerDial {
                     .and_then(|d| x509_parser::parse_x509_certificate(d).ok())
                     .and_then(|(_, c)| subject_cn(&c))
                     .unwrap_or_else(|| "?".into());
-                let seen = seen
-                    .map(hex::encode)
-                    .unwrap_or_else(|| "(unreadable certificate)".into());
+                let seen = seen.map_or_else(|| "(unreadable certificate)".into(), hex::encode);
                 let msg = format!(
                     "peer {} presented a certificate for '{cn}' with TLS key sha256 {seen}, which is not \
                      pinned in peers[id={}].tls_spki_sha256 — a stale pin, or not that node",
