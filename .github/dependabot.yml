@@ -10,6 +10,10 @@
 #   any open advisory. Crate updates stay manual.
 # - dtolnay/rust-toolchain is pinned to a commit of a branch, which Dependabot does not follow, and
 #   the Rust version (frost/rust-toolchain.toml + frost/Dockerfile) is bumped by hand, both together.
+# - pip in scripts/quality: semgrep-requirements.txt is the output of `uv pip compile` of one semgrep
+#   version, every distribution pinned by hash. A single transitive pin bumped on its own drifts from
+#   the compiled set (opentelemetry-api 1.45 broke semgrep itself), so the file is updated by bumping
+#   `semgrep==` and recompiling, never pin by pin: the entry at the end ignores every dependency.
 # Dependabot's pull requests run CI on GitHub-hosted runners only (ci.yml `runs-on` and the runner
 # guard in deploy/ci-runner): they bring action code nobody has reviewed yet.
 version: 2
@@ -36,3 +40,14 @@ updates:
       - dependency-name: rust
     commit-message:
       prefix: build
+
+  # The semgrep lock (see the header): no pin-by-pin updates. Bump semgrep and recompile, as the
+  # header of scripts/quality/semgrep-requirements.txt says.
+  - package-ecosystem: pip
+    directory: /scripts/quality
+    schedule:
+      interval: monthly
+    ignore:
+      - dependency-name: "*"
+    commit-message:
+      prefix: ci
