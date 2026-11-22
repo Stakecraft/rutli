@@ -763,7 +763,7 @@ async fn a_push_of_another_spec_under_the_fence_is_refused() {
         .await;
     match e {
         Err(DaemonError::HostedPushRefused(m)) => {
-            assert!(m.contains("fenced here for a aes-256-gcm key"), "{m}")
+            assert!(m.contains("fenced here for a aes-256-gcm key"), "{m}");
         }
         other => panic!("expected a refusal of another spec, got {other:?}"),
     }
@@ -985,7 +985,7 @@ async fn a_mixed_cluster_refuses_a_generation_with_an_intent_before_fencing() {
     .await
     {
         Err(DaemonError::CeremonyRefused(m)) => {
-            assert!(m.contains("cosigner 3 speaks hosted-key protocol 0"), "{m}")
+            assert!(m.contains("cosigner 3 speaks hosted-key protocol 0"), "{m}");
         }
         other => panic!("expected a refusal of a mixed cluster, got {other:?}"),
     }

@@ -95,7 +95,7 @@ fn a_staged_share_is_create_once_invisible_and_promotes_only_as_told() {
     ));
     // Not a key: absent for loads, the hosted inventory and the probe still pass.
     assert!(!ks.exists("k"));
-    assert!(ks.list_hosted().unwrap().is_empty());
+    assert_eq!(ks.list_hosted().unwrap(), [] as [std::string::String; 0]);
     ks.check_readable().unwrap();
     assert!(
         ks.stage("k", "../x", &s1).is_err(),
@@ -121,12 +121,18 @@ fn a_staged_share_is_create_once_invisible_and_promotes_only_as_told() {
         ks.load("k").unwrap().pkp_digest().unwrap(),
         s1.pkp_digest().unwrap()
     );
-    assert!(ks.list_staged().unwrap().is_empty());
+    assert_eq!(
+        ks.list_staged().unwrap(),
+        [] as [(std::string::String, std::string::String); 0]
+    );
 
     ks.stage("k", "refresh-b", &share(4, 2)).unwrap();
     ks.discard_staged("k", "refresh-b").unwrap();
     ks.discard_staged("k", "refresh-b").unwrap(); // idempotent
-    assert!(ks.list_staged().unwrap().is_empty());
+    assert_eq!(
+        ks.list_staged().unwrap(),
+        [] as [(std::string::String, std::string::String); 0]
+    );
 }
 
 #[test]

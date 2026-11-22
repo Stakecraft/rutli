@@ -110,24 +110,21 @@ impl PeerApi for Intruder {
                     *id,
                     "round2",
                     r2.err()
-                        .map(|e| format!("{e:?}"))
-                        .unwrap_or_else(|| "signed".into()),
+                        .map_or_else(|| "signed".into(), |e| format!("{e:?}")),
                 ));
                 answers.push((
                     *id,
                     "abort",
                     abort
                         .err()
-                        .map(|e| format!("{e:?}"))
-                        .unwrap_or_else(|| "ok".into()),
+                        .map_or_else(|| "ok".into(), |e| format!("{e:?}")),
                 ));
                 answers.push((
                     *id,
                     "round1",
                     squat
                         .err()
-                        .map(|e| format!("{e:?}"))
-                        .unwrap_or_else(|| "opened".into()),
+                        .map_or_else(|| "opened".into(), |e| format!("{e:?}")),
                 ));
             }
         }

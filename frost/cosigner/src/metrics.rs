@@ -894,7 +894,7 @@ mod tests {
                     .find(|(l, _)| labels.iter().all(|(k, v)| l.get(k) == Some(v)));
                 match found {
                     Some((_, value)) => {
-                        assert_eq!(value, "0", "{name}{labels:?} is not primed at 0:\n{out}")
+                        assert_eq!(value, "0", "{name}{labels:?} is not primed at 0:\n{out}");
                     }
                     None => panic!("{name}{labels:?} is not primed:\n{out}"),
                 }
@@ -1044,7 +1044,7 @@ mod tests {
             each(
                 callee,
                 Box::new(|lit, what| {
-                    assert!(list.contains(&lit), "{what}: {lit:?} is not in {list:?}")
+                    assert!(list.contains(&lit), "{what}: {lit:?} is not in {list:?}");
                 }),
             );
         }

@@ -1024,6 +1024,14 @@ impl Config {
         if self.peers.is_empty() {
             return Err(Config("peer roster is empty".into()));
         }
+        // `max_signers()` is the roster size as a u16.
+        if self.peers.len() > usize::from(u16::MAX) {
+            return Err(Config(format!(
+                "the peer roster lists {} nodes, at most {} are supported",
+                self.peers.len(),
+                u16::MAX
+            )));
+        }
         // A roster is a set. A repeated identifier would make `max_signers` and the threshold
         // check count a node twice, and a repeated endpoint would send two rounds to one node (the
         // second fails with UnknownSession and the quorum is silently one short).
@@ -1074,8 +1082,7 @@ impl Config {
             && self
                 .signer_allowlist
                 .as_ref()
-                .map(|a| a.is_empty())
-                .unwrap_or(true)
+                .is_none_or(std::vec::Vec::is_empty)
         {
             return Err(Config(
                 "signer_allowlist must be set (non-empty) when tls is enabled — list the driver \
@@ -1091,8 +1098,7 @@ impl Config {
             && self
                 .peer_allowlist
                 .as_ref()
-                .map(|a| a.is_empty())
-                .unwrap_or(true)
+                .is_none_or(std::vec::Vec::is_empty)
         {
             return Err(Config(
                 "peer_allowlist must be set (non-empty) when tls is enabled — list the cosigner \
@@ -1218,11 +1224,7 @@ impl Config {
                 }
             }
         }
-        let hosted_on = self
-            .hosted_keys
-            .as_ref()
-            .map(|h| h.enabled)
-            .unwrap_or(false);
+        let hosted_on = self.hosted_keys.as_ref().is_some_and(|h| h.enabled);
         if let Some(h) = &self.hosted_keys {
             h.commitment_key_bytes()?;
         }
@@ -1261,11 +1263,7 @@ impl Config {
                         .into(),
                 ));
             }
-            let q = self
-                .hosted_keys
-                .as_ref()
-                .map(|h| h.write_quorum)
-                .unwrap_or(2);
+            let q = self.hosted_keys.as_ref().map_or(2, |h| h.write_quorum);
             if q < 1 || q > self.max_signers() as usize {
                 return Err(Config(format!(
                     "hosted_keys.write_quorum {q} out of range 1..={}",
@@ -1288,7 +1286,7 @@ impl Config {
                 .clone()
                 .unwrap_or_default()
                 .into_iter()
-                .chain(self.peers.iter().map(|p| p.client_cn()))
+                .chain(self.peers.iter().map(PeerConfig::client_cn))
                 .collect();
             if let Some(cn) = h.delete_allowlist.iter().find(|cn| cosigners.contains(*cn)) {
                 return Err(Config(format!(
@@ -1797,6 +1795,21 @@ mod tests {
     }
 
     #[test]
+    fn a_roster_too_large_for_a_u16_is_rejected() {
+        let mut c = base(None, None);
+        c.peers = (0..=u16::MAX)
+            .map(|i| PeerConfig {
+                identifier: i,
+                endpoint: format!("http://127.0.0.1:{i}"),
+                ..c.peers[0].clone()
+            })
+            .collect();
+        assert!(c.peers.len() > usize::from(u16::MAX));
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("at most 65535"), "{e}");
+    }
+
+    #[test]
     fn duplicate_peer_identifiers_are_rejected() {
         let mut c = base(None, None);
         c.peers[2].identifier = 2;
@@ -2048,7 +2061,7 @@ mod hosted_config_tests {
         assert!(e.contains("exceeds the 0 configured"), "{e}");
         // Defaults: deletes off, 7 days of grace.
         let parsed: HostedKeysConfig = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
-        assert!(parsed.delete_allowlist.is_empty());
+        assert_eq!(parsed.delete_allowlist, [] as [std::string::String; 0]);
         assert_eq!(parsed.delete_grace_secs, 7 * 86_400);
     }
 
@@ -2394,7 +2407,7 @@ mod strict_parse_tests {
     fn pinned(mut c: Config, pins: &[(u16, &[&str])]) -> Config {
         for (id, list) in pins {
             let p = c.peers.iter_mut().find(|p| p.identifier == *id).unwrap();
-            p.tls_spki_sha256 = Some(list.iter().map(|h| h.to_string()).collect());
+            p.tls_spki_sha256 = Some(list.iter().map(std::string::ToString::to_string).collect());
         }
         c
     }

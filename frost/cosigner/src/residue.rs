@@ -217,15 +217,9 @@ impl Report {
                 "[finding] {}: {} key={} epoch={} dek={}\n",
                 f.class.as_str(),
                 printable(&f.path),
-                f.key_id
-                    .as_deref()
-                    .map(printable)
-                    .unwrap_or_else(|| "-".into()),
-                f.epoch.map(|e| e.to_string()).unwrap_or_else(|| "-".into()),
-                f.dek
-                    .as_deref()
-                    .map(printable)
-                    .unwrap_or_else(|| "-".into()),
+                f.key_id.as_deref().map_or_else(|| "-".into(), printable),
+                f.epoch.map_or_else(|| "-".into(), |e| e.to_string()),
+                f.dek.as_deref().map_or_else(|| "-".into(), printable),
             ));
             if let Some(n) = f.note {
                 out.push_str(&format!("          {n}\n"));
@@ -373,7 +367,7 @@ fn inspect(bytes: &[u8], input: &ScanInput<'_>) -> Option<KeyInfo> {
                 Some(s) => match s.trial_open_v1_current(bytes) {
                     Some(plain) => {
                         let p = serde_json::from_slice::<Probe>(&plain).ok();
-                        let kind = p.as_ref().and_then(|p| p.record_kind()).map(str::to_string);
+                        let kind = p.as_ref().and_then(Probe::record_kind).map(str::to_string);
                         // A FROST share without the field is epoch 0.
                         let epoch = p.as_ref().map(|p| p.epoch.unwrap_or(0));
                         (kind, epoch, Some(s.current_dek_id()), Some(DekUse::Current))
@@ -653,7 +647,7 @@ impl<'a> Scan<'a> {
         match info.kind.as_deref() {
             Some("tombstone") => self.finding(Class::Tombstone, path, key_id, Some(&info)),
             Some("hosted-key") if place != Place::Live => {
-                self.finding(Class::HostedCopy, path, key_id, Some(&info))
+                self.finding(Class::HostedCopy, path, key_id, Some(&info));
             }
             Some("recipient") => self.finding(Class::CeremonyMaterial, path, key_id, Some(&info)),
             Some("frost-share") if place == Place::Copy => {
@@ -662,7 +656,7 @@ impl<'a> Scan<'a> {
                     None => self.finding(Class::NotLiveKey, path, key_id, Some(&info)),
                     Some(l) => match (info.epoch, l.epoch) {
                         (Some(c), Some(e)) if c < e => {
-                            self.finding(Class::OlderEpoch, path, key_id, Some(&info))
+                            self.finding(Class::OlderEpoch, path, key_id, Some(&info));
                         }
                         (Some(c), Some(e)) if c > e => self.unclassified(
                             path,
@@ -672,10 +666,10 @@ impl<'a> Scan<'a> {
                     },
                 }
             }
-            Some("hosted-key") | Some("frost-share") => {}
+            Some("hosted-key" | "frost-share") => {}
             Some(other) => self.unclassified(path, format!("unknown record kind {other:?}")),
             None if info.dek_use == Some(DekUse::Current) => {
-                self.unclassified(path, "opens with the current DEK but is not a known record")
+                self.unclassified(path, "opens with the current DEK but is not a known record");
             }
             // A v1 file the current DEK does not open: its kind is unknown, already reported.
             None => {}
@@ -686,8 +680,7 @@ impl<'a> Scan<'a> {
     fn file(&mut self, path: &Path, place: Place) {
         let name = path
             .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+            .map_or_default(|n| n.to_string_lossy().into_owned());
         match read_capped(path) {
             Got::Bytes(b) => self.classify(Self::path_str(path), &name, &b, place),
             Got::TooLarge => {
@@ -695,7 +688,7 @@ impl<'a> Scan<'a> {
                     self.unclassified(
                         Self::path_str(path),
                         format!("larger than {MAX_FILE} bytes; not read"),
-                    )
+                    );
                 }
             }
             Got::Vanished => self.vanished(Self::path_str(path)),
@@ -829,7 +822,7 @@ impl<'a> Scan<'a> {
                 // Removed meanwhile: that ceremony is no longer open.
                 Got::Vanished => self.vanished(Self::path_str(&e.path())),
                 Got::TooLarge | Got::NotRegular(_) => {
-                    self.unclassified(Self::path_str(&e.path()), "not a readable ceremony record")
+                    self.unclassified(Self::path_str(&e.path()), "not a readable ceremony record");
                 }
                 Got::Error(err) => self.error(Self::path_str(&e.path()), err),
             }
@@ -1000,7 +993,7 @@ impl<'a> Scan<'a> {
                 ("lost+found", true) => match std::fs::read_dir(&path) {
                     Ok(mut rd) => match rd.next() {
                         Some(Ok(_)) => {
-                            self.finding(Class::LostFound, Self::path_str(&path), None, None)
+                            self.finding(Class::LostFound, Self::path_str(&path), None, None);
                         }
                         Some(Err(e)) => self.error(Self::path_str(&path), e.to_string()),
                         None => {}
@@ -1058,8 +1051,7 @@ impl<'a> Scan<'a> {
             Ok(false) => {
                 let name = path
                     .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+                    .map_or_default(|n| n.to_string_lossy().into_owned());
                 let before = self.findings.len() + self.unclassified.len();
                 let got = match f.seek(SeekFrom::Start(0)) {
                     Ok(_) => read_open(f),
@@ -1106,10 +1098,10 @@ impl<'a> Scan<'a> {
     fn tar_open(&mut self, f: std::fs::File, shown: String) {
         let res = read_tar(f, &shown, |item| match item {
             TarItem::Entry { shown, base, bytes } => {
-                self.classify(shown, &base, &bytes, Place::Copy)
+                self.classify(shown, &base, &bytes, Place::Copy);
             }
             TarItem::TooLarge { shown } => {
-                self.unclassified(shown, format!("larger than {MAX_FILE} bytes; not read"))
+                self.unclassified(shown, format!("larger than {MAX_FILE} bytes; not read"));
             }
         });
         if let Err(e) = res {
@@ -1149,7 +1141,7 @@ fn tar_num(field: &[u8]) -> Option<u64> {
         let mut v: u64 = 0;
         for (i, b) in field.iter().enumerate() {
             let b = if i == 0 { b & 0x7f } else { *b };
-            v = v.checked_mul(256)?.checked_add(b as u64)?;
+            v = v.checked_mul(256)?.checked_add(u64::from(b))?;
         }
         return Some(v);
     }
@@ -1222,7 +1214,7 @@ fn read_tar(
                 if (148..156).contains(&i) {
                     32
                 } else {
-                    *b as u64
+                    u64::from(*b)
                 }
             })
             .sum();
@@ -1372,7 +1364,10 @@ pub fn scan(input: &ScanInput<'_>) -> Report {
             });
         }
     }
-    let mut not_checked: Vec<String> = NOT_CHECKED.iter().map(|s| s.to_string()).collect();
+    let mut not_checked: Vec<String> = NOT_CHECKED
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     if input.legacy_dek.is_none() && input.config_names_secret_env {
         not_checked.push(
             "legacy-master check not done: the config names share_seal.secret_env; pass \

@@ -107,7 +107,10 @@ impl Daemon {
         let stdout = child.stdout.take().unwrap();
         let (tx, lines) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
+            for line in BufReader::new(stdout)
+                .lines()
+                .map_while(std::result::Result::ok)
+            {
                 let _ = tx.send(line);
             }
         });

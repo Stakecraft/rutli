@@ -310,9 +310,7 @@ impl Ctx {
             Err(e) => return (Err(e), begun.elapsed()),
         };
         let channel = endpoint.connect().await.map_err(|e| {
-            let source = std::error::Error::source(&e)
-                .map(|s| format!(": {s}"))
-                .unwrap_or_default();
+            let source = std::error::Error::source(&e).map_or_default(|s| format!(": {s}"));
             format!("{e}{source}")
         });
         (channel.map(SignerClient::new), begun.elapsed())
@@ -695,7 +693,9 @@ impl Run {
                         return Some(format!("a group key of {} bytes", key.len()));
                     }
                     if *same_key {
-                        let mut first = first_key.lock().unwrap_or_else(|p| p.into_inner());
+                        let mut first = first_key
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         if first.get_or_insert_with(|| key.to_vec()).as_slice() != key {
                             return Some(
                                 "two DKGs of one key id answered different group keys".to_string(),
@@ -809,7 +809,7 @@ impl Run {
         };
         self.recorder
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .record(outcome, message);
     }
 }
@@ -950,7 +950,7 @@ async fn generate(run: Arc<Run>, load: &Load) -> Result<stats::ClientReport, Fai
                 Err(_) => run
                     .recorder
                     .lock()
-                    .unwrap_or_else(|p| p.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .saturated(),
             }
             seq += 1;
@@ -977,7 +977,12 @@ async fn generate(run: Arc<Run>, load: &Load) -> Result<stats::ClientReport, Fai
     }
 
     let wall = started.elapsed();
-    let recorder = std::mem::take(&mut *run.recorder.lock().unwrap_or_else(|p| p.into_inner()));
+    let recorder = std::mem::take(
+        &mut *run
+            .recorder
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
     let mut report = recorder.report(wall);
     report.connect = connect_report;
     sampler.abort();
@@ -1554,7 +1559,7 @@ async fn list_keys(
         }
         let ok = t.calls - t.errors;
         if ok > 0 {
-            t.mean_ms = (total.as_secs_f64() * 1000.0 / ok as f64 * 1000.0).round() / 1000.0;
+            t.mean_ms = (total.as_secs_f64() * 1000.0 / f64::from(ok) * 1000.0).round() / 1000.0;
         }
         t.max_ms = (t.max_ms * 1000.0).round() / 1000.0;
         out.targets.insert(name.clone(), t);

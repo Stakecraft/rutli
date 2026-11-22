@@ -244,7 +244,7 @@ async fn an_ec_key_is_not_created_while_a_peer_does_not_report_the_spec() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, _) = hosted_cluster(&tmp);
     let old = node_without_ec(&tmp, 3);
-    assert!(old.hosted_specs().is_empty());
+    assert_eq!(old.hosted_specs(), [] as [std::string::String; 0]);
     let peers: Peers = vec![
         Arc::new(LocalPeer::new(nodes[0].clone())) as Arc<dyn PeerApi>,
         Arc::new(LocalPeer::new(nodes[1].clone())),
@@ -647,7 +647,7 @@ async fn hosted_views(
                 key_id: key_id.into(),
             }))
             .await
-            .map(|r| r.into_inner())
+            .map(tonic::Response::into_inner)
             .map_err(|s| format!("{:?}: {}", s.code(), s.message()));
         views.push(rutli_cosigner::verify_hosted::HostedView {
             identifier: i as u16 + 1,

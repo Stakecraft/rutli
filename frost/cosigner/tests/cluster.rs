@@ -239,7 +239,7 @@ async fn plaintext_shares_are_refused_under_sealing_until_migrated_explicitly() 
 
     ks.migrate_plaintext(KEY_ID).unwrap();
     assert!(Sealer::is_sealed(&std::fs::read(&share_path).unwrap()));
-    assert!(ks.plaintext_files().unwrap().is_empty());
+    assert_eq!(ks.plaintext_files().unwrap(), [] as [std::path::PathBuf; 0]);
 
     // Share still loads under the same group key.
     let n = Node::new(Identifier::try_from(1u16).unwrap(), N, T, ks);
@@ -569,7 +569,10 @@ async fn refresh_carries_a_dealt_keys_origin_and_counts_refreshes() {
                 ..origin.clone()
             }
         );
-        assert!(ks.dealt_keys_never_refreshed().unwrap().is_empty());
+        assert_eq!(
+            ks.dealt_keys_never_refreshed().unwrap(),
+            [] as [std::string::String; 0]
+        );
     }
     // A DKG key stays origin-less through a refresh.
     run_dkg(&peers, KEY_ID).await.unwrap();
@@ -1979,7 +1982,7 @@ async fn key_show_views(
         let view = rutli_cosigner::verify_key::NodeView {
             identifier: id,
             endpoint: endpoint.clone(),
-            status: status.map(|r| r.into_inner()).map_err(text),
+            status: status.map(tonic::Response::into_inner).map_err(text),
         };
         frost.push(view);
         let request = pb::HostedKeyStatusRequest {
@@ -1989,7 +1992,7 @@ async fn key_show_views(
         hosted.push(rutli_cosigner::verify_hosted::HostedView {
             identifier: id,
             endpoint,
-            status: status.map(|r| r.into_inner()).map_err(text),
+            status: status.map(tonic::Response::into_inner).map_err(text),
         });
     }
     (frost, hosted)
