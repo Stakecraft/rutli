@@ -131,23 +131,22 @@ async fn accept_loop<L: Listener>(
     let mut full = Throttle::default();
     let mut failing = Throttle::default();
     loop {
-        let slot = match Arc::clone(&slots).try_acquire_owned() {
-            Ok(slot) => slot,
-            Err(_) => {
-                if let Some(waited) = full.due() {
-                    tracing::warn!(
-                        limit,
-                        times = waited,
-                        "gRPC connection limit reached; new connections wait in the listen backlog until one closes"
-                    );
-                }
-                tokio::select! {
-                    slot = Arc::clone(&slots).acquire_owned() => match slot {
-                        Ok(slot) => slot,
-                        Err(_) => return, // never closed
-                    },
-                    () = tx.closed() => return,
-                }
+        let slot = if let Ok(slot) = Arc::clone(&slots).try_acquire_owned() {
+            slot
+        } else {
+            if let Some(waited) = full.due() {
+                tracing::warn!(
+                    limit,
+                    times = waited,
+                    "gRPC connection limit reached; new connections wait in the listen backlog until one closes"
+                );
+            }
+            tokio::select! {
+                slot = Arc::clone(&slots).acquire_owned() => match slot {
+                    Ok(slot) => slot,
+                    Err(_) => return, // never closed
+                },
+                () = tx.closed() => return,
             }
         };
         let accepted = tokio::select! {
@@ -425,13 +424,12 @@ mod tests {
         type Io = DuplexStream;
         async fn accept(&self) -> io::Result<DuplexStream> {
             let next = self.0.lock().unwrap().pop_front();
-            match next {
-                Some(r) => r,
-                None => {
-                    let (server, client) = tokio::io::duplex(64);
-                    self.1.lock().unwrap().push(client);
-                    Ok(server)
-                }
+            if let Some(r) = next {
+                r
+            } else {
+                let (server, client) = tokio::io::duplex(64);
+                self.1.lock().unwrap().push(client);
+                Ok(server)
             }
         }
     }

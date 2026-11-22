@@ -556,7 +556,7 @@ async fn fetch_key_identifies_the_caller_by_an_exact_cn_only() {
     let allowed: Arc<HashSet<String>> = Arc::new(
         (1..=N)
             .map(|i| format!("cosigner{i}"))
-            .chain(odd.iter().map(|s| s.to_string()))
+            .chain(odd.iter().map(std::string::ToString::to_string))
             .collect(),
     );
     let peer = PeerSvc {
@@ -630,7 +630,10 @@ async fn dkg_and_refresh_commit_on_every_node_over_mtls_grpc() {
         let v = n.key_epoch(key).unwrap();
         assert_eq!((v.epoch, v.staged), (3, false), "DKG then two refreshes");
         assert_eq!(v.pkp_digest, digest);
-        assert!(n.staged_records().is_empty());
+        assert_eq!(
+            n.staged_records(),
+            [] as [rutli_cosigner::ceremony_record::CeremonyRecord; 0]
+        );
     }
     // A retried DKG returns the committed key (M5).
     assert_eq!(
@@ -670,7 +673,7 @@ async fn a_round2_delivery_under_another_nodes_identity_is_refused_over_mtls() {
         .unwrap_err();
     match err {
         rutli_cosigner::DaemonError::Status(s) => {
-            assert_eq!(s.code(), tonic::Code::PermissionDenied, "{s:?}")
+            assert_eq!(s.code(), tonic::Code::PermissionDenied, "{s:?}");
         }
         other => panic!("{other:?}"),
     }
@@ -680,7 +683,7 @@ async fn a_round2_delivery_under_another_nodes_identity_is_refused_over_mtls() {
         .unwrap_err()
     {
         rutli_cosigner::DaemonError::Status(s) => {
-            assert_eq!(s.code(), tonic::Code::NotFound, "{s:?}")
+            assert_eq!(s.code(), tonic::Code::NotFound, "{s:?}");
         }
         other => panic!("{other:?}"),
     }
@@ -948,7 +951,7 @@ async fn epoch_refusals_and_session_binding_hold_over_mtls_grpc() {
         .unwrap_err()
     {
         DaemonError::EpochMismatch { peer, leader, .. } => {
-            assert_eq!((peer, leader), (view2, wrong.leader_view.unwrap()))
+            assert_eq!((peer, leader), (view2, wrong.leader_view.unwrap()));
         }
         other => panic!("expected EpochMismatch over gRPC, got {other:?}"),
     }

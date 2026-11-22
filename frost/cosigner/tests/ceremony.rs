@@ -1029,8 +1029,7 @@ async fn equivocate(
         digests.push(
             p.ceremony_part2(&ceremony_id, &shown)
                 .await
-                .map(|o| o.round1_digest)
-                .unwrap_or([0u8; 32]),
+                .map_or([0u8; 32], |o| o.round1_digest),
         );
     }
     for (i, p) in rig.peers.iter().enumerate() {
@@ -1330,11 +1329,7 @@ async fn a_flood_of_unknown_ceremony_ids_is_bounded_per_peer_and_in_total() {
     let rig = Rig::build(std::time::Duration::from_secs(900), Some((3, 5)));
     let target = &rig.nodes[0];
     let records_dir = target.key_store_dir().join(".ceremonies");
-    let count_files = || {
-        std::fs::read_dir(&records_dir)
-            .map(|d| d.count())
-            .unwrap_or(0)
-    };
+    let count_files = || std::fs::read_dir(&records_dir).map_or(0, std::iter::Iterator::count);
     // Node 2 floods node 1 through its mesh handle (asks as `cosigner2`).
     let as_node2 = rig.nodes[1].mesh_peer(1).unwrap();
     let mut answered = 0;

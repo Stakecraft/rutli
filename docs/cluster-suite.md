@@ -90,11 +90,13 @@ of what each step tells for its cost:
    afterwards: 100 writes with `O_DSYNC` (the device), and 50 rounds of what one released share
    does (append a line and `fdatasync`, create a file and `fsync` it, `fsync` its directory), with
    the shell's own cost subtracted: milliseconds per share on each node. A leader signs with itself
-   and the lowest other identifier ("leader first, then by identifier"), so with requests spread
-   evenly over the leaders, cosigner 1 releases a share for every signature, cosigner 2 for two
-   thirds and cosigner 3 for one third. The lowest of `1000 / (ms × fraction)` over the nodes is
-   what the flushes alone would allow (`predicted_ceiling_signs_per_sec`), an upper bound to hold
-   against the measured plateau.
+   and the `t - 1` cosigners after an offset that a hash of the request id picks among the others,
+   so with requests spread evenly over the leaders, every cosigner releases a share for `t / n` of
+   the signatures: two thirds each in a 2-of-3 cluster (cosigners before 0.5.0 signed with the
+   lowest other identifier, so cosigner 1 served every signature). The lowest of
+   `1000 / (ms × fraction)` over the nodes is what the flushes alone would allow
+   (`predicted_ceiling_signs_per_sec`): the slowest volume sets it. An upper bound to hold against
+   the measured plateau.
 2. **Fine ramp around the knee** (`diagnose.factors` of the profile, `step_secs` each), signing only
    unless `diagnose.with_ecdh` is set, spread over every load generator pod. Readings bracket the
    middle of each step (not the generators' start and end). Per step and per container, from

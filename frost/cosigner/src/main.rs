@@ -3,6 +3,7 @@
 
 //! Rütli FROST cosigner daemon entrypoint.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
 #![allow(clippy::result_large_err)]
 
 use std::sync::Arc;
@@ -873,31 +874,26 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(|s| rutli_cosigner::seal::SealKeys::load(s, cfg.identifier))
         .transpose()?;
-    let sealer = match &seal_keys {
-        Some(keys) => {
-            match keys {
-                rutli_cosigner::seal::SealKeys::Bundle { bundle, .. } => tracing::info!(
-                    source = %keys.describe(),
-                    "share sealing enabled (bundle node={}) — AES-256-GCM at rest",
-                    bundle.node
-                ),
-                rutli_cosigner::seal::SealKeys::LegacyMaster { .. } => tracing::warn!(
-                    source = %keys.describe(),
-                    "share sealing enabled from the legacy SHARED master (share_seal.secret_env) — \
-                     whoever can read that one secret can derive every node's DEK; migrate to \
-                     per-node seal bundles (share_seal.secret_file, docs/runbook-per-node-seal.md)"
-                ),
-            }
-            Some(Arc::new(
-                keys.sealer(cfg.identifier).with_keyfile(&cfg.keyfile),
-            ))
+    let sealer = if let Some(keys) = &seal_keys {
+        match keys {
+            rutli_cosigner::seal::SealKeys::Bundle { bundle, .. } => tracing::info!(
+                source = %keys.describe(),
+                "share sealing enabled (bundle node={}) — AES-256-GCM at rest",
+                bundle.node
+            ),
+            rutli_cosigner::seal::SealKeys::LegacyMaster { .. } => tracing::warn!(
+                source = %keys.describe(),
+                "share sealing enabled from the legacy SHARED master (share_seal.secret_env) — \
+                 whoever can read that one secret can derive every node's DEK; migrate to \
+                 per-node seal bundles (share_seal.secret_file, docs/runbook-per-node-seal.md)"
+            ),
         }
-        None => {
-            tracing::warn!(
-                "share sealing DISABLED — key shares stored as plaintext JSON (dev only)"
-            );
-            None
-        }
+        Some(Arc::new(
+            keys.sealer(cfg.identifier).with_keyfile(&cfg.keyfile),
+        ))
+    } else {
+        tracing::warn!("share sealing DISABLED — key shares stored as plaintext JSON (dev only)");
+        None
     };
 
     let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), sealer)?;
@@ -1196,7 +1192,7 @@ async fn main() -> Result<()> {
     // Cluster-hosted (non-FROST) keys. The wrapping key comes from the same seal keys as the at-rest
     // DEK, so hosted keys require share_seal (enforced by config validation) — a hosted key is a
     // whole private key and must never sit unsealed on disk.
-    if cfg.hosted_keys.as_ref().map(|h| h.enabled).unwrap_or(false) {
+    if cfg.hosted_keys.as_ref().is_some_and(|h| h.enabled) {
         let keys = seal_keys.as_ref().expect("validate() requires share_seal");
         // Bind envelopes to this trust domain (the pinned `cluster_id`, else derived from the CA
         // cert), so an envelope can never be replayed into a different deployment. Peers are known
@@ -1265,12 +1261,13 @@ async fn main() -> Result<()> {
                 .collect::<std::collections::HashSet<String>>(),
         )
     });
-    match &allowed_cns {
-        Some(cns) => tracing::info!(?cns, "Signer API restricted to allowlisted client CNs"),
-        None => tracing::warn!(
+    if let Some(cns) = &allowed_cns {
+        tracing::info!(?cns, "Signer API restricted to allowlisted client CNs")
+    } else {
+        tracing::warn!(
             "Signer API has no client allowlist — any cluster-CA cert may request signatures; \
-             set signer_allowlist (e.g. the driver cert CN) in production"
-        ),
+         set signer_allowlist (e.g. the driver cert CN) in production"
+        )
     }
 
     let peer_cns = cfg.peer_allowlist.as_ref().map(|v| {
@@ -1280,13 +1277,14 @@ async fn main() -> Result<()> {
                 .collect::<std::collections::HashSet<String>>(),
         )
     });
-    match &peer_cns {
-        Some(cns) => tracing::info!(?cns, "mesh Peer API restricted to allowlisted cosigner CNs"),
-        None => tracing::warn!(
+    if let Some(cns) = &peer_cns {
+        tracing::info!(?cns, "mesh Peer API restricted to allowlisted cosigner CNs")
+    } else {
+        tracing::warn!(
             "Peer API has no client allowlist — any cluster-CA cert (including the driver's) may \
-             drive the raw FROST rounds and could aggregate a signature over an arbitrary message; \
-             set peer_allowlist (the cosigner cert CNs) in production"
-        ),
+         drive the raw FROST rounds and could aggregate a signature over an arbitrary message; \
+         set peer_allowlist (the cosigner cert CNs) in production"
+        )
     }
     let operator_cns = cfg.operator_allowlist.as_ref().map(|v| {
         Arc::new(
@@ -1348,7 +1346,7 @@ async fn main() -> Result<()> {
                     {
                         Ok(0) => {}
                         Ok(pulled) => {
-                            tracing::info!(pulled, "anti-entropy pulled missing hosted keys")
+                            tracing::info!(pulled, "anti-entropy pulled missing hosted keys");
                         }
                         Err(e) => tracing::warn!(error = %e, "anti-entropy sweep failed"),
                     }
@@ -1360,13 +1358,13 @@ async fn main() -> Result<()> {
     let hosted_write_quorum = cfg
         .hosted_keys
         .as_ref()
-        .map(|h| h.write_quorum)
-        .unwrap_or(rutli_cosigner::orchestrator::DEFAULT_WRITE_QUORUM);
-    let decrypt_limit = cfg
-        .hosted_keys
-        .as_ref()
-        .map(|h| h.decrypt_rate_limit_per_min)
-        .unwrap_or(rutli_cosigner::config::DEFAULT_DECRYPT_RATE_LIMIT_PER_MIN);
+        .map_or(rutli_cosigner::orchestrator::DEFAULT_WRITE_QUORUM, |h| {
+            h.write_quorum
+        });
+    let decrypt_limit = cfg.hosted_keys.as_ref().map_or(
+        rutli_cosigner::config::DEFAULT_DECRYPT_RATE_LIMIT_PER_MIN,
+        |h| h.decrypt_rate_limit_per_min,
+    );
     if decrypt_limit == 0 {
         tracing::warn!(
             "hosted-key decryption rate limiting is DISABLED — a stolen driver certificate can \
@@ -1546,8 +1544,7 @@ fn log_core_dumps(d: &rutli_cosigner::process_hardening::CoreDumps) {
     let pattern = d.core_pattern.as_deref().unwrap_or("unknown");
     let suid = d
         .suid_dumpable
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "unknown".into());
+        .map_or_else(|| "unknown".into(), |v| v.to_string());
     let linux = cfg!(target_os = "linux");
     if d.all_applied() && !d.may_dump() {
         tracing::info!(
@@ -1606,7 +1603,7 @@ fn log_profile(cfg: &Config) {
         match (f.level, cfg.profile) {
             (Level::Advisory, _) => tracing::warn!("production profile, advisory: {f}"),
             (Level::Required, Some(Profile::Lab)) => {
-                tracing::info!("production profile, not met: {f}")
+                tracing::info!("production profile, not met: {f}");
             }
             (Level::Required, _) => tracing::warn!("production profile, not met: {f}"),
         }
@@ -1720,7 +1717,7 @@ async fn ceremony_recover_commit_command(cfg: &Config, ceremony_id: &str) -> Res
     let rec = node.ceremony_record(ceremony_id);
     println!(
         "ceremony {ceremony_id} ({}): {} on this node (recovered from a quarantined abort); start the daemon",
-        rec.map(|r| format!("{} of {}, epoch {}", r.kind, r.key_id, r.new_epoch)).unwrap_or_default(),
+        rec.map_or_default(|r| format!("{} of {}, epoch {}", r.kind, r.key_id, r.new_epoch)),
         info.phase.as_str()
     );
     Ok(())
@@ -1843,7 +1840,7 @@ async fn refresh_command(
             };
             let roster = cfg.peers.iter().find(|p| same(&p.endpoint, &endpoint));
             let name = tls_server_name
-                .or_else(|| roster.map(|p| p.server_name()))
+                .or_else(|| roster.map(rutli_cosigner::config::PeerConfig::server_name))
                 .or_else(|| tls_cfg.domain.clone())
                 .ok_or_else(|| {
                     DaemonError::Config(format!(
@@ -1864,8 +1861,8 @@ async fn refresh_command(
     // client presents, so every cosigner can check that a refresher (or, while signer_may_refresh,
     // the driver) asked for exactly this refresh — and the leader that it is this connection's.
     let intent = match &cfg.tls {
-        Some(t) => match refresh_cluster_id(cfg).await {
-            Some(cluster) => {
+        Some(t) => {
+            if let Some(cluster) = refresh_cluster_id(cfg).await {
                 let signer = rutli_cosigner::request_auth::NodeSigner::from_files(&t.cert, &t.key)?;
                 let request_id = rutli_cosigner::intent::new_request_id();
                 let intent = rutli_cosigner::intent::ceremony_intent(
@@ -1885,16 +1882,15 @@ async fn refresh_command(
                     t.cert.display()
                 );
                 Some(rutli_cosigner::intent::sign_intent(&signer, &intent)?)
-            }
-            None => {
+            } else {
                 tracing::warn!(
-                    "no cluster id: cluster_id is not set in this config and the roster does not agree \
-                     on one (Capabilities) — refreshing WITHOUT a ceremony intent; cosigners with \
-                     signing_policy.require_ceremony_intent refuse it"
-                );
+                "no cluster id: cluster_id is not set in this config and the roster does not agree \
+                 on one (Capabilities) — refreshing WITHOUT a ceremony intent; cosigners with \
+                 signing_policy.require_ceremony_intent refuse it"
+            );
                 None
             }
-        },
+        }
         None => None,
     };
     tracing::info!(%endpoint, %key_id, intent = intent.is_some(), "triggering proactive share refresh");
@@ -2131,7 +2127,7 @@ async fn verify_hosted_command(
                     key_id: key_id.to_string(),
                 })
                 .await
-                .map(|r| r.into_inner())
+                .map(tonic::Response::into_inner)
                 .map_err(|s| status_text(&s)),
             Err(e) => Err(format!("unreachable: {}", error_chain(&e))),
         };
@@ -2259,26 +2255,22 @@ async fn operator_channel(
             None => ep,
         }
     };
-    let pins = roster.map(|p| p.tls_spki_pins()).transpose()?.flatten();
-    match pins {
-        Some(pins) => {
-            let dial = tls.dial_as(
-                server_name,
-                Some(pins),
-                roster.map(|p| p.identifier).unwrap_or(0),
-            )?;
-            Ok(deadline(dial.endpoint(endpoint)?)
-                .connect_with_connector(dial.connector())
-                .await?)
-        }
-        None => {
-            let ep = tonic::transport::Endpoint::from_shared(endpoint.to_string())
-                .map_err(|e| DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?;
-            Ok(deadline(ep)
-                .tls_config(tls.client_for(server_name))?
-                .connect()
-                .await?)
-        }
+    let pins = roster
+        .map(rutli_cosigner::config::PeerConfig::tls_spki_pins)
+        .transpose()?
+        .flatten();
+    if let Some(pins) = pins {
+        let dial = tls.dial_as(server_name, Some(pins), roster.map_or(0, |p| p.identifier))?;
+        Ok(deadline(dial.endpoint(endpoint)?)
+            .connect_with_connector(dial.connector())
+            .await?)
+    } else {
+        let ep = tonic::transport::Endpoint::from_shared(endpoint.to_string())
+            .map_err(|e| DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?;
+        Ok(deadline(ep)
+            .tls_config(tls.client_for(server_name))?
+            .connect()
+            .await?)
     }
 }
 
@@ -2289,7 +2281,7 @@ fn log_peer_pins(cfg: &Config) {
     for p in &cfg.peers {
         match &p.tls_spki_sha256 {
             Some(pins) => {
-                tracing::info!(peer = p.identifier, cn = %p.client_cn(), ?pins, "peer {} TLS key pins", p.identifier)
+                tracing::info!(peer = p.identifier, cn = %p.client_cn(), ?pins, "peer {} TLS key pins", p.identifier);
             }
             None => unpinned.push(p.identifier),
         }
@@ -2491,10 +2483,10 @@ fn backup_retain_command(
     }
     match &plan.skip {
         Some(Skip::Closed(why)) => {
-            println!("BACKUP_RETENTION_SKIPPED node={node} mode=nothing-deleted reason=\"{why}\"")
+            println!("BACKUP_RETENTION_SKIPPED node={node} mode=nothing-deleted reason=\"{why}\"");
         }
         Some(Skip::CapOnly(why)) => {
-            println!("BACKUP_RETENTION_SKIPPED node={node} mode=count-cap-only reason=\"{why}\"")
+            println!("BACKUP_RETENTION_SKIPPED node={node} mode=count-cap-only reason=\"{why}\"");
         }
         None => {}
     }
@@ -2906,7 +2898,7 @@ async fn delete_hosted_key_command(
         .or_else(|| peer.map(|p| p.endpoint.clone()))
         .ok_or_else(|| DaemonError::Config("no target endpoint".into()))?;
     let name = tls_server_name
-        .or_else(|| peer.map(|p| p.server_name()))
+        .or_else(|| peer.map(rutli_cosigner::config::PeerConfig::server_name))
         .or_else(|| tls_cfg.domain.clone())
         .ok_or_else(|| {
             DaemonError::Config(format!(
@@ -3604,8 +3596,10 @@ fn import_key_command(
             ));
         }
         let envelope: rutli_cosigner::export::ExportEnvelope = serde_json::from_slice(&raw)?;
-        let key =
-            rutli_cosigner::export::import(&envelope, passphrase.as_deref().map(|p| p.as_str()))?;
+        let key = rutli_cosigner::export::import(
+            &envelope,
+            passphrase.as_deref().map(std::string::String::as_str),
+        )?;
         (envelope.key_id.clone(), key, "a Rütli export".to_string())
     } else {
         let (Some(key_id), Some(expect)) = (canton_key_id, expect_fingerprint) else {
@@ -3627,7 +3621,7 @@ fn import_key_command(
         );
         let imported = rutli_cosigner::export::import_canton(
             &raw,
-            passphrase.as_deref().map(|p| p.as_bytes()),
+            passphrase.as_deref().map(std::string::String::as_bytes),
             expect,
             rutli_cosigner::hosted::now_secs(),
         )?;

@@ -24,6 +24,7 @@
 //! It is deliberately **not** in the cosigner container image: the Dockerfile builds and copies
 //! `rutli-cosigner` only. A dealer never runs where a share lives.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
 #![allow(clippy::result_large_err)]
 
 use std::collections::BTreeSet;
@@ -714,6 +715,12 @@ fn harden() -> Hardening {
         // MCL_FUTURE under a finite RLIMIT_MEMLOCK makes later allocations fail once the limit is
         // reached — an abort mid-split. So lock only where it cannot bite: as root (CAP_IPC_LOCK,
         // the live-boot host) or with an unlimited memlock limit.
+        //
+        // SAFETY: plain libc calls with no pointer that outlives the call. `lim` is a local, fully
+        // initialised `rlimit` that `getrlimit` fills through `&mut lim` (valid and exclusive for
+        // the call); `geteuid` and `mlockall` take no pointer. `mlockall` is passed only the
+        // `MCL_CURRENT | MCL_FUTURE` flags and a failure is reported through its return value, which
+        // is compared and never used as an index or a length.
         let memory_locked = unsafe {
             let mut lim = libc::rlimit {
                 rlim_cur: 0,

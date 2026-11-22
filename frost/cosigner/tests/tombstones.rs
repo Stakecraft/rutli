@@ -338,7 +338,7 @@ async fn a_signed_delete_tombstones_the_key_on_every_node_and_retains_its_materi
             Err(DaemonError::UnknownKey(_))
         ));
         assert!(n.hosted_decrypt_symmetric("rutli-sym-1", &blob).is_err());
-        assert!(n.hosted_list().unwrap().is_empty());
+        assert_eq!(n.hosted_list().unwrap(), [] as [std::string::String; 0]);
         // The material is still there, sealed inside the tombstone, for the grace period.
         let t = n.hosted_tombstones().unwrap().pop().unwrap();
         assert_eq!(t.retained.as_ref().unwrap().private_der, key.private_der);
@@ -1594,9 +1594,7 @@ async fn delete_hosted_key_collects_approvals_through_the_inbox() {
             .ok()
             .and_then(|mut d| d.next())
             .map(|e| e.unwrap().path());
-        if let Some(p) =
-            found.filter(|p| std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false))
-        {
+        if let Some(p) = found.filter(|p| std::fs::metadata(p).is_ok_and(|m| m.len() > 0)) {
             break p;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

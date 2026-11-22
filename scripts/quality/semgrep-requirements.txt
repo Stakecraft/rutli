@@ -5,7 +5,9 @@
 # scripts/quality/install-tools.sh (pip install --require-hashes --no-deps). Semgrep publishes no
 # standalone binary. To bump: change the version in a file containing `semgrep==X.Y.Z` and run
 #   uv pip compile FILE --universal --python-version 3.12 --generate-hashes --no-header
-# then replace everything below this comment with the output.
+# then replace everything below this comment with the output. Do not bump a single pin by hand or
+# through Dependabot (it is told to leave this file alone): the set is one compiled whole, and a
+# transitive pin ahead of what semgrep supports breaks semgrep itself.
 annotated-types==0.8.0 \
     --hash=sha256:13b2beaad985e05e2d6407ee4c4f35590b11f8d693a258a561055cac8f64cab7 \
     --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0

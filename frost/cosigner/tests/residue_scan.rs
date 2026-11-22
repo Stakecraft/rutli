@@ -127,7 +127,7 @@ fn tar_header(name: &str, size: usize, typeflag: u8) -> [u8; 512] {
     h[156] = typeflag;
     h[257..263].copy_from_slice(b"ustar\0");
     h[263..265].copy_from_slice(b"00");
-    let sum: u32 = h.iter().map(|b| *b as u32).sum();
+    let sum: u32 = h.iter().map(|b| u32::from(*b)).sum();
     h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
     h
 }
@@ -599,7 +599,11 @@ fn the_output_carries_only_the_allowed_fields_and_no_key_material() {
             .cloned()
             .collect::<BTreeSet<_>>()
     };
-    let names = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+    let names = |xs: &[&str]| {
+        xs.iter()
+            .map(std::string::ToString::to_string)
+            .collect::<BTreeSet<_>>()
+    };
     assert_eq!(
         keys(&json),
         names(&[
