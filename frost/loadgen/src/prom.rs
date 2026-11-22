@@ -213,11 +213,7 @@ pub fn report(
         scrape_errors,
         ..Default::default()
     };
-    // le -> cumulative count over the cosigners, and the histogram's sum and count.
-    let mut buckets: BTreeMap<String, f64> = BTreeMap::new();
-    let (mut hist_sum, mut hist_count) = (0.0, 0.0);
-    // call -> le -> cumulative count over the cosigners.
-    let mut peer_buckets: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+    let mut histograms = Histograms::default();
     for name in names {
         let mut target = TargetReport {
             scraped_before: before.contains_key(name),
@@ -291,60 +287,82 @@ pub fn report(
                     target.counters.insert(series.clone(), delta);
                     *out.counters.entry(series.clone()).or_default() += delta;
                 }
-            } else if base == Some(PEER_CALL_DURATION) && metric.ends_with("_bucket") {
-                if let (Some(call), Some(le)) = (label(series, "call"), label(series, "le")) {
-                    *peer_buckets
-                        .entry(call.to_string())
-                        .or_default()
-                        .entry(le.to_string())
-                        .or_default() += delta;
-                }
-            } else if base == Some(SIGN_DURATION) && label(series, "result") == Some("ok") {
-                if metric.ends_with("_bucket") {
-                    if let Some(le) = label(series, "le") {
-                        *buckets.entry(le.to_string()).or_default() += delta;
-                    }
-                } else if metric.ends_with("_sum") {
-                    hist_sum += delta;
-                } else {
-                    hist_count += delta;
-                }
+            } else {
+                histograms.add(series, metric, base, delta);
             }
         }
         out.targets.insert(name.clone(), target);
     }
-    for (call, buckets) in &peer_buckets {
-        if let Some(r) = peer_call_report(call, buckets) {
-            out.peer_calls.insert(call.clone(), r);
-        }
-    }
-    if hist_count > 0.0 {
-        let mut cumulative: Vec<(f64, f64)> = buckets
-            .iter()
-            .filter_map(|(le, &n)| {
-                let bound = if le == "+Inf" {
-                    f64::INFINITY
-                } else {
-                    le.parse().ok()?
-                };
-                Some((bound, n))
-            })
-            .collect();
-        cumulative.sort_by(|x, y| x.0.total_cmp(&y.0));
-        let q = |q: f64| round3(quantile(q, &cumulative) * 1000.0);
-        out.sign_duration = Some(HistogramReport {
-            count: hist_count,
-            mean_ms: round3(hist_sum / hist_count * 1000.0),
-            p50_ms: q(0.50),
-            p95_ms: q(0.95),
-            p99_ms: q(0.99),
-        });
-    }
+    out.peer_calls = histograms.peer_calls();
+    out.sign_duration = histograms.sign_duration();
     out
 }
 
-/// One call class from its summed cumulative buckets (`le` -> count), or `None` if it saw no call.
-fn peer_call_report(call: &str, buckets: &BTreeMap<String, f64>) -> Option<PeerCallReport> {
+/// The histogram deltas a report reads, summed over the cosigners.
+#[derive(Default)]
+struct Histograms {
+    /// [`SIGN_DURATION`] with `result="ok"`: le -> cumulative count, and its sum and count.
+    sign_buckets: BTreeMap<String, f64>,
+    sign_sum: f64,
+    sign_count: f64,
+    /// [`PEER_CALL_DURATION`]: call -> le -> cumulative count.
+    peer: BTreeMap<String, BTreeMap<String, f64>>,
+}
+
+impl Histograms {
+    /// Add one histogram series' delta (`metric` is its name, `base` the histogram it belongs to).
+    fn add(&mut self, series: &str, metric: &str, base: Option<&str>, delta: f64) {
+        let le = label(series, "le");
+        if base == Some(PEER_CALL_DURATION) {
+            if let (Some(call), Some(le)) = (label(series, "call"), le) {
+                let calls = self.peer.entry(call.to_string()).or_default();
+                *calls.entry(le.to_string()).or_default() += delta;
+            }
+            return;
+        }
+        if base != Some(SIGN_DURATION) || label(series, "result") != Some("ok") {
+            return;
+        }
+        match le {
+            Some(le) => *self.sign_buckets.entry(le.to_string()).or_default() += delta,
+            None if metric.ends_with("_sum") => self.sign_sum += delta,
+            None => self.sign_count += delta,
+        }
+    }
+
+    fn sign_duration(&self) -> Option<HistogramReport> {
+        if self.sign_count <= 0.0 {
+            return None;
+        }
+        let cumulative = sorted_cumulative(&self.sign_buckets);
+        let q = |q: f64| round3(quantile(q, &cumulative) * MS_PER_SEC);
+        Some(HistogramReport {
+            count: self.sign_count,
+            mean_ms: round3(self.sign_sum / self.sign_count * MS_PER_SEC),
+            p50_ms: q(0.50),
+            p95_ms: q(0.95),
+            p99_ms: q(0.99),
+        })
+    }
+
+    fn peer_calls(&self) -> BTreeMap<String, PeerCallReport> {
+        self.peer
+            .iter()
+            .filter_map(|(call, buckets)| Some((call.clone(), peer_call_report(call, buckets)?)))
+            .collect()
+    }
+}
+
+const MS_PER_SEC: f64 = 1000.0;
+/// The share of calls that must finish within a third of their deadline (#249).
+const MARGIN_SHARE: f64 = 0.999;
+/// How far a bucket edge may sit from the exact third of a deadline (the edges are rounded: 0.33,
+/// 0.67, 1.67, each a little above, which makes the rule that much lenient).
+const THIRD_EDGE_TOLERANCE_SECS: f64 = 0.005;
+
+/// Cumulative buckets (`le` -> count) as (upper bound, count) sorted by bound; `+Inf` is infinite,
+/// an unparsable `le` is left out.
+fn sorted_cumulative(buckets: &BTreeMap<String, f64>) -> Vec<(f64, f64)> {
     let mut cumulative: Vec<(f64, f64)> = buckets
         .iter()
         .filter_map(|(le, &n)| {
@@ -357,25 +375,29 @@ fn peer_call_report(call: &str, buckets: &BTreeMap<String, f64>) -> Option<PeerC
         })
         .collect();
     cumulative.sort_by(|x, y| x.0.total_cmp(&y.0));
+    cumulative
+}
+
+/// One call class from its summed cumulative buckets (`le` -> count), or `None` if it saw no call.
+fn peer_call_report(call: &str, buckets: &BTreeMap<String, f64>) -> Option<PeerCallReport> {
+    let cumulative = sorted_cumulative(buckets);
     let total = cumulative.last().map(|&(_, n)| n).filter(|&n| n > 0.0)?;
     let deadline = peer_call_deadline(call).map(|d| d.as_secs_f64());
-    // The bucket edge at a third of the deadline, within 5 ms of it: the edges are rounded (0.33,
-    // 0.67, 1.67), each a little above the exact third, which makes the rule that much lenient.
     let within_third = deadline.and_then(|d| {
         cumulative
             .iter()
-            .find(|(bound, _)| (bound - d / 3.0).abs() < 0.005)
+            .find(|(bound, _)| (bound - d / 3.0).abs() < THIRD_EDGE_TOLERANCE_SECS)
             .map(|&(_, n)| n / total)
     });
-    let q = |q: f64| round3(quantile(q, &cumulative) * 1000.0);
+    let q = |q: f64| round3(quantile(q, &cumulative) * MS_PER_SEC);
     Some(PeerCallReport {
         count: total,
         p50_ms: q(0.50),
         p99_ms: q(0.99),
-        p999_ms: q(0.999),
-        deadline_ms: deadline.map(|d| round3(d * 1000.0)),
+        p999_ms: q(MARGIN_SHARE),
+        deadline_ms: deadline.map(|d| round3(d * MS_PER_SEC)),
         within_third: within_third.map(|w| (w * 1e6).round() / 1e6),
-        margin_3x: within_third.map(|w| w >= 0.999),
+        margin_3x: within_third.map(|w| w >= MARGIN_SHARE),
     })
 }
 
