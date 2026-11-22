@@ -22,14 +22,24 @@ use rutli_cosigner::{DaemonError, Result};
 
 const KEY: &str = "namespace-participant1";
 
+/// `n` nodes over `dir/node-<i>`, not yet wired.
+fn open_nodes(dir: &Path, n: u16, t: u16) -> Vec<Arc<Node>> {
+    let mut nodes = Vec::new();
+    for i in 1..=n {
+        let ks = KeyStore::open(dir.join(format!("node-{i}"))).unwrap();
+        nodes.push(Arc::new(Node::new(
+            Identifier::try_from(i).unwrap(),
+            n,
+            t,
+            ks,
+        )));
+    }
+    nodes
+}
+
 /// An in-process cluster over `dir/node-<i>`; reopening the same directories models a restart.
 fn cluster(dir: &Path, n: u16, t: u16) -> (Vec<Arc<Node>>, Peers) {
-    let nodes: Vec<Arc<Node>> = (1..=n)
-        .map(|i| {
-            let ks = KeyStore::open(dir.join(format!("node-{i}"))).unwrap();
-            Arc::new(Node::new(Identifier::try_from(i).unwrap(), n, t, ks))
-        })
-        .collect();
+    let nodes = open_nodes(dir, n, t);
     rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     let peers = nodes
         .iter()
@@ -394,6 +404,25 @@ fn spied(nodes: &[Arc<Node>], faults: &[Fault]) -> (Peers, Log) {
     (peers, log)
 }
 
+/// A `t`-of-`n` cluster in a fresh temp dir with the key generated (over the plain peers), the nodes then
+/// seen through [`spied`] with `faults`; node 1 signs `digest(tag)` over them and the signature must
+/// verify under the group key (asserted here, in every test that calls this). Returns the temp dir, the nodes, the
+/// spied peers, the log and the group key.
+async fn spied_cluster_signing(
+    (n, t): (u16, u16),
+    faults: &[Fault],
+    tag: &[u8],
+) -> (tempfile::TempDir, Vec<Arc<Node>>, Peers, Log, [u8; 32]) {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, plain) = cluster(tmp.path(), n, t);
+    let group = run_dkg(&plain, KEY).await.unwrap();
+    let (peers, log) = spied(&nodes, faults);
+    let msg = digest(tag);
+    let sig = sign(&nodes[0], &peers, KEY, &msg).await.unwrap();
+    assert!(verifies(&group, &msg, &sig));
+    (tmp, nodes, peers, log, group)
+}
+
 type Entry = (u16, &'static str, String, String);
 
 /// The log split into attempts, each starting at the leader's (node 1's) round 1. Every member of
@@ -431,14 +460,12 @@ fn marker_exists(dir: &Path, node: usize, session: &str) -> bool {
 
 #[tokio::test]
 async fn a_peer_failing_round2_is_routed_around_with_a_fresh_session_and_fresh_commitments() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (nodes, plain) = cluster(tmp.path(), 3, 2);
-    let group = run_dkg(&plain, KEY).await.unwrap();
-    let (peers, log) = spied(&nodes, &[Fault::None, Fault::Round2, Fault::None]);
-
-    let msg = digest(b"retry after round 2");
-    let sig = sign(&nodes[0], &peers, KEY, &msg).await.unwrap();
-    assert!(verifies(&group, &msg, &sig));
+    let (tmp, nodes, _peers, log, _group) = spied_cluster_signing(
+        (3, 2),
+        &[Fault::None, Fault::Round2, Fault::None],
+        b"retry after round 2",
+    )
+    .await;
 
     let a = attempts(&log);
     assert_eq!(a.len(), 2, "one failed attempt, one good one: {a:?}");
@@ -480,14 +507,12 @@ async fn a_peer_failing_round2_is_routed_around_with_a_fresh_session_and_fresh_c
 
 #[tokio::test]
 async fn an_invalid_signature_share_is_attributed_and_routed_around() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (nodes, plain) = cluster(tmp.path(), 3, 2);
-    let group = run_dkg(&plain, KEY).await.unwrap();
-    let (peers, log) = spied(&nodes, &[Fault::None, Fault::BadShare, Fault::None]);
-
-    let msg = digest(b"bad share");
-    let sig = sign(&nodes[0], &peers, KEY, &msg).await.unwrap();
-    assert!(verifies(&group, &msg, &sig));
+    let (_tmp, nodes, peers, log, _group) = spied_cluster_signing(
+        (3, 2),
+        &[Fault::None, Fault::BadShare, Fault::None],
+        b"bad share",
+    )
+    .await;
     let a = attempts(&log);
     assert_eq!(a.len(), 2, "{a:?}");
     assert!(
@@ -516,12 +541,9 @@ async fn an_invalid_signature_share_is_attributed_and_routed_around() {
 
 #[tokio::test]
 async fn three_of_five_retries_through_subsets_until_one_works() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (nodes, plain) = cluster(tmp.path(), 5, 3);
-    let group = run_dkg(&plain, KEY).await.unwrap();
     // Node 2 is down in round 1 and node 3 fails round 2: the leader works through the subsets.
-    let (peers, log) = spied(
-        &nodes,
+    let (_tmp, nodes, _peers, log, group) = spied_cluster_signing(
+        (5, 3),
         &[
             Fault::None,
             Fault::Round1,
@@ -529,10 +551,9 @@ async fn three_of_five_retries_through_subsets_until_one_works() {
             Fault::None,
             Fault::None,
         ],
-    );
-    let msg = digest(b"three of five");
-    let sig = sign(&nodes[0], &peers, KEY, &msg).await.unwrap();
-    assert!(verifies(&group, &msg, &sig));
+        b"three of five",
+    )
+    .await;
     let a = attempts(&log);
     // {1,2,3} fails at 2 (round 1), {1,3,4} fails at 3 (round 2), {1,4,5} signs: n − t + 1 attempts.
     assert_eq!(a.len(), 3, "{a:?}");
@@ -675,13 +696,12 @@ async fn a_node_refuses_round2_for_another_message_or_commitment_set_than_round1
 
 #[tokio::test]
 async fn a_round2_tampered_in_transit_is_refused_by_the_node_and_routed_around() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (nodes, plain) = cluster(tmp.path(), 3, 2);
-    let group = run_dkg(&plain, KEY).await.unwrap();
-    let (peers, log) = spied(&nodes, &[Fault::None, Fault::SwapMessage, Fault::None]);
-    let msg = digest(b"the real message");
-    let sig = sign(&nodes[0], &peers, KEY, &msg).await.unwrap();
-    assert!(verifies(&group, &msg, &sig));
+    let (tmp, _nodes, _peers, log, _group) = spied_cluster_signing(
+        (3, 2),
+        &[Fault::None, Fault::SwapMessage, Fault::None],
+        b"the real message",
+    )
+    .await;
     let a = attempts(&log);
     let entries = log.lock().unwrap().clone();
     let refused: Vec<_> = entries
