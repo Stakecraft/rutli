@@ -27,6 +27,7 @@
 
 // gRPC statuses are passed around by value, as in the cosigner: boxing each one would not make a
 // test tool better.
+#![deny(clippy::undocumented_unsafe_blocks)]
 #![allow(clippy::result_large_err)]
 
 mod prom;

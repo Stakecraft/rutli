@@ -3,6 +3,7 @@
 
 //! Rütli FROST cosigner daemon entrypoint.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
 #![allow(clippy::result_large_err)]
 
 use std::sync::Arc;
