@@ -53,6 +53,50 @@ fn id2(i: u16) -> v2::Identifier {
     v2::Identifier::try_from(i).unwrap()
 }
 
+/// What the other nodes broadcast in round 1 (`raw` is their JSON on the wire), read as the
+/// packages of the version whose identifiers are made by `id`.
+fn decode_round1<I: Ord, P: DeserializeOwned>(
+    raw: Vec<(u16, Vec<u8>)>,
+    id: fn(u16) -> I,
+) -> BTreeMap<I, P> {
+    raw.into_iter()
+        .map(|(j, b)| (id(j), serde_json::from_slice(&b).unwrap()))
+        .collect()
+}
+
+/// What every other node sent to node `to` in round 2, read as that version's packages.
+fn decode_round2<I: Ord, P: DeserializeOwned>(
+    r2: &BTreeMap<(u16, u16), Vec<u8>>,
+    to: u16,
+    id: fn(u16) -> I,
+) -> BTreeMap<I, P> {
+    (1..=N)
+        .filter(|j| *j != to)
+        .map(|j| (id(j), serde_json::from_slice(&r2[&(j, to)]).unwrap()))
+        .collect()
+}
+
+/// Put node `from`'s round-2 output on the wire, one JSON message per other node.
+fn send_round2<I: Ord, P: Serialize>(
+    r2: &mut BTreeMap<(u16, u16), Vec<u8>>,
+    from: u16,
+    out: &BTreeMap<I, P>,
+    id: fn(u16) -> I,
+) {
+    for j in (1..=N).filter(|j| *j != from) {
+        r2.insert((from, j), serde_json::to_vec(&out[&id(j)]).unwrap());
+    }
+}
+
+/// Every pair of nodes signs `tag`'s digest, each on its own version, and both versions aggregate
+/// to the same signature that verifies under `pkp` (see [`mixed_sign`]).
+fn every_pair_signs(nodes: &[Node], pkp: &v3::keys::PublicKeyPackage, tag: &[u8]) {
+    let msg = canton_test_message(tag);
+    for pair in [[0, 1], [0, 2], [1, 2]] {
+        mixed_sign(nodes, &pair, pkp, &msg);
+    }
+}
+
 fn verify(pkp: &v3::keys::PublicKeyPackage, msg: &[u8], sig: &[u8]) {
     let group: [u8; 32] = pkp.verifying_key().serialize().unwrap().try_into().unwrap();
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&group).unwrap();
@@ -95,49 +139,27 @@ fn mixed_dkg() -> (Vec<Node>, Vec<[u8; 32]>, v3::keys::PublicKeyPackage) {
     let mut r2: BTreeMap<(u16, u16), Vec<u8>> = BTreeMap::new();
     for i in 1..=N {
         if on_v2(i) {
-            let m: BTreeMap<_, v2::keys::dkg::round1::Package> = r1_for(i)
-                .into_iter()
-                .map(|(j, b)| (id2(j), serde_json::from_slice(&b).unwrap()))
-                .collect();
+            let m: BTreeMap<_, v2::keys::dkg::round1::Package> = decode_round1(r1_for(i), id2);
             let (s, out) = v2::keys::dkg::part2(s2_1.remove(&i).unwrap(), &m).unwrap();
             s2_2.insert(i, s);
-            for j in (1..=N).filter(|j| *j != i) {
-                r2.insert((i, j), serde_json::to_vec(&out[&id2(j)]).unwrap());
-            }
+            send_round2(&mut r2, i, &out, id2);
         } else {
-            let m: BTreeMap<_, v3::keys::dkg::round1::Package> = r1_for(i)
-                .into_iter()
-                .map(|(j, b)| (id3(j), serde_json::from_slice(&b).unwrap()))
-                .collect();
+            let m: BTreeMap<_, v3::keys::dkg::round1::Package> = decode_round1(r1_for(i), id3);
             let out = p3.part2(&m).unwrap();
-            for j in (1..=N).filter(|j| *j != i) {
-                r2.insert((i, j), serde_json::to_vec(&out[&id3(j)]).unwrap());
-            }
+            send_round2(&mut r2, i, &out, id3);
         }
     }
     let (mut nodes, mut digests, mut pkp3) = (Vec::new(), Vec::new(), None);
     for i in 1..=N {
         if on_v2(i) {
-            let m1: BTreeMap<_, v2::keys::dkg::round1::Package> = r1_for(i)
-                .into_iter()
-                .map(|(j, b)| (id2(j), serde_json::from_slice(&b).unwrap()))
-                .collect();
-            let m2: BTreeMap<_, v2::keys::dkg::round2::Package> = (1..=N)
-                .filter(|j| *j != i)
-                .map(|j| (id2(j), serde_json::from_slice(&r2[&(j, i)]).unwrap()))
-                .collect();
+            let m1: BTreeMap<_, v2::keys::dkg::round1::Package> = decode_round1(r1_for(i), id2);
+            let m2: BTreeMap<_, v2::keys::dkg::round2::Package> = decode_round2(&r2, i, id2);
             let (kp, pkp) = v2::keys::dkg::part3(&s2_2[&i], &m1, &m2).unwrap();
             digests.push(v2_digest(&pkp));
             nodes.push(Node::V2(kp));
         } else {
-            let m1: BTreeMap<_, v3::keys::dkg::round1::Package> = r1_for(i)
-                .into_iter()
-                .map(|(j, b)| (id3(j), serde_json::from_slice(&b).unwrap()))
-                .collect();
-            let m2: BTreeMap<_, v3::keys::dkg::round2::Package> = (1..=N)
-                .filter(|j| *j != i)
-                .map(|j| (id3(j), serde_json::from_slice(&r2[&(j, i)]).unwrap()))
-                .collect();
+            let m1: BTreeMap<_, v3::keys::dkg::round1::Package> = decode_round1(r1_for(i), id3);
+            let m2: BTreeMap<_, v3::keys::dkg::round2::Package> = decode_round2(&r2, i, id3);
             let (kp, pkp) = p3.part3(&m1, &m2).unwrap();
             digests.push(pkp_digest(&pkp).unwrap());
             nodes.push(Node::V3(kp));
@@ -211,10 +233,7 @@ fn a_mixed_cluster_runs_a_dkg_to_one_digest_and_signs() {
         "every node, on either version, computed the same package"
     );
     assert_eq!(pkp.min_signers(), None);
-    let msg = canton_test_message(b"mixed sign");
-    for pair in [[0, 1], [0, 2], [1, 2]] {
-        mixed_sign(&nodes, &pair, &pkp, &msg);
-    }
+    every_pair_signs(&nodes, &pkp, b"mixed sign");
     // Key packages written by either version read on the other, byte for byte.
     for n in &nodes {
         match n {
@@ -257,25 +276,15 @@ fn a_mixed_cluster_refreshes_to_one_digest_and_signs() {
     let mut r2: BTreeMap<(u16, u16), Vec<u8>> = BTreeMap::new();
     for i in 1..=N {
         if on_v2(i) {
-            let m: BTreeMap<_, v2::keys::dkg::round1::Package> = r1_for(i)
-                .into_iter()
-                .map(|(j, b)| (id2(j), serde_json::from_slice(&b).unwrap()))
-                .collect();
+            let m: BTreeMap<_, v2::keys::dkg::round1::Package> = decode_round1(r1_for(i), id2);
             let (s, out) =
                 v2::keys::refresh::refresh_dkg_part2(s1.remove(&i).unwrap(), &m).unwrap();
             s2.insert(i, s);
-            for j in (1..=N).filter(|j| *j != i) {
-                r2.insert((i, j), serde_json::to_vec(&out[&id2(j)]).unwrap());
-            }
+            send_round2(&mut r2, i, &out, id2);
         } else {
-            let m: BTreeMap<_, v3::keys::dkg::round1::Package> = r1_for(i)
-                .into_iter()
-                .map(|(j, b)| (id3(j), serde_json::from_slice(&b).unwrap()))
-                .collect();
+            let m: BTreeMap<_, v3::keys::dkg::round1::Package> = decode_round1(r1_for(i), id3);
             let out = p3.part2(&m).unwrap();
-            for j in (1..=N).filter(|j| *j != i) {
-                r2.insert((i, j), serde_json::to_vec(&out[&id3(j)]).unwrap());
-            }
+            send_round2(&mut r2, i, &out, id3);
         }
     }
     let (mut refreshed, mut digests, mut new3) = (Vec::new(), Vec::new(), None);
@@ -283,14 +292,8 @@ fn a_mixed_cluster_refreshes_to_one_digest_and_signs() {
         let k = usize::from(i - 1);
         match &nodes[k] {
             Node::V2(kp) => {
-                let m1: BTreeMap<_, v2::keys::dkg::round1::Package> = r1_for(i)
-                    .into_iter()
-                    .map(|(j, b)| (id2(j), serde_json::from_slice(&b).unwrap()))
-                    .collect();
-                let m2: BTreeMap<_, v2::keys::dkg::round2::Package> = (1..=N)
-                    .filter(|j| *j != i)
-                    .map(|j| (id2(j), serde_json::from_slice(&r2[&(j, i)]).unwrap()))
-                    .collect();
+                let m1: BTreeMap<_, v2::keys::dkg::round1::Package> = decode_round1(r1_for(i), id2);
+                let m2: BTreeMap<_, v2::keys::dkg::round2::Package> = decode_round2(&r2, i, id2);
                 let old2: v2::keys::PublicKeyPackage = convert(&old);
                 let (nkp, npkp) =
                     v2::keys::refresh::refresh_dkg_shares(&s2[&i], &m1, &m2, old2, kp.clone())
@@ -299,14 +302,8 @@ fn a_mixed_cluster_refreshes_to_one_digest_and_signs() {
                 refreshed.push(Node::V2(nkp));
             }
             Node::V3(kp) => {
-                let m1: BTreeMap<_, v3::keys::dkg::round1::Package> = r1_for(i)
-                    .into_iter()
-                    .map(|(j, b)| (id3(j), serde_json::from_slice(&b).unwrap()))
-                    .collect();
-                let m2: BTreeMap<_, v3::keys::dkg::round2::Package> = (1..=N)
-                    .filter(|j| *j != i)
-                    .map(|j| (id3(j), serde_json::from_slice(&r2[&(j, i)]).unwrap()))
-                    .collect();
+                let m1: BTreeMap<_, v3::keys::dkg::round1::Package> = decode_round1(r1_for(i), id3);
+                let m2: BTreeMap<_, v3::keys::dkg::round2::Package> = decode_round2(&r2, i, id3);
                 let (nkp, npkp) = p3.part3(&m1, &m2, old.clone(), kp.clone()).unwrap();
                 digests.push(pkp_digest(&npkp).unwrap());
                 refreshed.push(Node::V3(nkp));
@@ -321,10 +318,7 @@ fn a_mixed_cluster_refreshes_to_one_digest_and_signs() {
     );
     assert_ne!(pkp_digest(&new3).unwrap(), pkp_digest(&old).unwrap());
     assert_eq!(new3.verifying_key(), old.verifying_key());
-    let msg = canton_test_message(b"mixed sign after refresh");
-    for pair in [[0, 1], [0, 2], [1, 2]] {
-        mixed_sign(&refreshed, &pair, &new3, &msg);
-    }
+    every_pair_signs(&refreshed, &new3, b"mixed sign after refresh");
 }
 
 #[test]

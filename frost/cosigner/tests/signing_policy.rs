@@ -346,6 +346,25 @@ fn strict() -> SigningPolicyConfig {
     }
 }
 
+/// Intents required, `per_min` signatures a minute and 100 a day.
+fn rate_limited(per_min: u32) -> SigningPolicyConfig {
+    SigningPolicyConfig {
+        require_intent: Some(true),
+        sign_rate_limit_per_min: per_min,
+        sign_rate_limit_per_day: 100,
+        ..Default::default()
+    }
+}
+
+/// Intents required, and no node releases more than two shares for one request id.
+fn capped_at_two_shares() -> SigningPolicyConfig {
+    SigningPolicyConfig {
+        require_intent: Some(true),
+        max_shares_per_request: 2,
+        ..Default::default()
+    }
+}
+
 impl Cluster {
     async fn channel(
         &self,
@@ -432,6 +451,57 @@ fn denied(r: std::result::Result<impl std::fmt::Debug, tonic::Status>, needle: &
         "expected {needle:?} in {:?}",
         s.message()
     );
+}
+
+/// `who`, presenting `intent` over `msg`, is refused with `needle` on the Signer API (sign and group
+/// key, at node 0) and, forwarded by a compromised cosigner3, as a round 1 at node `peer_node`.
+async fn denied_on_signer_group_key_and_forwarded_round1(
+    c: &Cluster,
+    who: &str,
+    peer_node: usize,
+    session: &str,
+    msg: &[u8],
+    intent: pb::SignedIntent,
+    needle: &str,
+) {
+    denied(
+        c.signer(who, 0)
+            .await
+            .sign(pb::SignRequest {
+                key_id: KEY.into(),
+                message: msg.to_vec(),
+                intent: Some(intent.clone()),
+            })
+            .await,
+        needle,
+    );
+    denied(
+        c.signer(who, 0)
+            .await
+            .group_key(pb::GroupKeyRequest { key_id: KEY.into() })
+            .await,
+        needle,
+    );
+    denied(
+        c.peer_as("cosigner3", peer_node)
+            .await
+            .sign_round1(round1(KEY, session, Some(msg), Some(intent)))
+            .await,
+        needle,
+    );
+}
+
+/// The driver signs `msg` at node 0 under its own intent number `request`; the call must succeed.
+async fn driver_signs_at_node0(c: &Cluster, msg: &[u8], request: u8) {
+    c.signer("driver", 0)
+        .await
+        .sign(pb::SignRequest {
+            key_id: KEY.into(),
+            message: msg.to_vec(),
+            intent: Some(intent_by(&c.ids, "driver", KEY, msg, request)),
+        })
+        .await
+        .unwrap();
 }
 
 // ── a compromised cosigner ────────────────────────────────────────────────────────────────────
@@ -825,43 +895,19 @@ async fn a_signer_without_an_acl_for_a_key_is_refused_when_acls_are_required() {
     let c = cluster(|_| policy.clone(), None).await;
     let msg = digest(b"tenant 2 reaches for tenant 1's key");
     let by_tenant = intent_by(&c.ids, "tenant", KEY, &msg, 40);
-    denied(
-        c.signer("tenant", 0)
-            .await
-            .sign(pb::SignRequest {
-                key_id: KEY.into(),
-                message: msg.clone(),
-                intent: Some(by_tenant.clone()),
-            })
-            .await,
-        "may not use key",
-    );
-    denied(
-        c.signer("tenant", 0)
-            .await
-            .group_key(pb::GroupKeyRequest { key_id: KEY.into() })
-            .await,
-        "may not use key",
-    );
     // A compromised node forwarding the tenant's intent to a peer gets the same answer there.
-    denied(
-        c.peer_as("cosigner3", 0)
-            .await
-            .sign_round1(round1(KEY, "acl", Some(&msg), Some(by_tenant)))
-            .await,
+    denied_on_signer_group_key_and_forwarded_round1(
+        &c,
+        "tenant",
+        0,
+        "acl",
+        &msg,
+        by_tenant,
         "may not use key",
-    );
+    )
+    .await;
     // The driver, on its own prefix, signs.
-    let by_driver = intent_by(&c.ids, "driver", KEY, &msg, 41);
-    c.signer("driver", 0)
-        .await
-        .sign(pb::SignRequest {
-            key_id: KEY.into(),
-            message: msg,
-            intent: Some(by_driver),
-        })
-        .await
-        .unwrap();
+    driver_signs_at_node0(&c, &msg, 41).await;
 }
 
 /// A revoked key: a valid certificate under the driver's CN whose key is not pinned is refused on
@@ -881,41 +927,17 @@ async fn an_spki_pin_revokes_a_ca_valid_but_unpinned_driver_key() {
     let msg = digest(b"signed with the stolen key");
 
     let stolen = intent_by(&c.ids, "driver-2", KEY, &msg, 50);
-    denied(
-        c.signer("driver-2", 0)
-            .await
-            .sign(pb::SignRequest {
-                key_id: KEY.into(),
-                message: msg.clone(),
-                intent: Some(stolen.clone()),
-            })
-            .await,
+    denied_on_signer_group_key_and_forwarded_round1(
+        &c,
+        "driver-2",
+        1,
+        "pin",
+        &msg,
+        stolen,
         "not pinned",
-    );
-    denied(
-        c.signer("driver-2", 0)
-            .await
-            .group_key(pb::GroupKeyRequest { key_id: KEY.into() })
-            .await,
-        "not pinned",
-    );
-    denied(
-        c.peer_as("cosigner3", 1)
-            .await
-            .sign_round1(round1(KEY, "pin", Some(&msg), Some(stolen)))
-            .await,
-        "not pinned",
-    );
-    let ok = intent_by(&c.ids, "driver", KEY, &msg, 51);
-    c.signer("driver", 0)
-        .await
-        .sign(pb::SignRequest {
-            key_id: KEY.into(),
-            message: msg,
-            intent: Some(ok),
-        })
-        .await
-        .unwrap();
+    )
+    .await;
+    driver_signs_at_node0(&c, &msg, 51).await;
 }
 
 // ── approvals ─────────────────────────────────────────────────────────────────────────────────
@@ -1291,12 +1313,7 @@ impl PeerApi for Late {
 #[tokio::test(start_paused = true)]
 async fn an_abandoned_attempt_never_signs_twice_and_its_intent_is_charged_once() {
     let tmp = tempfile::tempdir().unwrap();
-    let policy = SigningPolicyConfig {
-        require_intent: Some(true),
-        sign_rate_limit_per_min: 2,
-        sign_rate_limit_per_day: 100,
-        ..Default::default()
-    };
+    let policy = rate_limited(2);
     let (ids, nodes) = local(tmp.path(), &policy).await;
     let msg = digest(b"abandoned");
     let journal = |i: u16, request: u8| journal_of(tmp.path(), i, request);
@@ -1729,6 +1746,45 @@ async fn local(root: &Path, policy: &SigningPolicyConfig) -> (Ids, Vec<Arc<Node>
     (ids, nodes)
 }
 
+/// [`local`] on `policy`, the digest of `tag`, and the driver's intent `request` over it.
+async fn local_with_driver_intent(
+    root: &Path,
+    policy: &SigningPolicyConfig,
+    tag: &[u8],
+    request: u8,
+) -> (Ids, Vec<Arc<Node>>, Vec<u8>, pb::SignedIntent) {
+    let (ids, nodes) = local(root, policy).await;
+    let msg = digest(tag);
+    let intent = intent_by(&ids, "driver", KEY, &msg, request);
+    (ids, nodes, msg, intent)
+}
+
+/// The round-1 commitments of nodes 1 and 2 for `msg` under `session`, both presented with `intent`
+/// and the signer set {1, 2}.
+fn round1_of_nodes_1_and_2(
+    nodes: &[Arc<Node>],
+    session: &str,
+    msg: &[u8],
+    intent: &pb::SignedIntent,
+) -> BTreeMap<Identifier, SigningCommitments> {
+    let ctx = Round1Ctx {
+        message: Some(msg.to_vec()),
+        signers: Some(vec![1, 2]),
+        intent: Some(intent.clone()),
+        ..Default::default()
+    };
+    BTreeMap::from([
+        (
+            Identifier::try_from(1u16).unwrap(),
+            nodes[0].sign_round1(KEY, session, &ctx).unwrap(),
+        ),
+        (
+            Identifier::try_from(2u16).unwrap(),
+            nodes[1].sign_round1(KEY, session, &ctx).unwrap(),
+        ),
+    ])
+}
+
 fn peers_of(nodes: &[Arc<Node>]) -> Peers {
     nodes
         .iter()
@@ -1742,15 +1798,8 @@ fn peers_of(nodes: &[Arc<Node>]) -> Peers {
 #[tokio::test]
 async fn the_rate_limit_is_charged_once_per_request_id_across_retries_and_survives_a_restart() {
     let tmp = tempfile::tempdir().unwrap();
-    let policy = SigningPolicyConfig {
-        require_intent: Some(true),
-        sign_rate_limit_per_min: 1,
-        sign_rate_limit_per_day: 100,
-        ..Default::default()
-    };
-    let (ids, nodes) = local(tmp.path(), &policy).await;
-    let msg = digest(b"retried");
-    let i1 = intent_by(&ids, "driver", KEY, &msg, 79);
+    let policy = rate_limited(1);
+    let (ids, nodes, msg, i1) = local_with_driver_intent(tmp.path(), &policy, b"retried", 79).await;
 
     // Node 2 is this request's first partner (#193), so the flaky one fails the first subset.
     assert_eq!(
@@ -1818,14 +1867,8 @@ async fn the_rate_limit_is_charged_once_per_request_id_across_retries_and_surviv
 #[tokio::test]
 async fn a_replayed_intent_is_capped_per_request() {
     let tmp = tempfile::tempdir().unwrap();
-    let policy = SigningPolicyConfig {
-        require_intent: Some(true),
-        max_shares_per_request: 2,
-        ..Default::default()
-    };
-    let (ids, nodes) = local(tmp.path(), &policy).await;
-    let msg = digest(b"replayed");
-    let i1 = intent_by(&ids, "driver", KEY, &msg, 72);
+    let (_ids, nodes, msg, i1) =
+        local_with_driver_intent(tmp.path(), &capped_at_two_shares(), b"replayed", 72).await;
     let pair: Peers = peers_of(&nodes).into_iter().take(2).collect();
     sign_with_intent(&nodes[0], &pair, KEY, &msg, Some(&i1))
         .await
@@ -1848,14 +1891,8 @@ async fn a_replayed_intent_is_capped_per_request() {
 #[tokio::test]
 async fn failing_over_across_leaders_under_one_intent_stays_within_the_share_cap() {
     let tmp = tempfile::tempdir().unwrap();
-    let policy = SigningPolicyConfig {
-        require_intent: Some(true),
-        max_shares_per_request: 2,
-        ..Default::default()
-    };
-    let (ids, nodes) = local(tmp.path(), &policy).await;
-    let msg = digest(b"failed over");
-    let i1 = intent_by(&ids, "driver", KEY, &msg, 90);
+    let (_ids, nodes, msg, i1) =
+        local_with_driver_intent(tmp.path(), &capped_at_two_shares(), b"failed over", 90).await;
     let all = peers_of(&nodes);
     let pair = |a: usize, b: usize| -> Peers { vec![all[a].clone(), all[b].clone()] };
     // Each leader signs with itself and the next node: two shares per node in all.
@@ -1912,22 +1949,7 @@ async fn a_node_that_cannot_journal_releases_no_share() {
     };
     let before = markers(1);
     let i2 = intent_by(&ids, "driver", KEY, &msg, 81);
-    let ctx = Round1Ctx {
-        message: Some(msg.clone()),
-        signers: Some(vec![1, 2]),
-        intent: Some(i2.clone()),
-        ..Default::default()
-    };
-    let cs = BTreeMap::from([
-        (
-            Identifier::try_from(1u16).unwrap(),
-            nodes[0].sign_round1(KEY, "no-journal", &ctx).unwrap(),
-        ),
-        (
-            Identifier::try_from(2u16).unwrap(),
-            nodes[1].sign_round1(KEY, "no-journal", &ctx).unwrap(),
-        ),
-    ]);
+    let cs = round1_of_nodes_1_and_2(&nodes, "no-journal", &msg, &i2);
     let err = nodes[0]
         .sign_round2_with(
             KEY,
@@ -1964,22 +1986,7 @@ async fn a_round2_after_a_restart_is_an_unknown_session_not_a_policy_refusal() {
         let (ids, nodes) = local(tmp.path(), &policy).await;
         let msg = digest(b"restart between the rounds");
         let i1 = intent_by(&ids, "driver", KEY, &msg, 85);
-        let ctx = Round1Ctx {
-            message: Some(msg.clone()),
-            signers: Some(vec![1, 2]),
-            intent: Some(i1.clone()),
-            ..Default::default()
-        };
-        let cs = BTreeMap::from([
-            (
-                Identifier::try_from(1u16).unwrap(),
-                nodes[0].sign_round1(KEY, "restarted", &ctx).unwrap(),
-            ),
-            (
-                Identifier::try_from(2u16).unwrap(),
-                nodes[1].sign_round1(KEY, "restarted", &ctx).unwrap(),
-            ),
-        ]);
+        let cs = round1_of_nodes_1_and_2(&nodes, "restarted", &msg, &i1);
         let markers = || {
             std::fs::read_dir(tmp.path().join(format!("node-1/keys/{KEY}.nonces")))
                 .map_or(0, std::iter::Iterator::count)
@@ -2052,25 +2059,9 @@ async fn a_round2_after_a_restart_is_an_unknown_session_not_a_policy_refusal() {
 #[tokio::test]
 async fn a_round2_without_its_round1_authorization_is_refused_while_the_nonces_are_held() {
     let tmp = tempfile::tempdir().unwrap();
-    let (ids, nodes) = local(tmp.path(), &strict()).await;
-    let msg = digest(b"authorization lost");
-    let i1 = intent_by(&ids, "driver", KEY, &msg, 86);
-    let ctx = Round1Ctx {
-        message: Some(msg.clone()),
-        signers: Some(vec![1, 2]),
-        intent: Some(i1.clone()),
-        ..Default::default()
-    };
-    let cs = BTreeMap::from([
-        (
-            Identifier::try_from(1u16).unwrap(),
-            nodes[0].sign_round1(KEY, "no-auth", &ctx).unwrap(),
-        ),
-        (
-            Identifier::try_from(2u16).unwrap(),
-            nodes[1].sign_round1(KEY, "no-auth", &ctx).unwrap(),
-        ),
-    ]);
+    let (_ids, nodes, msg, i1) =
+        local_with_driver_intent(tmp.path(), &strict(), b"authorization lost", 86).await;
+    let cs = round1_of_nodes_1_and_2(&nodes, "no-auth", &msg, &i1);
     let markers = || {
         std::fs::read_dir(tmp.path().join(format!("node-1/keys/{KEY}.nonces")))
             .map_or(0, std::iter::Iterator::count)
@@ -2133,22 +2124,7 @@ async fn a_round2_after_a_commit_is_an_unknown_session_even_with_a_lapsed_intent
         "driver",
         unsigned(KEY, &msg, 87, not_after - 60_000, not_after),
     );
-    let ctx = Round1Ctx {
-        message: Some(msg.clone()),
-        signers: Some(vec![1, 2]),
-        intent: Some(i1.clone()),
-        ..Default::default()
-    };
-    let cs = BTreeMap::from([
-        (
-            Identifier::try_from(1u16).unwrap(),
-            nodes[0].sign_round1(KEY, "committed", &ctx).unwrap(),
-        ),
-        (
-            Identifier::try_from(2u16).unwrap(),
-            nodes[1].sign_round1(KEY, "committed", &ctx).unwrap(),
-        ),
-    ]);
+    let cs = round1_of_nodes_1_and_2(&nodes, "committed", &msg, &i1);
     assert_eq!(nodes[0].pending_sign_count(KEY), 1);
 
     rutli_cosigner::orchestrator::run_refresh(&peers_of(&nodes), KEY)
@@ -2204,25 +2180,9 @@ async fn a_round2_after_a_commit_is_an_unknown_session_even_with_a_lapsed_intent
 #[tokio::test]
 async fn a_round2_after_an_abort_is_an_unknown_session() {
     let tmp = tempfile::tempdir().unwrap();
-    let (ids, nodes) = local(tmp.path(), &strict()).await;
-    let msg = digest(b"aborted");
-    let i1 = intent_by(&ids, "driver", KEY, &msg, 88);
-    let ctx = Round1Ctx {
-        message: Some(msg.clone()),
-        signers: Some(vec![1, 2]),
-        intent: Some(i1.clone()),
-        ..Default::default()
-    };
-    let cs = BTreeMap::from([
-        (
-            Identifier::try_from(1u16).unwrap(),
-            nodes[0].sign_round1(KEY, "aborted", &ctx).unwrap(),
-        ),
-        (
-            Identifier::try_from(2u16).unwrap(),
-            nodes[1].sign_round1(KEY, "aborted", &ctx).unwrap(),
-        ),
-    ]);
+    let (_ids, nodes, msg, i1) =
+        local_with_driver_intent(tmp.path(), &strict(), b"aborted", 88).await;
+    let cs = round1_of_nodes_1_and_2(&nodes, "aborted", &msg, &i1);
     nodes[0]
         .abort_sign_as(KEY, "aborted", &rutli_cosigner::node::SessionOwner::Local)
         .unwrap();
