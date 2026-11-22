@@ -11,6 +11,9 @@
 //! v0 scope: static leader (the node the client connects to leads the request) and a fixed peer
 //! roster. Raft-based leader election is a documented follow-up (see docs/phase-2-frost.md).
 
+// Every `unsafe` block says why it is sound (a `// SAFETY:` comment directly above it); a new one
+// without it fails clippy.
+#![deny(clippy::undocumented_unsafe_blocks)]
 // DaemonError wraps large frost/tonic types; boxing every Err site is not worth the churn.
 #![allow(clippy::result_large_err)]
 

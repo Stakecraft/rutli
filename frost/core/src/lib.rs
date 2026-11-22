@@ -27,6 +27,8 @@
 // The error enum wraps frost/io types that are large by value; boxing every `?` site to shrink the
 // Err variant would hurt readability more than it helps here.
 #![allow(clippy::result_large_err)]
+// No unsafe code anywhere in the cryptography; this keeps it that way.
+#![forbid(unsafe_code)]
 
 pub mod dealer;
 pub mod dkg;
