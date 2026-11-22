@@ -134,6 +134,23 @@ fn leaf(dir: &Path, ca: &Ca, cn: &str) -> TlsConfig {
     }
 }
 
+/// `n` in-process nodes (`t` to sign) with their stores under `dir`, wired as one mesh, and the
+/// plain `LocalPeer` handles to them, in node order.
+fn local_mesh(dir: &Path, n: u16, t: u16) -> (Vec<Arc<Node>>, Peers) {
+    let nodes: Vec<Arc<Node>> = (1..=n)
+        .map(|i| {
+            let ks = KeyStore::open(dir.join(format!("node-{i}"))).unwrap();
+            Arc::new(Node::new(Identifier::try_from(i).unwrap(), n, t, ks))
+        })
+        .collect();
+    rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
+    let plain: Peers = nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect();
+    (nodes, plain)
+}
+
 // ── a member that misbehaves on request ───────────────────────────────────────────────────────
 
 /// What a member does with one Peer method, for one caller or all.
@@ -855,17 +872,7 @@ async fn t21_a_signature_that_finds_the_trial_taken_still_tries_its_subset_in_pl
 #[tokio::test(start_paused = true)]
 async fn t22_a_trial_whose_peer_was_never_sent_a_round_is_given_back() {
     let tmp = tempfile::tempdir().unwrap();
-    let nodes: Vec<Arc<Node>> = (1..=5u16)
-        .map(|i| {
-            let ks = KeyStore::open(tmp.path().join(format!("node-{i}"))).unwrap();
-            Arc::new(Node::new(Identifier::try_from(i).unwrap(), 5, 3, ks))
-        })
-        .collect();
-    rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
-    let plain: Peers = nodes
-        .iter()
-        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
-        .collect();
+    let (nodes, plain) = local_mesh(tmp.path(), 5, 3);
     run_dkg(&plain, KEY).await.unwrap();
     let round1s: Round1Log = Arc::default();
     let refuse = Arc::new(AtomicBool::new(true));
