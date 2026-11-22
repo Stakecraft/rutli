@@ -40,11 +40,23 @@ FSYNC_PROBE_SCRIPT = (
 # file's sync_all and its directory's sync_all.
 FLUSHES_PER_SHARE = 3
 
-# Which nodes release a share for a signature led by each node: the leader tries its candidate
-# t-subsets "leader first, then by identifier" (frost/cosigner/src/orchestrator.rs), so with three
-# nodes and threshold 2, leader 1 signs with 2, leaders 2 and 3 with 1. Node 1 releases a share for
-# every signature.
-DEFAULT_SUBSETS = {1: (1, 2), 2: (2, 1), 3: (3, 1)}
+# Which nodes release a share for a signature: the leader, and the t - 1 cosigners after an offset
+# of the other cosigners that a hash of the intent's request id picks (#250,
+# frost/cosigner/src/orchestrator.rs). Over many requests spread evenly over the leaders, each node
+# leads 1/n of the signatures and is a partner in (t - 1)/(n - 1) of the others: it releases a
+# share for t/n of all signatures (two thirds each with three nodes and threshold 2).
+DEFAULT_THRESHOLD = 2
+
+
+def share_fractions(nodes, threshold=DEFAULT_THRESHOLD, subsets=None):
+    """The fraction of all signatures for which each node releases a share. `subsets`
+    ({leader: node ids}): a fixed subset per leader instead of the hashed partners, leaders spread
+    evenly (a cosigner older than #250 signs with the lowest other identifiers:
+    {1: (1, 2), 2: (2, 1), 3: (3, 1)})."""
+    nodes = list(nodes)
+    if subsets:
+        return {n: sum(1 for s in subsets.values() if n in s) / len(subsets) for n in nodes}
+    return {n: min(1.0, threshold / len(nodes)) for n in nodes} if nodes else {}
 
 
 def parse_share_probe(text, rounds=SHARE_PROBE_ROUNDS):
@@ -124,16 +136,15 @@ def parse_dd(text, writes=FSYNC_PROBE_WRITES):
     return round(float(m.group(1)) / writes * 1000, 3)
 
 
-def predicted_ceiling(ms_per_share, subsets=None):
+def predicted_ceiling(ms_per_share, subsets=None, threshold=DEFAULT_THRESHOLD):
     """Signatures per second the flushes alone allow, from each node's measured milliseconds per
     released share ({node id: ms}), if a node's shares are flushed one after another and requests
-    are spread evenly over the leaders, which sign with `subsets` ({leader: node ids}). A node that
-    serves a fraction f of all signatures caps the rate at 1000 / (ms × f); the lowest cap is the
-    ceiling. An upper bound: a per-key lock, CPU or the network lower it."""
-    subsets = subsets or DEFAULT_SUBSETS
+    are spread evenly over the leaders (share_fractions: the hashed partners, or `subsets`). A node
+    that serves a fraction f of all signatures caps the rate at 1000 / (ms × f); the lowest cap is
+    the ceiling. An upper bound: a per-key lock, CPU or the network lower it."""
     if not ms_per_share or any(not ms or ms <= 0 for ms in ms_per_share.values()):
         return None
-    share = {n: sum(1 for s in subsets.values() if n in s) / len(subsets) for n in ms_per_share}
+    share = share_fractions(ms_per_share, threshold, subsets)
     caps = [1000.0 / (ms * share[n]) for n, ms in ms_per_share.items() if share[n] > 0]
     return round(min(caps), 1) if caps else None
 

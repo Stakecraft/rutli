@@ -953,10 +953,11 @@ class Diagnosis:
         out["fsync_probe"] = self.fsync_probe()
         per_node = {NODES.index(n) + 1: v["ms_per_share"] for n, v in out["fsync_probe"].items()}
         # What the flushes alone would allow (diagnose.predicted_ceiling), from each node's own
-        # probe and the leaders' subset order, to hold against the measured plateau.
+        # probe and how often each node releases a share, to hold against the measured plateau.
         out["predicted_ceiling_signs_per_sec"] = diagnose.predicted_ceiling(per_node)
         out["ceiling_model"] = ("each node flushes its shares one after another; leaders spread evenly; "
-                                "subsets leader first, then by identifier (node 1 serves every signature)")
+                                "partners after a hash of the request id (#250): each node releases a share "
+                                "for t/n of the signatures")
 
         sign_keys = [f"perf-ramp-{i}" for i in range(max(1, int(mix.get("sign_keys", 2))))]
         ecdh_keys = [f"rutli-perf-ramp-{i}" for i in range(int(mix.get("ecdh_keys", 1)))] if d.get("with_ecdh") else []
