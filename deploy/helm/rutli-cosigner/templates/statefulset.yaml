@@ -1,5 +1,5 @@
 {{- if eq (include "rutli-cosigner.topology" .) "legacy" }}
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 apiVersion: apps/v1
 kind: StatefulSet

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 #
 # Regenerate the third-party license files that ship with Rütli's release artifacts:

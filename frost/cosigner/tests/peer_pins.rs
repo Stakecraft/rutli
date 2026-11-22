@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Peer key pins (`peers[].tls_spki_sha256`) on the wire, both ways, over an in-memory network

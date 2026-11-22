@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Property tests for the on-disk and portable formats (issue #121): sealed key files (v1 and v2),

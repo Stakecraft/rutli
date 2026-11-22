@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! `rutli-cosigner residue-scan`: a read-only inventory of key material on this node's volume and

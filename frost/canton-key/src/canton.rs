@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Canton's private-key protobuf messages (`crypto/v30/crypto.proto`) and their two containers:

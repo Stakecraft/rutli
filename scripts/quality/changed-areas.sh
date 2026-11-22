@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Print the quality areas a change touches, comma-separated, for collect.sh --only.
 #

@@ -13,7 +13,7 @@
 {{- range $node := $nodes }}
 {{- $id := int $node.id }}
 {{- $name := printf "%s-n%d" $fullname $id }}
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 #
 # Node {{ $id }} (topology=perNode). This pod spec names exactly one seal Secret and one TLS Secret —

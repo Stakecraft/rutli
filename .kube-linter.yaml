@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # kube-linter configuration, read from the repository root by scripts/quality/k8s.sh and by a local
 # `kube-linter lint <rendered manifests>` run from here. Render the chart the way

@@ -141,7 +141,7 @@ formats differently around your edits. Merge commits, never a rebase or force-pu
   see `frost/deny.toml` and `scripts/third-party-licenses-jvm.py`.
 - **An SPDX header** on new source files, the same as the existing ones:
   ```
-  // Copyright 2026 StakeCraft
+  // Copyright 2026 StakeCraft LLC
   // SPDX-License-Identifier: Apache-2.0
   ```
   (`#` comments in shell and YAML).

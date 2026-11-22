@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Peer liveness: what a leader knows about each remote cosigner between calls, and the load

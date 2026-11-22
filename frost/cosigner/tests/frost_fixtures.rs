@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Known-answer tests over FROST data written by frost-ed25519 2.2.0: sealed key files (after a

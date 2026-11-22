@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Generate a mutual-TLS trust domain for a FROST cluster: one cluster CA, a cert per cosigner, and
 # a client cert for the driver, one for the operator (verify-key and verify-hosted: KeyStatus,

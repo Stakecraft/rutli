@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Collect the quality metrics of a tree into one JSON file. Numbers only, no pass/fail:
 # ratchet.sh compares them with quality/baseline.json, render.sh turns two of them into a table.

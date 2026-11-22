@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! `rutli-cosigner keyfile …` and the daemon's start-up checks of the key-file format (audit M4),

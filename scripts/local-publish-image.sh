@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Build and push the multi-arch cosigner image from a workstation, the way
 # .github/workflows/publish-image.yml does (context frost/, frost/Dockerfile, linux/amd64 +

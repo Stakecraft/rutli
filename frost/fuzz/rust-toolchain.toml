@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # libFuzzer needs a nightly compiler (-Zsanitizer). Pinned, so a nightly regression does not turn the
 # fuzz job red overnight; bump it deliberately. .github/workflows/fuzz.yml installs this version. The

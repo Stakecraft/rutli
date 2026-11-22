@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 #
 # Soak stack: the production-flavored 2-of-3 FROST cluster (mTLS + sealed shares, included from

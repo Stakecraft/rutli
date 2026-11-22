@@ -1,6 +1,6 @@
 {{- if and (eq (include "rutli-cosigner.topology" .) "perNode") .Values.backup.enabled }}
 {{- $backup := .Values.backup }}
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 #
 # The backup sidecar's scripts (topology=perNode). No secrets: per-node credentials, if any, come

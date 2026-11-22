@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Micro-benchmarks of one cosigner's part in a 2-of-3 signature, as the daemon calls it:

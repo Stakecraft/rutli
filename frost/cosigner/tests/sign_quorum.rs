@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Sign-time epoch checks, stale-share detection and t-subset retry (audit H1, M1), over in-process

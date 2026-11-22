@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! The accept loop (`rutli_cosigner::accept`) under real mutual TLS on 127.0.0.1: a connection

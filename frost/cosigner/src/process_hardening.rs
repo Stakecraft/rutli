@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Keep a crashing process's memory out of core dumps: `RLIMIT_CORE = 0` and, on Linux,

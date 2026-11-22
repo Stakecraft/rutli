@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Test of scripts/upgrade-cosigners.sh against a fake kubectl (a small simulation of three
 # single-replica StatefulSets and their pods). It checks the order and the safety rules the script

@@ -1,5 +1,5 @@
 {{/*
-Copyright 2026 StakeCraft
+Copyright 2026 StakeCraft LLC
 SPDX-License-Identifier: Apache-2.0
 */}}
 {{- define "rutli-cosigner.name" -}}

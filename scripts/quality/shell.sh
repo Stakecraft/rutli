@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Shell metrics: shellcheck findings by severity and the number of files shfmt would change.
 # Shell files are the tracked *.sh / *.bash files and extension-less files with a sh/bash shebang.

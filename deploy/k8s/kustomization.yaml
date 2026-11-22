@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 #
 # Applies the cosigner cluster. Create the Secrets out-of-band first (see secrets.example.yaml);

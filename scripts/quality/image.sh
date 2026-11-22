@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Vulnerabilities in the released cosigner image, by severity (trivy, OS packages and Rust
 # binaries). The image is QUALITY_IMAGE, or by default the image of the last release tag of the

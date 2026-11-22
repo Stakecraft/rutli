@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Scala metrics for driver/: scalafmt drift, compiler warnings, tests, coverage (sbt-scoverage).
 # The generated gRPC Java in driver/src/main/java is not counted. Run by collect.sh.
