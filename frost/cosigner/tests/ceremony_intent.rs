@@ -8,6 +8,9 @@
 //! cosigner (the compromised node), a second key certified under the driver's CN (pinned out), and
 //! a "driver" from another CA.
 
+// The daemon's error type is large by value (see the crate root); the test wrappers return it too.
+#![allow(clippy::result_large_err)]
+
 #[path = "common/pki.rs"]
 mod pki;
 
@@ -636,7 +639,9 @@ impl Rig {
 
     /// A refresh of `KEY` led through `peers` under the refresher's intent with request id `rid`.
     async fn refresh_with(&self, peers: &Peers, rid: u8) -> rutli_cosigner::Result<[u8; 32]> {
-        let intent = self.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, rid);
+        let intent = self
+            .ids
+            .ceremony("refresher", CeremonyKind::Refresh, KEY, rid);
         run_refresh_with_intent(peers, KEY, Some(intent)).await
     }
 
@@ -651,7 +656,8 @@ impl Rig {
     /// The refresher's intent for a refresh of `KEY` with request id `rid`, and its ceremony id.
     fn refresh_intent(&self, rid: u8) -> (pb::SignedIntent, String) {
         (
-            self.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, rid),
+            self.ids
+                .ceremony("refresher", CeremonyKind::Refresh, KEY, rid),
             id(CeremonyKind::Refresh, rid),
         )
     }
@@ -1099,11 +1105,7 @@ async fn only_the_refresher_role_refreshes_unless_signer_may_refresh() {
         .await,
         "signed by \"operator\"",
     );
-    assert_eq!(
-        r.refresh_with(&r.peers, 4).await
-        .unwrap(),
-        group
-    );
+    assert_eq!(r.refresh_with(&r.peers, 4).await.unwrap(), group);
     // With signer_may_refresh, the driver may.
     let lenient_role = rig(|_| SigningPolicyConfig {
         require_ceremony_intent: Some(true),
@@ -1275,11 +1277,7 @@ async fn without_enforcement_an_absent_intent_is_counted_and_a_present_one_verif
         run_refresh_with_intent(&r.peers, KEY, Some(forged)).await,
         "signature",
     );
-    assert_eq!(
-        r.refresh_with(&r.peers, 3).await
-        .unwrap(),
-        group
-    );
+    assert_eq!(r.refresh_with(&r.peers, 3).await.unwrap(), group);
 
     // The counters, on one node's guard.
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -2219,11 +2217,7 @@ async fn a_second_refresh_inside_the_interval_is_refused_whoever_leads() {
     let r = rig(|_| limited());
     let group = r.first_dkg(&r.peers).await;
     // A refresh right after the DKG is fine: DKGs do not count.
-    assert_eq!(
-        r.refresh_with(&r.peers, 2).await
-        .unwrap(),
-        group
-    );
+    assert_eq!(r.refresh_with(&r.peers, 2).await.unwrap(), group);
     for leader in 0..3 {
         let rid = 10 + leader as u8;
         let m = too_soon(
@@ -2256,16 +2250,12 @@ async fn a_leader_without_the_interval_is_held_to_it_by_every_honest_node() {
     r.dkg_then_refresh().await;
 
     // Led by node 3: its own check and fence pass; node 1's fence (the first peer) refuses.
-    let m = too_soon(
-        r.refresh_with(&r.led_by(2), 3).await,
-    );
+    let m = too_soon(r.refresh_with(&r.led_by(2), 3).await);
     assert!(
         m.contains("refused by node 1"),
         "the refusal comes from a peer's fence: {m}"
     );
-    let m = too_soon(
-        r.refresh_with(&r.led_by(0), 4).await,
-    );
+    let m = too_soon(r.refresh_with(&r.led_by(0), 4).await);
     assert!(m.contains("refused by node 1"), "{m}");
     r.assert_on_epoch(2);
 
@@ -2345,11 +2335,7 @@ async fn the_interval_survives_a_restart_and_the_weekly_refresh_runs() {
         }
     }
     r.restart(|_| limited());
-    assert_eq!(
-        r.refresh_with(&r.peers, 4).await
-        .unwrap(),
-        group
-    );
+    assert_eq!(r.refresh_with(&r.peers, 4).await.unwrap(), group);
     r.assert_on_epoch(3);
 }
 
@@ -2367,9 +2353,7 @@ async fn only_the_operators_node_config_waives_the_interval_and_only_for_one_ref
         signer_may_refresh: true,
         ..limited()
     });
-    too_soon(
-        r.refresh_with(&r.peers, 3).await,
-    );
+    too_soon(r.refresh_with(&r.peers, 3).await);
     too_soon(
         run_refresh_with_intent(
             &r.peers,
@@ -2396,27 +2380,17 @@ async fn only_the_operators_node_config_waives_the_interval_and_only_for_one_ref
     };
     // On one node only: the others still refuse.
     r.restart(|i| if i == 1 { waived.clone() } else { limited() });
-    too_soon(
-        r.refresh_with(&r.peers, 6).await,
-    );
+    too_soon(r.refresh_with(&r.peers, 6).await);
     r.assert_on_epoch(2);
     // On every node: one refresh goes through...
     r.restart(|_| waived.clone());
-    assert_eq!(
-        r.refresh_with(&r.peers, 7).await
-        .unwrap(),
-        group
-    );
+    assert_eq!(r.refresh_with(&r.peers, 7).await.unwrap(), group);
     r.assert_on_epoch(3);
     // ...and only one: the next is held to the interval from it, waiver or not, restart or not.
-    let m = too_soon(
-        r.refresh_with(&r.peers, 8).await,
-    );
+    let m = too_soon(r.refresh_with(&r.peers, 8).await);
     assert!(m.contains(&id(CeremonyKind::Refresh, 7)), "{m}");
     r.restart(|_| waived.clone());
-    too_soon(
-        r.refresh_with(&r.peers, 9).await,
-    );
+    too_soon(r.refresh_with(&r.peers, 9).await);
     r.assert_on_epoch(3);
 }
 
@@ -2531,9 +2505,7 @@ async fn a_late_commit_holds_the_next_refresh_off_from_the_commit() {
     }
     r.assert_on_epoch(2);
     // Right after the commit: refused, counted from the commit.
-    let m = too_soon(
-        r.refresh_with(&r.peers, 3).await,
-    );
+    let m = too_soon(r.refresh_with(&r.peers, 3).await);
     assert!(m.contains(&xid), "{m}");
     // 73 h after the commit: the next refresh runs.
     r.shift_records(
@@ -2542,11 +2514,7 @@ async fn a_late_commit_holds_the_next_refresh_off_from_the_commit() {
         -73 * H,
     );
     r.restart(|_| limited());
-    assert_eq!(
-        r.refresh_with(&r.peers, 4).await
-        .unwrap(),
-        group
-    );
+    assert_eq!(r.refresh_with(&r.peers, 4).await.unwrap(), group);
     r.assert_on_epoch(3);
 }
 
@@ -2635,9 +2603,7 @@ async fn a_refresh_aborted_by_the_resolver_after_staging_counts() {
         );
     }
     r.assert_on_epoch(1);
-    let m = too_soon(
-        r.refresh_with(&r.peers, 3).await,
-    );
+    let m = too_soon(r.refresh_with(&r.peers, 3).await);
     assert!(m.contains(&xid), "{m}");
     r.assert_on_epoch(1);
 }
@@ -2662,9 +2628,7 @@ async fn a_node_without_its_records_or_with_an_older_one_is_outvoted_at_the_fenc
         r.nodes[0].refresh_interval_verdict(KEY).unwrap(),
         rutli_cosigner::refresh_interval::Verdict::Allowed
     );
-    let m = too_soon(
-        r.refresh_with(&r.led_by(0), 3).await,
-    );
+    let m = too_soon(r.refresh_with(&r.led_by(0), 3).await);
     assert!(m.contains("refused by node 2"), "{m}");
     r.assert_on_epoch(2);
     for n in 0..3 {
@@ -2697,9 +2661,7 @@ async fn a_node_without_its_records_or_with_an_older_one_is_outvoted_at_the_fenc
         rutli_cosigner::refresh_interval::Verdict::Allowed
     );
     let before = r.tree(1);
-    let m = too_soon(
-        r.refresh_with(&r.led_by(2), 3).await,
-    );
+    let m = too_soon(r.refresh_with(&r.led_by(2), 3).await);
     assert!(m.contains("refused by node 1"), "{m}");
     r.assert_on_epoch(2);
     for n in 0..3 {
