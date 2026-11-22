@@ -395,8 +395,7 @@ impl Cluster {
                 .join("journal")
                 .join(KEY),
         )
-        .map(|r| r.entries)
-        .unwrap_or_default()
+        .map_or_default(|r| r.entries)
     }
 
     fn markers(&self, i: usize) -> usize {
@@ -405,7 +404,7 @@ impl Cluster {
             .join(format!("node-{}", i + 1))
             .join("keys")
             .join(format!("{KEY}.nonces"));
-        std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0)
+        std::fs::read_dir(dir).map_or(0, std::iter::Iterator::count)
     }
 }
 
@@ -419,7 +418,7 @@ fn round1(
         key_id: key.into(),
         session_id: session.into(),
         intent,
-        message: msg.map(<[u8]>::to_vec).unwrap_or_default(),
+        message: msg.map_or_default(<[u8]>::to_vec),
         signers: vec![1, 3],
         ..Default::default()
     }
@@ -544,7 +543,10 @@ async fn a_compromised_cosigner_gets_no_commitment_from_an_honest_peer_without_a
         })
         .await;
     assert!(r2.is_err());
-    assert!(c.journal(0).is_empty());
+    assert_eq!(
+        c.journal(0),
+        [] as [rutli_cosigner::journal::JournalEntry; 0]
+    );
 }
 
 /// Round 1 of `session` on node 1 (over the attacker's Peer connection) and on node 3 (the
@@ -1223,8 +1225,7 @@ impl PeerApi for Late {
                 replay_unknown: unknown_session(&replay),
                 replay: replay
                     .err()
-                    .map(|e| e.to_string())
-                    .unwrap_or_else(|| "SIGNED TWICE".into()),
+                    .map_or_else(|| "SIGNED TWICE".into(), |e| e.to_string()),
             });
             first
         })
@@ -1981,13 +1982,11 @@ async fn a_round2_after_a_restart_is_an_unknown_session_not_a_policy_refusal() {
         ]);
         let markers = || {
             std::fs::read_dir(tmp.path().join(format!("node-1/keys/{KEY}.nonces")))
-                .map(|d| d.count())
-                .unwrap_or(0)
+                .map_or(0, std::iter::Iterator::count)
         };
         let journaled = || {
             read_key_dir(&tmp.path().join("node-1/journal").join(KEY))
-                .map(|r| r.entries.len())
-                .unwrap_or(0)
+                .map_or(0, |r| r.entries.len())
         };
         let (burned, entries) = (markers(), journaled());
 
@@ -2074,8 +2073,7 @@ async fn a_round2_without_its_round1_authorization_is_refused_while_the_nonces_a
     ]);
     let markers = || {
         std::fs::read_dir(tmp.path().join(format!("node-1/keys/{KEY}.nonces")))
-            .map(|d| d.count())
-            .unwrap_or(0)
+            .map_or(0, std::iter::Iterator::count)
     };
     let burned = markers();
     // Lose the authorization (as a restart or a poisoned map would), keep the nonces.
@@ -2245,8 +2243,7 @@ async fn a_round2_after_an_abort_is_an_unknown_session() {
         "{err:?}"
     );
     assert!(read_key_dir(&tmp.path().join("node-1/journal").join(KEY))
-        .map(|r| r.entries.is_empty())
-        .unwrap_or(true));
+        .map_or(true, |r| r.entries.is_empty()));
 }
 
 /// The opt-out: with `require_intent: false`, a driver (or leader) that predates intents
@@ -2492,7 +2489,10 @@ async fn a_refresh_inside_the_interval_is_refused_at_the_leader_over_grpc() {
     }
     for n in &c.nodes {
         assert_eq!(n.key_epoch(KEY).unwrap().epoch, epoch);
-        assert!(n.staged_records().is_empty());
+        assert_eq!(
+            n.staged_records(),
+            [] as [rutli_cosigner::ceremony_record::CeremonyRecord; 0]
+        );
     }
 
     // Node 1 (endpoint 0) without the interval leads: its own pre-check and fence pass, and node 2,
@@ -2542,7 +2542,10 @@ async fn a_refresh_inside_the_interval_is_refused_at_the_leader_over_grpc() {
     );
     for n in &c.nodes {
         assert_eq!(n.key_epoch(KEY).unwrap().epoch, epoch);
-        assert!(n.staged_records().is_empty());
+        assert_eq!(
+            n.staged_records(),
+            [] as [rutli_cosigner::ceremony_record::CeremonyRecord; 0]
+        );
     }
 }
 
@@ -2951,7 +2954,7 @@ async fn the_operator_certificate_reaches_only_the_operator_rpcs_and_every_signe
             .1
             .as_ref()
             .err()
-            .map(|s| s.code())
+            .map(tonic::Status::code)
     };
     assert_eq!(code_of("KeyStatus"), None);
     assert_eq!(

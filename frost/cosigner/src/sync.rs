@@ -77,7 +77,7 @@ mod tests {
         assert_eq!(*recover(&m, "test"), vec![1, 2]);
         assert!(!m.is_poisoned());
         poison(&m);
-        assert!(recover_reset(&m, "test", |v| v.clear()).is_empty());
+        assert!(recover_reset(&m, "test", std::vec::Vec::clear).is_empty());
         assert!(!m.is_poisoned());
     }
 }

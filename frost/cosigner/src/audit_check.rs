@@ -92,7 +92,7 @@ pub fn read_driver_audit(path: &Path) -> Result<DriverAudit> {
     let mut text = String::from_utf8(bytes).map_err(|_| bad(path, "not UTF-8"))?;
     let mut torn_tail = false;
     if !text.is_empty() && !text.ends_with('\n') {
-        let cut = text.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let cut = text.rfind('\n').map_or(0, |i| i + 1);
         if serde_json::from_str::<AuditLine>(&text[cut..]).is_err() {
             text.truncate(cut);
             torn_tail = true;
@@ -319,16 +319,13 @@ pub fn cross_check(
         if let Some(rid) = &s.request_id {
             let g = driver.entry((s.key_id.clone(), rid.clone())).or_default();
             g.lines += 1;
-            match &s.msg {
-                Some(m) => {
-                    let mut slot = g.by_msg.get(m).copied();
-                    better(&mut slot, s);
-                    g.by_msg.insert(m.clone(), slot.unwrap_or(s));
-                }
-                None => {
-                    g.legacy_lines += 1;
-                    better(&mut g.legacy, s);
-                }
+            if let Some(m) = &s.msg {
+                let mut slot = g.by_msg.get(m).copied();
+                better(&mut slot, s);
+                g.by_msg.insert(m.clone(), slot.unwrap_or(s));
+            } else {
+                g.legacy_lines += 1;
+                better(&mut g.legacy, s);
             }
         }
     }

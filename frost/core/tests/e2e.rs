@@ -46,7 +46,7 @@ fn dkg_cluster(tmp: &tempfile::TempDir) -> Vec<Cosigner> {
 
     // Part 1 — everyone broadcasts.
     let mut r1: BTreeMap<Identifier, frost::keys::dkg::round1::Package> = BTreeMap::new();
-    for (&id, p) in participants.iter_mut() {
+    for (&id, p) in &mut participants {
         r1.insert(id, p.part1().unwrap());
     }
 
@@ -55,7 +55,7 @@ fn dkg_cluster(tmp: &tempfile::TempDir) -> Vec<Cosigner> {
         Identifier,
         BTreeMap<Identifier, frost::keys::dkg::round2::Package>,
     > = BTreeMap::new();
-    for (&id, p) in participants.iter_mut() {
+    for (&id, p) in &mut participants {
         let others: BTreeMap<_, _> = r1
             .iter()
             .filter(|(&k, _)| k != id)
@@ -66,7 +66,7 @@ fn dkg_cluster(tmp: &tempfile::TempDir) -> Vec<Cosigner> {
 
     // Part 3 — deliver the point-to-point round-2 packages and finalize.
     let mut cosigners = Vec::new();
-    for (&id, p) in participants.iter_mut() {
+    for (&id, p) in &mut participants {
         let others_r1: BTreeMap<_, _> = r1
             .iter()
             .filter(|(&k, _)| k != id)
@@ -347,12 +347,12 @@ fn refresh_keeps_group_key_and_invalidates_pre_refresh_shares() {
         .map(|&id| (id, RefreshParticipant::new(id, MAX_SIGNERS, MIN_SIGNERS)))
         .collect();
     let mut r1 = BTreeMap::new();
-    for (&id, p) in parts.iter_mut() {
+    for (&id, p) in &mut parts {
         r1.insert(id, p.part1().unwrap());
     }
     let mut r2out: BTreeMap<Identifier, BTreeMap<Identifier, frost::keys::dkg::round2::Package>> =
         BTreeMap::new();
-    for (&id, p) in parts.iter_mut() {
+    for (&id, p) in &mut parts {
         let others: BTreeMap<_, _> = r1
             .iter()
             .filter(|(&k, _)| k != id)
@@ -365,7 +365,7 @@ fn refresh_keeps_group_key_and_invalidates_pre_refresh_shares() {
         frost::keys::KeyPackage,
         frost::keys::PublicKeyPackage,
     )> = Vec::new();
-    for (&id, p) in parts.iter_mut() {
+    for (&id, p) in &mut parts {
         let (_, old_kp, old_pkp_i) = dealt.iter().find(|(i, _, _)| *i == id).unwrap();
         let others: BTreeMap<_, _> = r1
             .iter()

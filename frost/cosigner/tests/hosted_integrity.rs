@@ -915,7 +915,7 @@ async fn the_leader_writes_a_new_key_only_after_the_quorum_holds_it() {
             before_replicate: Some(Box::new(move || {
                 s.lock()
                     .unwrap()
-                    .push(n.hosted_exists("rutli-sym-late-write"))
+                    .push(n.hosted_exists("rutli-sym-late-write"));
             })),
             ..Hooks::default()
         }

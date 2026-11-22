@@ -76,7 +76,7 @@ pub fn findings(cfg: &Config) -> Vec<Finding> {
             setting,
             found,
             required,
-        })
+        });
     };
     let tls = cfg.tls.is_some();
     let p = &cfg.signing_policy;
@@ -411,32 +411,32 @@ mod tests {
         let breaks: Vec<Break> = vec![
             ("tls", Level::Required, |c| c.tls = None),
             ("tls.allow_expired_ca", Level::Required, |c| {
-                c.tls.as_mut().unwrap().allow_expired_ca = true
+                c.tls.as_mut().unwrap().allow_expired_ca = true;
             }),
             ("tls.require_peer_pins", Level::Required, |c| {
-                c.tls.as_mut().unwrap().require_peer_pins = Some(false)
+                c.tls.as_mut().unwrap().require_peer_pins = Some(false);
             }),
             ("share_seal", Level::Required, |c| c.share_seal = None),
             ("share_seal.secret_env", Level::Required, |c| {
                 c.share_seal = Some(ShareSealConfig {
                     secret_env: Some("SEAL".into()),
                     secret_file: None,
-                })
+                });
             }),
             ("share_seal.secret_file", Level::Required, |c| {
-                c.share_seal = Some(ShareSealConfig::default())
+                c.share_seal = Some(ShareSealConfig::default());
             }),
             ("operator_allowlist", Level::Required, |c| {
-                c.operator_allowlist = None
+                c.operator_allowlist = None;
             }),
             ("refresh_allowlist", Level::Required, |c| {
-                c.refresh_allowlist = Some(vec![])
+                c.refresh_allowlist = Some(vec![]);
             }),
             ("signing_policy.signer_may_refresh", Level::Required, |c| {
-                c.signing_policy.signer_may_refresh = true
+                c.signing_policy.signer_may_refresh = true;
             }),
             ("signing_policy.require_intent", Level::Required, |c| {
-                c.signing_policy.require_intent = Some(false)
+                c.signing_policy.require_intent = Some(false);
             }),
             (
                 "signing_policy.require_ceremony_intent",
@@ -444,16 +444,16 @@ mod tests {
                 |c| c.signing_policy.require_ceremony_intent = Some(false),
             ),
             ("signing_policy.require_epoch_match", Level::Required, |c| {
-                c.signing_policy.require_epoch_match = false
+                c.signing_policy.require_epoch_match = false;
             }),
             ("signing_policy.signer_acl_required", Level::Required, |c| {
-                c.signing_policy.signer_acl_required = false
+                c.signing_policy.signer_acl_required = false;
             }),
             ("signing_policy.signer_acl", Level::Required, |c| {
-                c.signing_policy.signer_acl = BTreeMap::new()
+                c.signing_policy.signer_acl = BTreeMap::new();
             }),
             ("signing_policy.signer_pins", Level::Required, |c| {
-                c.signing_policy.signer_pins = BTreeMap::new()
+                c.signing_policy.signer_pins = BTreeMap::new();
             }),
             (
                 "signing_policy.sign_rate_limit_per_min",
@@ -470,7 +470,7 @@ mod tests {
                     key_id_prefix: "frost-".into(),
                     per_min: 0,
                     per_day: 10,
-                }]
+                }];
             }),
             (
                 "ceremony_sign_test_rate_limit_per_min",
@@ -478,17 +478,17 @@ mod tests {
                 |c| c.ceremony_sign_test_rate_limit_per_min = 0,
             ),
             ("keyfile.write_version", Level::Required, |c| {
-                c.keyfile.write_version = 1
+                c.keyfile.write_version = 1;
             }),
             ("keyfile.cluster_uuid", Level::Required, |c| {
-                c.keyfile.cluster_uuid = None
+                c.keyfile.cluster_uuid = None;
             }),
             ("keyfile.accept_v1", Level::Required, |c| {
-                c.keyfile.accept_v1 = true
+                c.keyfile.accept_v1 = true;
             }),
             ("cluster_id", Level::Required, |c| c.cluster_id = None),
             ("cluster_id_change_allowed", Level::Required, |c| {
-                c.cluster_id_change_allowed = true
+                c.cluster_id_change_allowed = true;
             }),
             (
                 "hosted_keys.decrypt_rate_limit_per_min",
@@ -497,7 +497,7 @@ mod tests {
                     c.hosted_keys = Some(HostedKeysConfig {
                         decrypt_rate_limit_per_min: 0,
                         ..hosted()
-                    })
+                    });
                 },
             ),
             (
@@ -507,25 +507,25 @@ mod tests {
                     c.hosted_keys = Some(HostedKeysConfig {
                         delete_allowlist: vec!["operator".into()],
                         ..hosted()
-                    })
+                    });
                 },
             ),
             ("hosted_keys.commitment_key", Level::Required, |c| {
                 c.hosted_keys = Some(HostedKeysConfig {
                     commitment_key: None,
                     ..hosted()
-                })
+                });
             }),
             ("signing_policy.rules", Level::Advisory, |c| {
                 c.signing_policy.rules = vec![ApprovalRuleConfig {
                     key_id_prefix: "x".into(),
                     mode: "auto".into(),
                     threshold: 0,
-                }]
+                }];
             }),
             // A quorum rule for another key does not cover the namespace key.
             ("signing_policy.rules", Level::Advisory, |c| {
-                c.signing_policy.rules[0].key_id_prefix = "p1-rutli-enc-".into()
+                c.signing_policy.rules[0].key_id_prefix = "p1-rutli-enc-".into();
             }),
         ];
         // A well-formed hosted-keys block on its own fires nothing.

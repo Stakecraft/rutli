@@ -267,7 +267,7 @@ fn latency(micros: &mut [u64]) -> Latency {
         let idx = ((p / 100.0) * n as f64).ceil() as usize;
         micros.get(idx.clamp(1, n) - 1).copied().unwrap_or_default()
     };
-    let sum: u128 = micros.iter().map(|&m| m as u128).sum();
+    let sum: u128 = micros.iter().map(|&m| u128::from(m)).sum();
     Latency {
         count: micros.len() as u64,
         mean_ms: millis((sum / micros.len() as u128) as u64),

@@ -415,11 +415,11 @@ fn regenerate() {
             .collect()
     };
     let mut r2: BTreeMap<u16, BTreeMap<Identifier, _>> = BTreeMap::new();
-    for (i, p) in parts.iter_mut() {
+    for (i, p) in &mut parts {
         r2.insert(*i, p.part2(&others(*i)).unwrap());
     }
     let mut dkg_shares = BTreeMap::new();
-    for (i, p) in parts.iter_mut() {
+    for (i, p) in &mut parts {
         let to_me: BTreeMap<Identifier, _> = r2
             .iter()
             .filter(|(j, _)| **j != *i)
@@ -516,11 +516,11 @@ fn regenerate() {
             .collect()
     };
     let mut rr2: BTreeMap<u16, BTreeMap<Identifier, _>> = BTreeMap::new();
-    for (i, p) in rparts.iter_mut() {
+    for (i, p) in &mut rparts {
         rr2.insert(*i, p.part2(&rothers(*i)).unwrap());
     }
     let mut refreshed = BTreeMap::new();
-    for (i, p) in rparts.iter_mut() {
+    for (i, p) in &mut rparts {
         let to_me: BTreeMap<Identifier, _> = rr2
             .iter()
             .filter(|(j, _)| **j != *i)

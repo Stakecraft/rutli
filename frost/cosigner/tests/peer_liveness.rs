@@ -228,7 +228,7 @@ where
         let caller = req
             .extensions()
             .get::<TlsConnectInfo<TcpConnectInfo>>()
-            .and_then(|i| i.peer_certs())
+            .and_then(tonic::transport::server::TlsConnectInfo::peer_certs)
             .and_then(|certs| {
                 certs
                     .first()
@@ -493,9 +493,7 @@ impl Mesh {
 
     /// Nonce markers node `id` has burnt for `KEY`.
     fn markers(&self, id: u16) -> usize {
-        std::fs::read_dir(nonce_dir(self, id))
-            .map(|d| d.count())
-            .unwrap_or(0)
+        std::fs::read_dir(nonce_dir(self, id)).map_or(0, std::iter::Iterator::count)
     }
 
     async fn sign(&self, leader: u16, tag: &str) -> rutli_cosigner::Result<[u8; 64]> {

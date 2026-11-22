@@ -261,8 +261,7 @@ proptest! {
         let expected = rules
             .iter()
             .find(|(p, _, _)| key.starts_with(p.as_str()))
-            .map(|(_, m, d)| (*m, *d))
-            .unwrap_or((default_min, default_day));
+            .map_or((default_min, default_day), |(_, m, d)| (*m, *d));
         prop_assert_eq!(policy.rate_limit_for(&key), expected);
     }
 }
@@ -496,8 +495,8 @@ proptest! {
         let f = fixture();
         let not_after = issued.saturating_add(lifetime);
         let now = absolute_now.unwrap_or_else(|| issued.saturating_add_signed(now_offset));
-        let (i, n, w, skew) = (issued as u128, not_after as u128, now as u128, f.skew_ms as u128);
-        let expected = n >= i && n - i <= f.max_lifetime_ms as u128 && w + skew >= i && w <= n + skew;
+        let (i, n, w, skew) = (u128::from(issued), u128::from(not_after), u128::from(now), u128::from(f.skew_ms));
+        let expected = n >= i && n - i <= u128::from(f.max_lifetime_ms) && w + skew >= i && w <= n + skew;
         let got = f.verifier.check_live(&verified(issued, not_after), now);
         prop_assert_eq!(got.is_ok(), expected, "issued {} not_after {} now {}: {:?}", issued, not_after, now, got.err());
     }
