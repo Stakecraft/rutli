@@ -36,6 +36,10 @@ import subprocess
 import sys
 import time
 
+# The sibling modules (compare, diagnose): `python3 -I` leaves the script's own directory off the path.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import compare
+
 NODES = ["cosigner1", "cosigner2", "cosigner3"]
 
 # Keys of a run. `perf-limited` is the prefix scripts/perf-load.sh gives a sign rate limit of
@@ -307,7 +311,6 @@ class Runner:
         }
         # The cosigners' peer calls during the scenario (#249): from its first load that saw any
         # (a scenario's main stream; percentiles of several loads do not add up).
-        import compare
         for load in loads:
             calls = load.get("server", {}).get("peer_calls")
             if calls:

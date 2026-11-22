@@ -81,9 +81,12 @@ def peer_margin(peer_calls):
 
 
 def peer_call_lines(entries):
-    """Markdown: one row per place and call, p99.9 against a third of the deadline."""
+    """Markdown: one row per place and call, p99.9 against a third of the deadline. With no
+    readings at all, a line that says so: cosigners before #238 export no peer-call histogram, so
+    such a run baselines throughput and the knee only, and its empty fields are not zeros."""
     if not entries:
-        return []
+        return [("Peer calls: not measured in this run (cosigners without rutli_peer_call_duration_seconds, "
+                 "before #238): no per-call timings, not zeros."), ""]
     lines = ["Peer calls (#249: a deadline stays a constant while p99.9 is at most a third of it):", "",
              "| where | call | calls | p50 ms | p99 ms | p99.9 ms | deadline ms | within a third | margin 3x |",
              "|---|---|---|---|---|---|---|---|---|"]
@@ -277,7 +280,11 @@ def main(argv=None):
                   f"{dx.get('predicted_ceiling_signs_per_sec')}/s; keys: {dx.get('keys_verdict', 'not run')}", ""]
     if current.get("headroom_factor") is not None:
         lines += [f"Headroom factor: {current['headroom_factor']} (profile {current.get('profile')})", ""]
-    lines += peer_call_lines(current.get("peer_calls") or [])
+    # cluster.json lists them all; a compose load.json has them per scenario only.
+    peer = current.get("peer_calls")
+    if peer is None:
+        peer = [{"where": s["name"], "calls": s["peer_calls"]} for s in current.get("scenarios", []) if s.get("peer_calls")]
+    lines += peer_call_lines(peer)
     real = (current.get("ramp") or {}).get("real_load_headroom") or []
     if real:
         lines += ["Headroom against the real load: " + "; ".join(

@@ -345,6 +345,7 @@ class PeerCalls(unittest.TestCase):
         self.assertIn("**NO**", md)
         self.assertIn("FLAG: 1 call(s) without a 3x margin", md)
         self.assertEqual(rc, 0)  # flagged, not failed
+        self.assertIn("not measured", compare.peer_call_lines([])[0])
 
     def test_every_place_is_listed_in_run_order(self):
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
