@@ -82,7 +82,7 @@ numbers as a table on the run's summary page.
 |---|---|
 | `version` | Schema version. A reader refuses a version it does not know; fields are only ever added within a version. |
 | `commit` | The commit the mutants were made from. |
-| `complete` | Every module's job produced results, every baseline passed, and every outcome was understood (`unrecognised` is 0). A reader that gates on the numbers should require it. |
+| `complete` | Every module's job produced results, every baseline passed, and every outcome was understood (`unrecognised` is 0). A reader that gates on the numbers should require it. The workflow's last step does: a run that is not `complete` ends red. |
 | `runs` | How many `outcomes.json` files went into the report (one per module job). |
 | `baseline_ok` | Every run has one baseline, and the unmutated tests passed in it. |
 | `unrecognised` | Outcomes that are no verdict on the tests (a broken build or test tool, a shape this report does not know); listed on the job's log. |
