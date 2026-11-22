@@ -146,6 +146,25 @@ fn ceremony(root: &Path) -> (Vec<Site>, Vec<ShareBundle>, [u8; 32], String) {
     (sites, bundles, public, fingerprint)
 }
 
+/// Step 3 of the runbook: every node installs its own dealt bundle.
+fn install_all(sites: &[Site], bundles: &[ShareBundle], fingerprint: &str) {
+    for (site, bundle) in sites.iter().zip(bundles) {
+        site.import(bundle, fingerprint).unwrap();
+    }
+}
+
+/// Steps 1–3 of the runbook: the ceremony, then the dealt share installed on every node.
+fn installed_ceremony(root: &Path) -> (Vec<Site>, Vec<ShareBundle>, [u8; 32], String) {
+    let (sites, bundles, public, fingerprint) = ceremony(root);
+    install_all(&sites, &bundles, &fingerprint);
+    (sites, bundles, public, fingerprint)
+}
+
+/// A fresh in-process `Node` per site, over the site's key store (a node start).
+fn nodes_of(sites: &[Site]) -> Vec<Arc<Node>> {
+    sites.iter().map(Site::node).collect()
+}
+
 /// The Signer API of `node`, as the daemon serves it (allowlists off: in-process caller).
 fn signer_svc(node: &Arc<Node>, peers: &Peers) -> rutli_cosigner::service::SignerSvc {
     rutli_cosigner::service::SignerSvc {
@@ -211,11 +230,8 @@ async fn verify_key(
 #[tokio::test]
 async fn an_imported_canton_key_signs_verifies_refreshes_and_signs_again() {
     let tmp = tempfile::tempdir().unwrap();
-    let (sites, bundles, public, fingerprint) = ceremony(tmp.path());
-    for (site, bundle) in sites.iter().zip(&bundles) {
-        site.import(bundle, &fingerprint).unwrap();
-    }
-    let nodes: Vec<Arc<Node>> = sites.iter().map(Site::node).collect();
+    let (sites, bundles, public, fingerprint) = installed_ceremony(tmp.path());
+    let nodes = nodes_of(&sites);
     let peers = local_peers(&nodes);
 
     // The cluster's key IS the Canton key: same raw public key, same fingerprint.
@@ -267,7 +283,7 @@ async fn an_imported_canton_key_signs_verifies_refreshes_and_signs_again() {
     );
 
     // A restart (fresh Node over the same store) still signs.
-    let nodes: Vec<Arc<Node>> = sites.iter().map(Site::node).collect();
+    let nodes = nodes_of(&sites);
     let peers = local_peers(&nodes);
     let msg = rutli_frost_core::dealer::canton_test_message(b"after restart");
     assert!(verifies(
@@ -283,7 +299,7 @@ async fn dkg_can_never_mint_or_overwrite_the_imported_id() {
     let (sites, bundles, public, fingerprint) = ceremony(tmp.path());
 
     // Before install: reserved, on every node.
-    let nodes: Vec<Arc<Node>> = sites.iter().map(Site::node).collect();
+    let nodes = nodes_of(&sites);
     let peers = local_peers(&nodes);
     assert!(matches!(
         run_dkg(&peers, KEY).await,
@@ -297,9 +313,7 @@ async fn dkg_can_never_mint_or_overwrite_the_imported_id() {
     }
 
     // After install: still refused, and the key is untouched.
-    for (site, bundle) in sites.iter().zip(&bundles) {
-        site.import(bundle, &fingerprint).unwrap();
-    }
+    install_all(&sites, &bundles, &fingerprint);
     assert!(run_dkg(&peers, KEY).await.is_err());
     let msg = rutli_frost_core::dealer::canton_test_message(b"still the canton key");
     assert!(verifies(
@@ -396,11 +410,8 @@ fn a_bundle_whose_package_records_min_signers_is_refused() {
 #[tokio::test]
 async fn any_two_nodes_sign_with_the_third_down() {
     let tmp = tempfile::tempdir().unwrap();
-    let (sites, bundles, public, fingerprint) = ceremony(tmp.path());
-    for (site, bundle) in sites.iter().zip(&bundles) {
-        site.import(bundle, &fingerprint).unwrap();
-    }
-    let nodes: Vec<Arc<Node>> = sites.iter().map(Site::node).collect();
+    let (sites, _bundles, public, fingerprint) = installed_ceremony(tmp.path());
+    let nodes = nodes_of(&sites);
     for dead in 0..3 {
         let peers: Peers = nodes
             .iter()
@@ -444,7 +455,7 @@ async fn a_half_finished_install_signs_refuses_refresh_and_changes_nothing() {
         .map(|i| std::fs::read(share_file(i)).unwrap())
         .collect();
 
-    let nodes: Vec<Arc<Node>> = sites.iter().map(Site::node).collect();
+    let nodes = nodes_of(&sites);
     let peers = local_peers(&nodes);
 
     // Two installed shares are a quorum: signing works (node 3 answers UnknownKey and is skipped).
@@ -497,10 +508,7 @@ async fn a_half_finished_install_signs_refuses_refresh_and_changes_nothing() {
 async fn the_sign_test_catches_a_node_with_a_broken_secret_share() {
     use frost_ed25519::keys::{KeyPackage, SigningShare};
     let tmp = tempfile::tempdir().unwrap();
-    let (sites, bundles, public, fingerprint) = ceremony(tmp.path());
-    for (site, bundle) in sites.iter().zip(&bundles) {
-        site.import(bundle, &fingerprint).unwrap();
-    }
+    let (sites, _bundles, public, fingerprint) = installed_ceremony(tmp.path());
     // Corrupt node 3's signing share; everything public stays intact.
     let ks = sites[2].keystore();
     let mut share = ks.load(KEY).unwrap();
@@ -517,7 +525,7 @@ async fn the_sign_test_catches_a_node_with_a_broken_secret_share() {
     );
     ks.save(KEY, &share).unwrap();
 
-    let nodes: Vec<Arc<Node>> = sites.iter().map(Site::node).collect();
+    let nodes = nodes_of(&sites);
     let peers = local_peers(&nodes);
     let report = verify_key(&nodes, &peers, &fingerprint, true).await;
     assert!(
@@ -543,11 +551,8 @@ async fn the_sign_test_catches_a_node_with_a_broken_secret_share() {
 #[tokio::test]
 async fn the_ceremony_sign_test_signs_only_its_own_digest_with_exactly_the_quorum_asked() {
     let tmp = tempfile::tempdir().unwrap();
-    let (sites, bundles, public, fingerprint) = ceremony(tmp.path());
-    for (site, bundle) in sites.iter().zip(&bundles) {
-        site.import(bundle, &fingerprint).unwrap();
-    }
-    let nodes: Vec<Arc<Node>> = sites.iter().map(Site::node).collect();
+    let (sites, _bundles, public, _fingerprint) = installed_ceremony(tmp.path());
+    let nodes = nodes_of(&sites);
     let peers = local_peers(&nodes);
 
     let (msg, sig) = ceremony_sign_test(&nodes[0], &peers, KEY, &[2, 3])
@@ -612,11 +617,8 @@ async fn the_ceremony_sign_test_signs_only_its_own_digest_with_exactly_the_quoru
 async fn the_operator_cannot_loop_the_sign_test_into_unbounded_nonce_markers() {
     use rutli_cosigner::pb::signer_server::Signer;
     let tmp = tempfile::tempdir().unwrap();
-    let (sites, bundles, _public, fingerprint) = ceremony(tmp.path());
-    for (site, bundle) in sites.iter().zip(&bundles) {
-        site.import(bundle, &fingerprint).unwrap();
-    }
-    let nodes: Vec<Arc<Node>> = sites.iter().map(Site::node).collect();
+    let (sites, _bundles, _public, _fingerprint) = installed_ceremony(tmp.path());
+    let nodes = nodes_of(&sites);
     let peers = local_peers(&nodes);
     let svc = signer_svc(&nodes[0], &peers);
 
