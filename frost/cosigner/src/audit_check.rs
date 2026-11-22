@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! `rutli-cosigner audit-cross-check`: the driver's hash-chained audit log against the cosigners'
@@ -98,11 +98,14 @@ pub fn read_driver_audit(path: &Path) -> Result<DriverAudit> {
             torn_tail = true;
         }
     }
-    let mut out = DriverAudit { torn_tail, ..Default::default() };
+    let mut out = DriverAudit {
+        torn_tail,
+        ..Default::default()
+    };
     let mut prev = DRIVER_GENESIS.to_string();
     for (i, line) in text.lines().filter(|l| !l.is_empty()).enumerate() {
-        let e: AuditLine =
-            serde_json::from_str(line).map_err(|err| bad(path, &format!("entry {} does not parse: {err}", i + 1)))?;
+        let e: AuditLine = serde_json::from_str(line)
+            .map_err(|err| bad(path, &format!("entry {} does not parse: {err}", i + 1)))?;
         let mut h = Sha256::new();
         h.update(e.prev.as_bytes());
         h.update(e.seq.to_string().as_bytes());
@@ -110,11 +113,15 @@ pub fn read_driver_audit(path: &Path) -> Result<DriverAudit> {
         h.update(e.op.as_bytes());
         h.update(e.detail.as_bytes());
         if e.prev != prev || e.seq != i as u64 + 1 || hex::encode(h.finalize()) != e.hash {
-            return Err(bad(path, &format!("the hash chain breaks at entry {}", i + 1)));
+            return Err(bad(
+                path,
+                &format!("the hash chain breaks at entry {}", i + 1),
+            ));
         }
         prev = e.hash.clone();
         out.entries += 1;
-        let ts_ms = parse_instant_ms(&e.ts).ok_or_else(|| bad(path, &format!("entry {} has a bad ts {:?}", e.seq, e.ts)))?;
+        let ts_ms = parse_instant_ms(&e.ts)
+            .ok_or_else(|| bad(path, &format!("entry {} has a bad ts {:?}", e.seq, e.ts)))?;
         out.first_ts_ms.get_or_insert(ts_ms);
         if e.op == "sign" {
             if let Some(s) = parse_sign(e.seq, ts_ms, &e.detail) {
@@ -147,7 +154,14 @@ fn parse_sign(seq: u64, ts_ms: u64, detail: &str) -> Option<DriverSign> {
             msg.get_or_insert_with(|| v.to_ascii_lowercase());
         }
     }
-    Some(DriverSign { seq, ts_ms, key_id: key_id?, request_id, msg, ok: ok? })
+    Some(DriverSign {
+        seq,
+        ts_ms,
+        key_id: key_id?,
+        request_id,
+        msg,
+        ok: ok?,
+    })
 }
 
 /// The driver's `msg=` for a journaled message: SHA-256 of the bytes the journal's `digest` (hex)
@@ -208,7 +222,10 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { min_journals: 1, allow_no_intent: false }
+        Self {
+            min_journals: 1,
+            allow_no_intent: false,
+        }
     }
 }
 
@@ -272,15 +289,27 @@ impl Report {
 }
 
 /// Compare the driver audit with the journals (`(label, entries)` per node).
-pub fn cross_check(audit: &DriverAudit, journals: &[(String, Vec<JournalEntry>)], opts: &Options) -> Report {
+pub fn cross_check(
+    audit: &DriverAudit,
+    journals: &[(String, Vec<JournalEntry>)],
+    opts: &Options,
+) -> Report {
     let mut r = Report::default();
     r.info(format!(
         "driver audit: {} entries, {} sign(s) ({} with an intent, {} with a message digest){}",
         audit.entries,
         audit.signs.len(),
-        audit.signs.iter().filter(|s| s.request_id.is_some()).count(),
+        audit
+            .signs
+            .iter()
+            .filter(|s| s.request_id.is_some())
+            .count(),
         audit.signs.iter().filter(|s| s.msg.is_some()).count(),
-        if audit.torn_tail { "; a torn final line (crash mid-append) ignored" } else { "" }
+        if audit.torn_tail {
+            "; a torn final line (crash mid-append) ignored"
+        } else {
+            ""
+        }
     ));
     // Driver side, by (key, request id): its lines by message (`msg=`), plus those of an older
     // driver that carry no message digest. The driver draws a fresh random request id for every
@@ -328,7 +357,11 @@ pub fn cross_check(audit: &DriverAudit, journals: &[(String, Vec<JournalEntry>)]
             "journal {label}: {} entr{} over {} key(s)",
             entries.len(),
             if entries.len() == 1 { "y" } else { "ies" },
-            entries.iter().map(|e| e.key_id.as_str()).collect::<BTreeSet<_>>().len()
+            entries
+                .iter()
+                .map(|e| e.key_id.as_str())
+                .collect::<BTreeSet<_>>()
+                .len()
         ));
         for e in entries {
             let first = first_ts.entry(e.key_id.clone()).or_insert(e.ts_ms);
@@ -349,7 +382,9 @@ pub fn cross_check(audit: &DriverAudit, journals: &[(String, Vec<JournalEntry>)]
                         .insert(label.clone());
                 }
                 PURPOSE_NO_INTENT => {
-                    let n = no_intent.entry((label.clone(), e.key_id.clone())).or_insert((0, e.ts_ms, e.ts_ms));
+                    let n = no_intent
+                        .entry((label.clone(), e.key_id.clone()))
+                        .or_insert((0, e.ts_ms, e.ts_ms));
                     n.0 += 1;
                     n.1 = n.1.min(e.ts_ms);
                     n.2 = n.2.max(e.ts_ms);
@@ -381,7 +416,10 @@ pub fn cross_check(audit: &DriverAudit, journals: &[(String, Vec<JournalEntry>)]
             continue;
         };
         // Messages no `msg=` line of this request id names.
-        let unmatched: Vec<_> = by_message.iter().filter(|(sha, _)| !g.by_msg.contains_key(*sha)).collect();
+        let unmatched: Vec<_> = by_message
+            .iter()
+            .filter(|(sha, _)| !g.by_msg.contains_key(*sha))
+            .collect();
         if g.legacy_lines == 0 {
             // Every driver line names its message: each other message is out of band, by name.
             let driver_signed = g
@@ -418,7 +456,8 @@ pub fn cross_check(audit: &DriverAudit, journals: &[(String, Vec<JournalEntry>)]
     let mut legacy_compared = 0usize;
     for ((key, rid), g) in &driver {
         let by_message = journaled.get(&(key.clone(), rid.clone()));
-        let too_old = |s: &DriverSign| first_ts.get(key).is_none_or(|&t| s.ts_ms < t) && by_message.is_none();
+        let too_old =
+            |s: &DriverSign| first_ts.get(key).is_none_or(|&t| s.ts_ms < t) && by_message.is_none();
         // Each audited message, by name.
         for (msg, s) in &g.by_msg {
             if !s.ok {
@@ -429,7 +468,9 @@ pub fn cross_check(audit: &DriverAudit, journals: &[(String, Vec<JournalEntry>)]
                 continue;
             }
             compared += 1;
-            let n = by_message.and_then(|m| m.get(msg)).map_or(0, |(_, l)| l.len());
+            let n = by_message
+                .and_then(|m| m.get(msg))
+                .map_or(0, |(_, l)| l.len());
             if n < opts.min_journals {
                 r.flag(format!(
                     "key {key} request {rid} msg={msg} (driver audit seq {}) signed ok but is in {n} of \
@@ -448,7 +489,9 @@ pub fn cross_check(audit: &DriverAudit, journals: &[(String, Vec<JournalEntry>)]
             }
             legacy_compared += 1;
             compared += 1;
-            let n = by_message.and_then(|m| m.values().map(|(_, l)| l.len()).max()).unwrap_or(0);
+            let n = by_message
+                .and_then(|m| m.values().map(|(_, l)| l.len()).max())
+                .unwrap_or(0);
             if n < opts.min_journals {
                 r.flag(format!(
                     "key {key} request {rid} (driver audit seq {}) signed ok but is in {n} of the supplied \
@@ -484,9 +527,15 @@ pub fn cross_check(audit: &DriverAudit, journals: &[(String, Vec<JournalEntry>)]
             r.flag(msg);
         }
     }
-    let legacy = audit.signs.iter().filter(|s| s.request_id.is_none() && s.ok).count();
+    let legacy = audit
+        .signs
+        .iter()
+        .filter(|s| s.request_id.is_none() && s.ok)
+        .count();
     if legacy > 0 {
-        r.info(format!("{legacy} driver sign(s) without an intent: not matchable"));
+        r.info(format!(
+            "{legacy} driver sign(s) without an intent: not matchable"
+        ));
     }
     if audit.entries == 0 {
         r.empty(
@@ -526,10 +575,18 @@ pub fn parse_instant_ms(ts: &str) -> Option<u64> {
     let ts = ts.strip_suffix('Z')?;
     let (date, time) = ts.split_once('T')?;
     let mut d = date.split('-');
-    let (y, m, day): (i64, i64, i64) = (d.next()?.parse().ok()?, d.next()?.parse().ok()?, d.next()?.parse().ok()?);
+    let (y, m, day): (i64, i64, i64) = (
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+    );
     let (hms, frac) = time.split_once('.').unwrap_or((time, ""));
     let mut t = hms.split(':');
-    let (hh, mm, ss): (i64, i64, i64) = (t.next()?.parse().ok()?, t.next()?.parse().ok()?, t.next()?.parse().ok()?);
+    let (hh, mm, ss): (i64, i64, i64) = (
+        t.next()?.parse().ok()?,
+        t.next()?.parse().ok()?,
+        t.next()?.parse().ok()?,
+    );
     let millis: i64 = format!("{frac:0<3}").get(..3)?.parse().ok()?;
     // Days from civil (Howard Hinnant).
     let y2 = if m <= 2 { y - 1 } else { y };
@@ -577,9 +634,18 @@ mod tests {
     #[test]
     fn java_instants_parse() {
         assert_eq!(parse_instant_ms("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(parse_instant_ms("2026-10-16T14:08:50.123Z"), Some(1_792_159_730_123));
-        assert_eq!(parse_instant_ms("2026-10-16T14:08:50.1Z"), Some(1_792_159_730_100));
-        assert_eq!(parse_instant_ms("2026-10-16T14:08:50.123456789Z"), Some(1_792_159_730_123));
+        assert_eq!(
+            parse_instant_ms("2026-10-16T14:08:50.123Z"),
+            Some(1_792_159_730_123)
+        );
+        assert_eq!(
+            parse_instant_ms("2026-10-16T14:08:50.1Z"),
+            Some(1_792_159_730_100)
+        );
+        assert_eq!(
+            parse_instant_ms("2026-10-16T14:08:50.123456789Z"),
+            Some(1_792_159_730_123)
+        );
         assert_eq!(parse_instant_ms("2026-10-16 14:08:50Z"), None);
         assert_eq!(fmt_ms(1_792_159_730_123), "2026-10-16T14:08:50.123Z");
         assert_eq!(fmt_ms(0), "1970-01-01T00:00:00.000Z");
@@ -588,19 +654,42 @@ mod tests {
     #[test]
     fn sign_details_parse() {
         let s = parse_sign(3, 9, "keyId=frost-ns algo=Ed25519 inBytes=34 intent=00ff failover=a→b reason=UNAVAILABLE sigBytes=64 outcome=ok").unwrap();
-        assert_eq!((s.key_id.as_str(), s.request_id.as_deref(), s.ok), ("frost-ns", Some("00ff"), true));
+        assert_eq!(
+            (s.key_id.as_str(), s.request_id.as_deref(), s.ok),
+            ("frost-ns", Some("00ff"), true)
+        );
         assert_eq!(s.msg, None, "an older driver's line carries no msg=");
-        let f = parse_sign(4, 9, "keyId=k algo=Ed25519 inBytes=34 intent=none outcome=failed error=intent=xx msg=ff").unwrap();
-        assert_eq!((f.request_id, f.msg, f.ok), (None, None, false), "nothing after outcome= is parsed");
-        let m = parse_sign(5, 9, "keyId=k algo=Ed25519 inBytes=34 msg=ABcd intent=00ff sigBytes=64 outcome=ok").unwrap();
-        assert_eq!((m.request_id.as_deref(), m.msg.as_deref()), (Some("00ff"), Some("abcd")));
+        let f = parse_sign(
+            4,
+            9,
+            "keyId=k algo=Ed25519 inBytes=34 intent=none outcome=failed error=intent=xx msg=ff",
+        )
+        .unwrap();
+        assert_eq!(
+            (f.request_id, f.msg, f.ok),
+            (None, None, false),
+            "nothing after outcome= is parsed"
+        );
+        let m = parse_sign(
+            5,
+            9,
+            "keyId=k algo=Ed25519 inBytes=34 msg=ABcd intent=00ff sigBytes=64 outcome=ok",
+        )
+        .unwrap();
+        assert_eq!(
+            (m.request_id.as_deref(), m.msg.as_deref()),
+            (Some("00ff"), Some("abcd"))
+        );
     }
 
     #[test]
     fn a_journaled_message_hashes_to_the_drivers_msg() {
         // The driver's msg= is SHA-256 of the signed bytes; the journal holds those bytes as hex.
         let digest = "1220".to_string() + &"ab".repeat(32);
-        assert_eq!(message_sha256(&digest), hex::encode(Sha256::digest(hex::decode(&digest).unwrap())));
+        assert_eq!(
+            message_sha256(&digest),
+            hex::encode(Sha256::digest(hex::decode(&digest).unwrap()))
+        );
         assert!(message_sha256("not hex").starts_with("unhashable:"));
     }
 
@@ -620,27 +709,53 @@ mod tests {
 
     /// A sign line from a driver older than `msg=`.
     fn signed(seq: u64, request: &str) -> DriverSign {
-        DriverSign { seq, ts_ms: 1_000 + seq, key_id: "frost-ns".into(), request_id: Some(request.into()), msg: None, ok: true }
+        DriverSign {
+            seq,
+            ts_ms: 1_000 + seq,
+            key_id: "frost-ns".into(),
+            request_id: Some(request.into()),
+            msg: None,
+            ok: true,
+        }
     }
 
     /// A sign line naming the message signed (`msg=`).
     fn signed_msg(seq: u64, request: &str, message: &str) -> DriverSign {
-        DriverSign { msg: Some(message_sha256(message)), ..signed(seq, request) }
+        DriverSign {
+            msg: Some(message_sha256(message)),
+            ..signed(seq, request)
+        }
     }
 
     #[test]
     fn msg_names_the_message_the_driver_signed_and_each_one_signed_out_of_band() {
-        let (rid, m1, m2, m3) = ("a".repeat(32), "11".repeat(34), "22".repeat(34), "33".repeat(34));
-        let audit =
-            DriverAudit { entries: 1, signs: vec![signed_msg(1, &rid, &m1)], first_ts_ms: Some(1_000), torn_tail: false };
-        let opts = Options { min_journals: 2, allow_no_intent: false };
+        let (rid, m1, m2, m3) = (
+            "a".repeat(32),
+            "11".repeat(34),
+            "22".repeat(34),
+            "33".repeat(34),
+        );
+        let audit = DriverAudit {
+            entries: 1,
+            signs: vec![signed_msg(1, &rid, &m1)],
+            first_ts_ms: Some(1_000),
+            torn_tail: false,
+        };
+        let opts = Options {
+            min_journals: 2,
+            allow_no_intent: false,
+        };
         let honest = vec![
             ("n1".to_string(), vec![journaled(1, &rid, &m1, 2_000)]),
             ("n2".to_string(), vec![journaled(2, &rid, &m1, 2_000)]),
         ];
         let r = cross_check(&audit, &honest, &opts);
         assert_eq!(r.discrepancies, 0, "{:#?}", r.lines);
-        assert!(r.lines[0].contains("1 with a message digest"), "{:#?}", r.lines);
+        assert!(
+            r.lines[0].contains("1 with a message digest"),
+            "{:#?}",
+            r.lines
+        );
 
         // Two more messages under the audited request id: each named as out of band, next to the
         // message the driver did sign.
@@ -649,62 +764,143 @@ mod tests {
         reused[1].1.push(journaled(2, &rid, &m3, 3_000));
         let r = cross_check(&audit, &reused, &opts);
         assert_eq!(r.discrepancies, 2, "{:#?}", r.lines);
-        let flagged: Vec<_> = r.lines.iter().filter(|l| l.starts_with("DISCREPANCY")).collect();
+        let flagged: Vec<_> = r
+            .lines
+            .iter()
+            .filter(|l| l.starts_with("DISCREPANCY"))
+            .collect();
         for (m, node) in [(&m2, "n1"), (&m3, "n2")] {
-            let line = flagged.iter().find(|l| l.contains(m.as_str())).unwrap_or_else(|| panic!("{flagged:#?}"));
-            assert!(line.contains("OUT OF BAND") && line.contains(&format!("at {node}")), "{line}");
-            assert!(line.contains(&format!("signed only msg={} (seq 1)", message_sha256(&m1))), "{line}");
-            assert!(line.contains(&format!("msg={}", message_sha256(m))), "{line}");
+            let line = flagged
+                .iter()
+                .find(|l| l.contains(m.as_str()))
+                .unwrap_or_else(|| panic!("{flagged:#?}"));
+            assert!(
+                line.contains("OUT OF BAND") && line.contains(&format!("at {node}")),
+                "{line}"
+            );
+            assert!(
+                line.contains(&format!("signed only msg={} (seq 1)", message_sha256(&m1))),
+                "{line}"
+            );
+            assert!(
+                line.contains(&format!("msg={}", message_sha256(m))),
+                "{line}"
+            );
         }
-        assert!(!flagged.iter().any(|l| l.contains(&format!("message {m1} "))), "the audited message is not flagged");
+        assert!(
+            !flagged
+                .iter()
+                .any(|l| l.contains(&format!("message {m1} "))),
+            "the audited message is not flagged"
+        );
 
         // The driver signed m1, the cluster only ever journaled m2 under its request id: m2 is out
         // of band, and the audited m1 is in no journal.
         let swapped = vec![("n1".to_string(), vec![journaled(1, &rid, &m2, 2_000)])];
         let r = cross_check(&audit, &swapped, &Options::default());
         assert_eq!(r.discrepancies, 2, "{:#?}", r.lines);
-        assert!(r.lines.iter().any(|l| l.contains("OUT OF BAND") && l.contains(&m2)), "{:#?}", r.lines);
         assert!(
-            r.lines.iter().any(|l| l.contains(&format!("msg={} (driver audit seq 1) signed ok but is in 0", message_sha256(&m1)))),
+            r.lines
+                .iter()
+                .any(|l| l.contains("OUT OF BAND") && l.contains(&m2)),
+            "{:#?}",
+            r.lines
+        );
+        assert!(
+            r.lines.iter().any(|l| l.contains(&format!(
+                "msg={} (driver audit seq 1) signed ok but is in 0",
+                message_sha256(&m1)
+            ))),
             "{:#?}",
             r.lines
         );
 
         // An older driver line (no msg=) for the same journals: the count-based fallback, which
         // cannot tell which of two messages the driver signed.
-        let legacy = DriverAudit { signs: vec![signed(1, &rid)], ..audit };
+        let legacy = DriverAudit {
+            signs: vec![signed(1, &rid)],
+            ..audit
+        };
         let mut two = honest.clone();
         two[0].1.push(journaled(1, &rid, &m2, 3_000));
         let r = cross_check(&legacy, &two, &opts);
         assert_eq!(r.discrepancies, 1, "{:#?}", r.lines);
-        assert!(r.lines.iter().any(|l| l.contains("signed over 2 different messages")), "{:#?}", r.lines);
-        assert!(r.lines.iter().any(|l| l.contains("without msg= (an older driver)")), "{:#?}", r.lines);
+        assert!(
+            r.lines
+                .iter()
+                .any(|l| l.contains("signed over 2 different messages")),
+            "{:#?}",
+            r.lines
+        );
+        assert!(
+            r.lines
+                .iter()
+                .any(|l| l.contains("without msg= (an older driver)")),
+            "{:#?}",
+            r.lines
+        );
     }
 
     #[test]
     fn an_empty_side_is_nothing_to_compare_never_consistent() {
         let (rid, m1) = ("a".repeat(32), "11".repeat(34));
-        let audit =
-            DriverAudit { entries: 1, signs: vec![signed_msg(1, &rid, &m1)], first_ts_ms: Some(1_000), torn_tail: false };
+        let audit = DriverAudit {
+            entries: 1,
+            signs: vec![signed_msg(1, &rid, &m1)],
+            first_ts_ms: Some(1_000),
+            torn_tail: false,
+        };
         let full = vec![("n1".to_string(), vec![journaled(1, &rid, &m1, 2_000)])];
-        assert_eq!(cross_check(&audit, &full, &Options::default()).verdict(), Verdict::Consistent);
+        assert_eq!(
+            cross_check(&audit, &full, &Options::default()).verdict(),
+            Verdict::Consistent
+        );
 
         // An empty driver audit log next to a full journal.
         let r = cross_check(&DriverAudit::default(), &full, &Options::default());
-        assert_eq!((r.verdict(), r.discrepancies), (Verdict::NothingToCompare, 0), "{:#?}", r.lines);
-        assert!(r.lines.iter().any(|l| l.starts_with("NOTHING TO COMPARE: the driver audit log is empty")), "{:#?}", r.lines);
-        assert!(!r.lines.iter().any(|l| l.starts_with("consistent")), "{:#?}", r.lines);
+        assert_eq!(
+            (r.verdict(), r.discrepancies),
+            (Verdict::NothingToCompare, 0),
+            "{:#?}",
+            r.lines
+        );
+        assert!(
+            r.lines
+                .iter()
+                .any(|l| l.starts_with("NOTHING TO COMPARE: the driver audit log is empty")),
+            "{:#?}",
+            r.lines
+        );
+        assert!(
+            !r.lines.iter().any(|l| l.starts_with("consistent")),
+            "{:#?}",
+            r.lines
+        );
         assert_eq!(r.verdict().exit_code(), 3);
 
         // Both empty.
-        let r = cross_check(&DriverAudit::default(), &[("n1".to_string(), vec![])], &Options::default());
+        let r = cross_check(
+            &DriverAudit::default(),
+            &[("n1".to_string(), vec![])],
+            &Options::default(),
+        );
         assert_eq!(r.verdict(), Verdict::NothingToCompare, "{:#?}", r.lines);
 
         // A full driver audit log next to only empty journals (the sign is then "for a key no
         // journal holds", which was skipped and passed).
-        let r = cross_check(&audit, &[("n1".to_string(), vec![]), ("n2".to_string(), vec![])], &Options::default());
+        let r = cross_check(
+            &audit,
+            &[("n1".to_string(), vec![]), ("n2".to_string(), vec![])],
+            &Options::default(),
+        );
         assert_eq!(r.verdict(), Verdict::NothingToCompare, "{:#?}", r.lines);
-        assert!(r.lines.iter().any(|l| l.contains("every supplied journal is empty")), "{:#?}", r.lines);
+        assert!(
+            r.lines
+                .iter()
+                .any(|l| l.contains("every supplied journal is empty")),
+            "{:#?}",
+            r.lines
+        );
 
         // One empty journal among full ones (a node the leaders never picked): a warning, and the
         // threshold check still applies.
@@ -712,36 +908,94 @@ mod tests {
         one_empty.push(("n2".to_string(), vec![]));
         let r = cross_check(&audit, &one_empty, &Options::default());
         assert_eq!(r.verdict(), Verdict::Consistent, "{:#?}", r.lines);
-        assert!(r.lines.iter().any(|l| l.starts_with("WARNING: journal n2 is empty")), "{:#?}", r.lines);
-        let r = cross_check(&audit, &one_empty, &Options { min_journals: 2, allow_no_intent: false });
+        assert!(
+            r.lines
+                .iter()
+                .any(|l| l.starts_with("WARNING: journal n2 is empty")),
+            "{:#?}",
+            r.lines
+        );
+        let r = cross_check(
+            &audit,
+            &one_empty,
+            &Options {
+                min_journals: 2,
+                allow_no_intent: false,
+            },
+        );
         assert_eq!(r.verdict(), Verdict::Discrepancies, "{:#?}", r.lines);
 
         // Entries on both sides, but no signature to compare (a deployment that never signed).
-        let no_signs = DriverAudit { entries: 3, signs: vec![], first_ts_ms: Some(1_000), torn_tail: false };
+        let no_signs = DriverAudit {
+            entries: 3,
+            signs: vec![],
+            first_ts_ms: Some(1_000),
+            torn_tail: false,
+        };
         let mut test_only = journaled(1, &rid, &m1, 2_000);
         test_only.purpose = "sign-test".into();
-        let r = cross_check(&no_signs, &[("n1".to_string(), vec![test_only])], &Options::default());
+        let r = cross_check(
+            &no_signs,
+            &[("n1".to_string(), vec![test_only])],
+            &Options::default(),
+        );
         assert_eq!(r.verdict(), Verdict::NothingToCompare, "{:#?}", r.lines);
-        assert!(r.lines.iter().any(|l| l.contains("nothing was compared")), "{:#?}", r.lines);
+        assert!(
+            r.lines.iter().any(|l| l.contains("nothing was compared")),
+            "{:#?}",
+            r.lines
+        );
 
         // A discrepancy wins over nothing to compare.
-        let r = cross_check(&DriverAudit::default(), &[("n1".to_string(), vec![journaled(1, &rid, &m1, 2_000)])], &Options::default());
-        assert_eq!(r.verdict(), Verdict::NothingToCompare, "an empty log skips every journal entry: {:#?}", r.lines);
-        let r = cross_check(&no_signs, &[("n1".to_string(), vec![journaled(1, &rid, &m1, 2_000)]), ("n2".to_string(), vec![])], &Options::default());
-        assert_eq!((r.verdict(), r.verdict().exit_code()), (Verdict::Discrepancies, 1), "{:#?}", r.lines);
+        let r = cross_check(
+            &DriverAudit::default(),
+            &[("n1".to_string(), vec![journaled(1, &rid, &m1, 2_000)])],
+            &Options::default(),
+        );
+        assert_eq!(
+            r.verdict(),
+            Verdict::NothingToCompare,
+            "an empty log skips every journal entry: {:#?}",
+            r.lines
+        );
+        let r = cross_check(
+            &no_signs,
+            &[
+                ("n1".to_string(), vec![journaled(1, &rid, &m1, 2_000)]),
+                ("n2".to_string(), vec![]),
+            ],
+            &Options::default(),
+        );
+        assert_eq!(
+            (r.verdict(), r.verdict().exit_code()),
+            (Verdict::Discrepancies, 1),
+            "{:#?}",
+            r.lines
+        );
     }
 
     #[test]
     fn one_request_id_over_two_messages_is_two_operations() {
         let (rid, m1, m2) = ("a".repeat(32), "11".repeat(34), "22".repeat(34));
-        let audit = DriverAudit { entries: 1, signs: vec![signed(1, &rid)], first_ts_ms: Some(1_000), torn_tail: false };
-        let opts = Options { min_journals: 2, allow_no_intent: false };
+        let audit = DriverAudit {
+            entries: 1,
+            signs: vec![signed(1, &rid)],
+            first_ts_ms: Some(1_000),
+            torn_tail: false,
+        };
+        let opts = Options {
+            min_journals: 2,
+            allow_no_intent: false,
+        };
 
         // The audited sign, journaled by both nodes (a retry re-signs the intent: same request id and
         // message, another intent hash) — consistent.
         let mut retry = journaled(2, &rid, &m1, 2_100);
         retry.intent_sha256 = "ff".repeat(32);
-        let honest = vec![("n1".to_string(), vec![journaled(1, &rid, &m1, 2_000)]), ("n2".to_string(), vec![retry])];
+        let honest = vec![
+            ("n1".to_string(), vec![journaled(1, &rid, &m1, 2_000)]),
+            ("n2".to_string(), vec![retry]),
+        ];
         let r = cross_check(&audit, &honest, &opts);
         assert_eq!(r.discrepancies, 0, "{:#?}", r.lines);
 
@@ -751,15 +1005,34 @@ mod tests {
         reused[0].1.push(journaled(1, &rid, &m2, 3_000));
         let r = cross_check(&audit, &reused, &opts);
         assert_eq!(r.discrepancies, 1, "{:#?}", r.lines);
-        let line = r.lines.iter().find(|l| l.starts_with("DISCREPANCY")).unwrap();
-        assert!(line.contains("signed over 2 different messages") && line.contains(&m1) && line.contains(&m2), "{line}");
+        let line = r
+            .lines
+            .iter()
+            .find(|l| l.starts_with("DISCREPANCY"))
+            .unwrap();
+        assert!(
+            line.contains("signed over 2 different messages")
+                && line.contains(&m1)
+                && line.contains(&m2),
+            "{line}"
+        );
         assert!(line.contains("driver audit log holds 1 sign(s)"), "{line}");
 
         // Without the driver line both messages are reported, each on its own.
-        let none = DriverAudit { signs: vec![], ..audit };
+        let none = DriverAudit {
+            signs: vec![],
+            ..audit
+        };
         let r = cross_check(&none, &reused, &Options::default());
-        let missing: Vec<_> = r.lines.iter().filter(|l| l.contains("is not in the driver audit log")).collect();
+        let missing: Vec<_> = r
+            .lines
+            .iter()
+            .filter(|l| l.contains("is not in the driver audit log"))
+            .collect();
         assert_eq!(missing.len(), 2, "{:#?}", r.lines);
-        assert!(missing.iter().any(|l| l.contains(&m1)) && missing.iter().any(|l| l.contains(&m2)), "{missing:#?}");
+        assert!(
+            missing.iter().any(|l| l.contains(&m1)) && missing.iter().any(|l| l.contains(&m2)),
+            "{missing:#?}"
+        );
     }
 }

@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! One cosigner process per data directory.
@@ -38,7 +38,12 @@ impl InstanceLock {
     pub fn acquire(data_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(data_dir)?;
         let path = data_dir.join(LOCK_FILE);
-        let mut file = OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)?;
 
         // SAFETY: `flock` on a valid, owned file descriptor; no memory is touched.
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -80,7 +85,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let first = InstanceLock::acquire(dir.path()).unwrap();
         let err = InstanceLock::acquire(dir.path()).unwrap_err().to_string();
-        assert!(err.contains("already in use") && err.contains(&std::process::id().to_string()), "{err}");
+        assert!(
+            err.contains("already in use") && err.contains(&std::process::id().to_string()),
+            "{err}"
+        );
         assert_eq!(first.path(), dir.path().join(LOCK_FILE));
     }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 """Run rutli-loadgen in the cluster suite's load generator pod without holding a stream open
 through the Kubernetes API for the length of the run.

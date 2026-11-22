@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Rust metrics for frost/: clippy, rustfmt, tests, coverage, cargo deny, cargo geiger, rustqual.
 # cargo audit is its own area (audit.sh), run nightly. Run by collect.sh. QUALITY_COVERAGE=0 skips

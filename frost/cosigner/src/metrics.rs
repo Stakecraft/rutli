@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Prometheus metrics for the cosigner daemon.
@@ -215,11 +215,18 @@ pub const PEER_PIN_DIRECTIONS: &[&str] = &["inbound", "outbound"];
 /// margin.
 pub const PEER_CALL_DURATION: &str = "rutli_peer_call_duration_seconds";
 /// The `call` values of `rutli_peer_call_duration_seconds`.
-pub const PEER_CALLS: &[&str] = &["sign_round1", "sign_round2", "abort", "control", "local_share"];
+pub const PEER_CALLS: &[&str] = &[
+    "sign_round1",
+    "sign_round2",
+    "abort",
+    "control",
+    "local_share",
+];
 /// Upper bounds (seconds) of `rutli_peer_call_duration_seconds`: 0.33, 0.67, 1.67 are a third of
 /// the 1 s abort, 2 s round-1 and 5 s round-2 deadlines; 1, 2, 3, 5 the deadlines themselves.
-pub const PEER_CALL_DURATION_BUCKETS: &[f64] =
-    &[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.33, 0.5, 0.67, 1.0, 1.67, 2.0, 3.0, 5.0, 10.0];
+pub const PEER_CALL_DURATION_BUCKETS: &[f64] = &[
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.33, 0.5, 0.67, 1.0, 1.67, 2.0, 3.0, 5.0, 10.0,
+];
 /// Gauge, labels `peer` (roster number) and `state` (up|down|trial): 1 for the state this node's
 /// breaker holds for that peer ([`crate::liveness`]), 0 for the others. `down` lasting minutes is a
 /// peer this leader cannot use (`RutliPeerDown`).
@@ -332,7 +339,12 @@ pub const SESSION_OWNER_CALLS: &[&str] = &["round2", "abort"];
 pub const SESSION_CAPS: &[&str] = &["key", "opener", "request"];
 /// The `loop` names of `rutli_background_loop_restarts_total`: the first argument of every
 /// `supervise::spawn_supervised` call (`RutliBackgroundLoopRestarted`); a test checks the call sites.
-pub const BACKGROUND_LOOPS: &[&str] = &["anti_entropy", "ceremony_resolver", "epoch_check", "nonce_pruner"];
+pub const BACKGROUND_LOOPS: &[&str] = &[
+    "anti_entropy",
+    "ceremony_resolver",
+    "epoch_check",
+    "nonce_pruner",
+];
 /// Every `reason` of `rutli_hosted_replication_refusals_total` (`hosted_refusal(..)` call sites in
 /// `orchestrator.rs`):
 /// - `unfenced`: a push into an id this node lacks from a caller without its generation fence;
@@ -372,8 +384,14 @@ pub const HOSTED_ROLLBACK_INCOMPLETE: &str = "rutli_hosted_rollback_incomplete_t
 pub const ANTI_ENTROPY_PULL_FAILURES: &str = "rutli_anti_entropy_pull_failures_total";
 /// The `op` values of `rutli_hosted_key_ops_total` (`record_hosted_op` call sites in `service.rs`);
 /// `result` is "ok" | "error" (`RutliHostedKeyErrors`).
-pub const HOSTED_KEY_OPS_NAMES: &[&str] =
-    &["generate", "delete", "decrypt", "ecdh_derive", "symmetric_encrypt", "symmetric_decrypt"];
+pub const HOSTED_KEY_OPS_NAMES: &[&str] = &[
+    "generate",
+    "delete",
+    "decrypt",
+    "ecdh_derive",
+    "symmetric_encrypt",
+    "symmetric_decrypt",
+];
 
 /// Upper bounds (seconds) of the `rutli_sign_duration_seconds` histogram buckets.
 ///
@@ -386,15 +404,22 @@ pub const HOSTED_KEY_OPS_NAMES: &[&str] =
 /// only report an estimate *above* a threshold when a finite bucket lies above it (a quantile that
 /// lands in `+Inf` is reported as the highest finite bound), so without it a `> 5` rule could
 /// never fire.
-pub const SIGN_DURATION_BUCKETS: &[f64] =
-    &[0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
+pub const SIGN_DURATION_BUCKETS: &[f64] = &[
+    0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+];
 
 /// The exporter configuration shared by [`install`] and the exposition-format test below, so the
 /// test pins exactly what the daemon serves.
 fn builder() -> std::result::Result<PrometheusBuilder, BuildError> {
     PrometheusBuilder::new()
-        .set_buckets_for_metric(Matcher::Full(SIGN_DURATION.to_owned()), SIGN_DURATION_BUCKETS)?
-        .set_buckets_for_metric(Matcher::Full(PEER_CALL_DURATION.to_owned()), PEER_CALL_DURATION_BUCKETS)
+        .set_buckets_for_metric(
+            Matcher::Full(SIGN_DURATION.to_owned()),
+            SIGN_DURATION_BUCKETS,
+        )?
+        .set_buckets_for_metric(
+            Matcher::Full(PEER_CALL_DURATION.to_owned()),
+            PEER_CALL_DURATION_BUCKETS,
+        )
 }
 
 /// Install the process-global Prometheus recorder and serve `/metrics` on `listen`.
@@ -509,19 +534,56 @@ fn prime() {
 pub fn describe() {
     describe_counter!(SIGN_REQUESTS, "Leader-side Sign RPC outcomes, by result");
     describe_counter!(PEER_PIN_REFUSALS, "Mesh connections refused for a TLS key not pinned in peers[].tls_spki_sha256, by direction");
-    describe_gauge!(PEER_PINS_UNPINNED, "Roster peers accepted by certificate name alone (tls.require_peer_pins: false)");
-    describe_histogram!(SIGN_DURATION, Unit::Seconds, "Leader-side Sign RPC latency, by result");
-    describe_counter!(CEREMONY_REQUESTS, "DKG/refresh ceremony outcomes, by kind and result");
-    describe_counter!(CEREMONY_RESOLUTIONS, "Two-phase ceremonies resolved on this node, by result");
-    describe_gauge!(CEREMONIES_STAGED, "Staged (yes-voted, unresolved) ceremonies on this node");
-    describe_gauge!(CEREMONIES_SPLIT, "Ceremonies aborted here that a peer reports COMMITTED (quarantined share held)");
-    describe_counter!(CEREMONY_EQUIVOCATIONS, "Ceremonies reported both COMMITTED and ABORTED by peers (equivocation)");
-    describe_counter!(CEREMONY_UNKNOWN_REFUSED, "No-votes for unknown ceremonies not recorded because a cap was reached");
-    describe_gauge!(CEREMONY_UNKNOWN_NO_VOTES, "No-votes held for ceremony ids peers asked about that this node never knew");
-    describe_counter!(SIGN_ROUND1_SKIPS, "Peers skipped during sign round 1 (quorum-margin canary)");
+    describe_gauge!(
+        PEER_PINS_UNPINNED,
+        "Roster peers accepted by certificate name alone (tls.require_peer_pins: false)"
+    );
+    describe_histogram!(
+        SIGN_DURATION,
+        Unit::Seconds,
+        "Leader-side Sign RPC latency, by result"
+    );
+    describe_counter!(
+        CEREMONY_REQUESTS,
+        "DKG/refresh ceremony outcomes, by kind and result"
+    );
+    describe_counter!(
+        CEREMONY_RESOLUTIONS,
+        "Two-phase ceremonies resolved on this node, by result"
+    );
+    describe_gauge!(
+        CEREMONIES_STAGED,
+        "Staged (yes-voted, unresolved) ceremonies on this node"
+    );
+    describe_gauge!(
+        CEREMONIES_SPLIT,
+        "Ceremonies aborted here that a peer reports COMMITTED (quarantined share held)"
+    );
+    describe_counter!(
+        CEREMONY_EQUIVOCATIONS,
+        "Ceremonies reported both COMMITTED and ABORTED by peers (equivocation)"
+    );
+    describe_counter!(
+        CEREMONY_UNKNOWN_REFUSED,
+        "No-votes for unknown ceremonies not recorded because a cap was reached"
+    );
+    describe_gauge!(
+        CEREMONY_UNKNOWN_NO_VOTES,
+        "No-votes held for ceremony ids peers asked about that this node never knew"
+    );
+    describe_counter!(
+        SIGN_ROUND1_SKIPS,
+        "Peers skipped during sign round 1 (quorum-margin canary)"
+    );
     describe_counter!(SIGN_ROUND2_UNKNOWN_SESSION, "Sign round 2 requests refused as an unknown signing session (no round-1 nonces held for it)");
-    describe_counter!(SIGN_INTENT_ABSENT, "Sign rounds accepted without a signing intent (require_intent off)");
-    describe_counter!(SIGN_POLICY_REFUSALS, "Signing-policy refusals at this node, by reason");
+    describe_counter!(
+        SIGN_INTENT_ABSENT,
+        "Sign rounds accepted without a signing intent (require_intent off)"
+    );
+    describe_counter!(
+        SIGN_POLICY_REFUSALS,
+        "Signing-policy refusals at this node, by reason"
+    );
     describe_counter!(
         CEREMONY_INTENT_REFUSALS,
         "DKG/refresh ceremony intents and hosted-key generate intents refused at this node, by reason"
@@ -534,48 +596,120 @@ pub fn describe() {
         REFRESH_INTERVAL_WAIVED,
         "Refreshes let through the interval at this node by refresh_interval_waived_at"
     );
-    describe_gauge!(REFRESHES_6D, "Refreshes of the key this node committed in the last 6 days");
+    describe_gauge!(
+        REFRESHES_6D,
+        "Refreshes of the key this node committed in the last 6 days"
+    );
     describe_counter!(
         CEREMONY_INTENT_ABSENT,
         "DKG/refresh fences, part 1s and hosted-key generation fences accepted without a client intent (require_ceremony_intent off)"
     );
-    describe_counter!(SIGN_RATE_LIMITED, "Signature shares refused by the per-key sign rate limit or share cap");
-    describe_counter!(SIGNER_ACL_ABSENT, "Key operations by a client CN without a signer_acl entry");
-    describe_counter!(SIGN_JOURNAL_ENTRIES, "Sign journal entries appended (one per released share)");
-    describe_counter!(SIGN_JOURNAL_ERRORS, "Sign journal failures; the share was refused");
-    describe_counter!(EPOCH_MISMATCH, "Sign round-1 refusals: the leader signed with another sharing (epoch)");
-    describe_counter!(EPOCH_CHECK_SKIPPED, "Sign round-1 requests without the leader's sharing (pre-epoch leader)");
-    describe_gauge!(STALE_SHARE, "1 while this node's share of the key is stale (refuses to sign), else 0");
+    describe_counter!(
+        SIGN_RATE_LIMITED,
+        "Signature shares refused by the per-key sign rate limit or share cap"
+    );
+    describe_counter!(
+        SIGNER_ACL_ABSENT,
+        "Key operations by a client CN without a signer_acl entry"
+    );
+    describe_counter!(
+        SIGN_JOURNAL_ENTRIES,
+        "Sign journal entries appended (one per released share)"
+    );
+    describe_counter!(
+        SIGN_JOURNAL_ERRORS,
+        "Sign journal failures; the share was refused"
+    );
+    describe_counter!(
+        EPOCH_MISMATCH,
+        "Sign round-1 refusals: the leader signed with another sharing (epoch)"
+    );
+    describe_counter!(
+        EPOCH_CHECK_SKIPPED,
+        "Sign round-1 requests without the leader's sharing (pre-epoch leader)"
+    );
+    describe_gauge!(
+        STALE_SHARE,
+        "1 while this node's share of the key is stale (refuses to sign), else 0"
+    );
     describe_gauge!(
         KEY_EPOCH_PROVEN,
         "1 while the live epoch of the key has a `keyfile prove` marker for the live sharing, else 0"
     );
-    describe_gauge!(KEY_EPOCH_AGE_SECONDS, "Seconds since the live key file of the key was written (the epoch installed)");
-    describe_counter!(SIGN_RETRIES, "Sign attempts beyond the first (a t-subset failed; retried with another)");
-    describe_counter!(INVALID_SIGNATURE_SHARES, "Signature shares that failed verification at aggregation");
-    describe_counter!(NONCE_MARKERS_PRUNED, "Burned-session nonce markers removed past their retention");
-    describe_gauge!(NONCE_MARKERS, "Burned-session nonce markers on this node after the last prune pass");
-    describe_counter!(LOCK_POISON_RECOVERIES, "Locks recovered after a panicking request poisoned them, by lock");
+    describe_gauge!(
+        KEY_EPOCH_AGE_SECONDS,
+        "Seconds since the live key file of the key was written (the epoch installed)"
+    );
+    describe_counter!(
+        SIGN_RETRIES,
+        "Sign attempts beyond the first (a t-subset failed; retried with another)"
+    );
+    describe_counter!(
+        INVALID_SIGNATURE_SHARES,
+        "Signature shares that failed verification at aggregation"
+    );
+    describe_counter!(
+        NONCE_MARKERS_PRUNED,
+        "Burned-session nonce markers removed past their retention"
+    );
+    describe_gauge!(
+        NONCE_MARKERS,
+        "Burned-session nonce markers on this node after the last prune pass"
+    );
+    describe_counter!(
+        LOCK_POISON_RECOVERIES,
+        "Locks recovered after a panicking request poisoned them, by lock"
+    );
     describe_gauge!(FD_LIMIT, "Soft open-file limit after the start-up raise");
     describe_gauge!(GRPC_CONNECTIONS, "Open gRPC connections");
-    describe_gauge!(GRPC_CONNECTION_LIMIT, "Most gRPC connections served at once");
-    describe_counter!(GRPC_ACCEPT_ERRORS, "Failed accepts of a gRPC connection (retried)");
-    describe_counter!(GRPC_HANDSHAKE_TIMEOUTS, "gRPC connections cut for not finishing the TLS handshake in time");
-    describe_counter!(BACKGROUND_LOOP_RESTARTS, "Background loops restarted after a panic in a pass, by loop");
-    describe_counter!(SIGN_ABORTS, "Aborted in-flight sign sessions (one per given-up signature)");
+    describe_gauge!(
+        GRPC_CONNECTION_LIMIT,
+        "Most gRPC connections served at once"
+    );
+    describe_counter!(
+        GRPC_ACCEPT_ERRORS,
+        "Failed accepts of a gRPC connection (retried)"
+    );
+    describe_counter!(
+        GRPC_HANDSHAKE_TIMEOUTS,
+        "gRPC connections cut for not finishing the TLS handshake in time"
+    );
+    describe_counter!(
+        BACKGROUND_LOOP_RESTARTS,
+        "Background loops restarted after a panic in a pass, by loop"
+    );
+    describe_counter!(
+        SIGN_ABORTS,
+        "Aborted in-flight sign sessions (one per given-up signature)"
+    );
     describe_counter!(
         SIGN_SESSION_OWNER_REFUSALS,
         "Sign round 2s and aborts refused because another caller opened the session, by call"
     );
-    describe_counter!(SIGN_SESSIONS_REFUSED, "Sign round 1s refused by a cap on sessions waiting for round 2, by cap");
-    describe_gauge!(PENDING_SIGN_SESSIONS, "In-flight round-1 sign sessions held on this node");
-    describe_counter!(ANTI_ENTROPY_REPAIRS, "Hosted keys anti-entropy pulled to this node (confirmed by two peers)");
-    describe_counter!(ANTI_ENTROPY_CONFLICTS, "Hosted keys with divergent material across nodes");
+    describe_counter!(
+        SIGN_SESSIONS_REFUSED,
+        "Sign round 1s refused by a cap on sessions waiting for round 2, by cap"
+    );
+    describe_gauge!(
+        PENDING_SIGN_SESSIONS,
+        "In-flight round-1 sign sessions held on this node"
+    );
+    describe_counter!(
+        ANTI_ENTROPY_REPAIRS,
+        "Hosted keys anti-entropy pulled to this node (confirmed by two peers)"
+    );
+    describe_counter!(
+        ANTI_ENTROPY_CONFLICTS,
+        "Hosted keys with divergent material across nodes"
+    );
     describe_counter!(
         HOSTED_REPLICATION_REFUSALS,
         "Hosted key material refused or generations aborted on this node, by reason"
     );
-    describe_counter!(ANTI_ENTROPY_PULL_FAILURES, "Missing hosted keys a sweep tried to pull and did not");
+    describe_counter!(
+        ANTI_ENTROPY_PULL_FAILURES,
+        "Missing hosted keys a sweep tried to pull and did not"
+    );
     describe_counter!(
         HOSTED_ROLLBACK_INCOMPLETE,
         "Nodes an aborted hosted-key generation's rollback did not reach"
@@ -586,17 +720,36 @@ pub fn describe() {
     );
     describe_gauge!(HOSTED_KEYS, "Cluster-hosted keys held by this node");
     describe_counter!(HOSTED_KEY_OPS, "Hosted-key operations, by op and result");
-    describe_counter!(UNREADABLE_KEY_FILES, "Key files that could not be opened and were skipped");
-    describe_counter!(DECRYPT_RATE_LIMITED, "Hosted-key decryptions refused by the per-key rate limit");
+    describe_counter!(
+        UNREADABLE_KEY_FILES,
+        "Key files that could not be opened and were skipped"
+    );
+    describe_counter!(
+        DECRYPT_RATE_LIMITED,
+        "Hosted-key decryptions refused by the per-key rate limit"
+    );
     describe_counter!(
         CEREMONY_SIGN_TEST_RATE_LIMITED,
         "Split-ceremony sign tests refused by the per-key rate limit"
     );
     describe_gauge!(KEY_REPLICAS, "Fewest cosigners holding any one hosted key");
-    describe_histogram!(PEER_CALL_DURATION, Unit::Seconds, "Peer call latency at the caller, by call");
-    describe_gauge!(PEER_STATE, "1 for the liveness state this node holds for the peer (up, down, trial), else 0");
-    describe_counter!(PEER_TRANSITIONS, "Peer liveness (breaker) transitions, by peer, target state and reason");
-    describe_counter!(SIGN_FAST_REFUSALS, "Sign calls refused as leader without a signature (no-quorum, overloaded)");
+    describe_histogram!(
+        PEER_CALL_DURATION,
+        Unit::Seconds,
+        "Peer call latency at the caller, by call"
+    );
+    describe_gauge!(
+        PEER_STATE,
+        "1 for the liveness state this node holds for the peer (up, down, trial), else 0"
+    );
+    describe_counter!(
+        PEER_TRANSITIONS,
+        "Peer liveness (breaker) transitions, by peer, target state and reason"
+    );
+    describe_counter!(
+        SIGN_FAST_REFUSALS,
+        "Sign calls refused as leader without a signature (no-quorum, overloaded)"
+    );
     describe_gauge!(
         KEYSTORE_UNREADABLE,
         "1 while this node's key store cannot be listed, opened or written (readiness probe), else 0"
@@ -624,8 +777,14 @@ mod tests {
         });
         let out = handle.render();
 
-        assert!(out.contains("# TYPE rutli_sign_duration_seconds histogram"), "{out}");
-        assert!(!out.contains("quantile="), "summary quantiles must not be rendered:\n{out}");
+        assert!(
+            out.contains("# TYPE rutli_sign_duration_seconds histogram"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("quantile="),
+            "summary quantiles must not be rendered:\n{out}"
+        );
         for le in SIGN_DURATION_BUCKETS {
             let line = format!(r#"{SIGN_DURATION}_bucket{{result="ok",le="{le}"}} "#);
             assert!(out.contains(&line), "missing {line:?}:\n{out}");
@@ -635,7 +794,10 @@ mod tests {
             let line = format!(r#"{SIGN_DURATION}_bucket{{result="ok",le="{le}"}} {count}"#);
             assert!(out.lines().any(|l| l == line), "missing {line:?}:\n{out}");
         }
-        assert!(out.contains(r#"rutli_sign_duration_seconds_count{result="ok"} 2"#), "{out}");
+        assert!(
+            out.contains(r#"rutli_sign_duration_seconds_count{result="ok"} 2"#),
+            "{out}"
+        );
     }
 
     #[test]
@@ -686,24 +848,39 @@ mod tests {
         let out = handle.render();
 
         let one = |label: &str, values: &[&str]| -> LabelSets {
-            values.iter().map(|v| vec![(label.to_owned(), (*v).to_owned())]).collect()
+            values
+                .iter()
+                .map(|v| vec![(label.to_owned(), (*v).to_owned())])
+                .collect()
         };
         let mut expected: Vec<(&str, LabelSets)> = vec![
             (SIGN_POLICY_REFUSALS, one("reason", SIGN_POLICY_REASONS)),
-            (CEREMONY_INTENT_REFUSALS, one("reason", CEREMONY_INTENT_REASONS)),
+            (
+                CEREMONY_INTENT_REFUSALS,
+                one("reason", CEREMONY_INTENT_REASONS),
+            ),
             (DELETE_INTENT_REFUSALS, one("reason", DELETE_INTENT_REASONS)),
             (HOSTED_TOMBSTONES_WRITTEN, one("how", TOMBSTONE_HOWS)),
             (LOCK_POISON_RECOVERIES, one("lock", LOCK_NAMES)),
-            (SIGN_SESSION_OWNER_REFUSALS, one("call", SESSION_OWNER_CALLS)),
+            (
+                SIGN_SESSION_OWNER_REFUSALS,
+                one("call", SESSION_OWNER_CALLS),
+            ),
             (SIGN_SESSIONS_REFUSED, one("cap", SESSION_CAPS)),
             (BACKGROUND_LOOP_RESTARTS, one("loop", BACKGROUND_LOOPS)),
-            (HOSTED_REPLICATION_REFUSALS, one("reason", HOSTED_REFUSAL_REASONS)),
+            (
+                HOSTED_REPLICATION_REFUSALS,
+                one("reason", HOSTED_REFUSAL_REASONS),
+            ),
             (SIGN_FAST_REFUSALS, one("reason", FAST_REFUSAL_REASONS)),
         ];
         let mut ops = Vec::new();
         for op in HOSTED_KEY_OPS_NAMES {
             for result in ["ok", "error"] {
-                ops.push(vec![("op".to_owned(), (*op).to_owned()), ("result".to_owned(), result.to_owned())]);
+                ops.push(vec![
+                    ("op".to_owned(), (*op).to_owned()),
+                    ("result".to_owned(), result.to_owned()),
+                ]);
             }
         }
         expected.push((HOSTED_KEY_OPS, ops));
@@ -712,9 +889,13 @@ mod tests {
             assert!(!wanted.is_empty(), "{name}");
             let rendered = series(&out, name);
             for labels in wanted {
-                let found = rendered.iter().find(|(l, _)| labels.iter().all(|(k, v)| l.get(k) == Some(v)));
+                let found = rendered
+                    .iter()
+                    .find(|(l, _)| labels.iter().all(|(k, v)| l.get(k) == Some(v)));
                 match found {
-                    Some((_, value)) => assert_eq!(value, "0", "{name}{labels:?} is not primed at 0:\n{out}"),
+                    Some((_, value)) => {
+                        assert_eq!(value, "0", "{name}{labels:?} is not primed at 0:\n{out}")
+                    }
                     None => panic!("{name}{labels:?} is not primed:\n{out}"),
                 }
             }
@@ -729,15 +910,24 @@ mod tests {
                 let path = entry.expect("dir entry").path();
                 if path.is_dir() {
                     walk(&path, out);
-                } else if path.extension().is_some_and(|e| e == "rs") && !path.ends_with("metrics.rs") {
+                } else if path.extension().is_some_and(|e| e == "rs")
+                    && !path.ends_with("metrics.rs")
+                {
                     let text = std::fs::read_to_string(&path).expect("read source");
                     out.push((path.display().to_string(), text));
                 }
             }
         }
         let mut out = Vec::new();
-        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut out);
-        assert!(out.len() > 5, "found only {} sources: the scan is stale", out.len());
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut out,
+        );
+        assert!(
+            out.len() > 5,
+            "found only {} sources: the scan is stale",
+            out.len()
+        );
         out
     }
 
@@ -747,14 +937,25 @@ mod tests {
     fn calls(src: &str, callee: &str) -> Vec<Vec<String>> {
         let code: String = src
             .lines()
-            .map(|l| if l.trim_start().starts_with("//") { "" } else { l })
+            .map(|l| {
+                if l.trim_start().starts_with("//") {
+                    ""
+                } else {
+                    l
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let needle = format!("{callee}(");
         let mut found = Vec::new();
         for (at, _) in code.match_indices(&needle) {
             let before = &code[..at];
-            if before.chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_') || before.ends_with("fn ") {
+            if before
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                || before.ends_with("fn ")
+            {
                 continue;
             }
             let (mut depth, mut args, mut cur) = (1usize, Vec::new(), String::new());
@@ -840,7 +1041,12 @@ mod tests {
             ("refused_ceremony", CEREMONY_INTENT_REASONS),
             ("refused_delete", DELETE_INTENT_REASONS),
         ] {
-            each(callee, Box::new(|lit, what| assert!(list.contains(&lit), "{what}: {lit:?} is not in {list:?}")));
+            each(
+                callee,
+                Box::new(|lit, what| {
+                    assert!(list.contains(&lit), "{what}: {lit:?} is not in {list:?}")
+                }),
+            );
         }
         each(
             "refuse",
@@ -853,13 +1059,25 @@ mod tests {
                     if lit == "approval" && name == "CEREMONY_INTENT_REASONS" {
                         continue;
                     }
-                    assert!(list.contains(&lit), "{what}: shared reason {lit:?} is not in {name}");
+                    assert!(
+                        list.contains(&lit),
+                        "{what}: shared reason {lit:?} is not in {name}"
+                    );
                 }
             }),
         );
-        each("record_hosted_op", Box::new(|lit, what| assert!(HOSTED_KEY_OPS_NAMES.contains(&lit), "{what}: {lit:?}")));
-        each("hosted_refusal", Box::new(|lit, what| assert!(HOSTED_REFUSAL_REASONS.contains(&lit), "{what}: {lit:?}")));
-        each("fast_refusal", Box::new(|lit, what| assert!(FAST_REFUSAL_REASONS.contains(&lit), "{what}: {lit:?}")));
+        each(
+            "record_hosted_op",
+            Box::new(|lit, what| assert!(HOSTED_KEY_OPS_NAMES.contains(&lit), "{what}: {lit:?}")),
+        );
+        each(
+            "hosted_refusal",
+            Box::new(|lit, what| assert!(HOSTED_REFUSAL_REASONS.contains(&lit), "{what}: {lit:?}")),
+        );
+        each(
+            "fast_refusal",
+            Box::new(|lit, what| assert!(FAST_REFUSAL_REASONS.contains(&lit), "{what}: {lit:?}")),
+        );
     }
 
     /// `rutli_peer_call_duration_seconds` renders as a histogram with the agreed edges, its `call`
@@ -876,7 +1094,10 @@ mod tests {
             metrics::histogram!(PEER_CALL_DURATION, "call" => "sign_round2").record(0.004);
         });
         let out = handle.render();
-        assert!(out.contains("# TYPE rutli_peer_call_duration_seconds histogram"), "{out}");
+        assert!(
+            out.contains("# TYPE rutli_peer_call_duration_seconds histogram"),
+            "{out}"
+        );
         for le in PEER_CALL_DURATION_BUCKETS {
             let line = format!(r#"{PEER_CALL_DURATION}_bucket{{call="sign_round2",le="{le}"}} 1"#);
             assert!(out.lines().any(|l| l == line), "missing {line:?}:\n{out}");
@@ -886,14 +1107,22 @@ mod tests {
         for state in PEER_STATES {
             let want = if *state == "up" { "1" } else { "0" };
             assert!(
-                states.iter().any(|(l, v)| l.get("peer").map(String::as_str) == Some("2") && l.get("state").map(String::as_str) == Some(*state) && v == want),
+                states
+                    .iter()
+                    .any(|(l, v)| l.get("peer").map(String::as_str) == Some("2")
+                        && l.get("state").map(String::as_str) == Some(*state)
+                        && v == want),
                 "rutli_peer_state{{peer=2,state={state}}} != {want}:\n{out}"
             );
         }
         let transitions = series(&out, PEER_TRANSITIONS);
         for (to, reason) in PEER_TRANSITIONS_LABELS {
             assert!(
-                transitions.iter().any(|(l, v)| l.get("to").map(String::as_str) == Some(*to) && l.get("reason").map(String::as_str) == Some(*reason) && v == "0"),
+                transitions
+                    .iter()
+                    .any(|(l, v)| l.get("to").map(String::as_str) == Some(*to)
+                        && l.get("reason").map(String::as_str) == Some(*reason)
+                        && v == "0"),
                 "transition {to}/{reason} not primed:\n{out}"
             );
         }
@@ -901,8 +1130,14 @@ mod tests {
         let mut recorded = std::collections::BTreeSet::new();
         for (file, src) in &crate_sources() {
             for args in calls(src, "metrics::histogram!") {
-                if args.first().is_some_and(|a| a.ends_with("PEER_CALL_DURATION")) {
-                    let value = args.get(1).and_then(|a| a.split_once("=>")).map(|(_, v)| v.trim().to_owned());
+                if args
+                    .first()
+                    .is_some_and(|a| a.ends_with("PEER_CALL_DURATION"))
+                {
+                    let value = args
+                        .get(1)
+                        .and_then(|a| a.split_once("=>"))
+                        .map(|(_, v)| v.trim().to_owned());
                     if value.as_deref() == Some("call") {
                         continue; // peer.rs records the CallClass's own label
                     }
@@ -911,11 +1146,17 @@ mod tests {
             }
         }
         for call in &recorded {
-            assert!(PEER_CALLS.contains(&call.as_str()), "{call:?} is not in PEER_CALLS");
+            assert!(
+                PEER_CALLS.contains(&call.as_str()),
+                "{call:?} is not in PEER_CALLS"
+            );
         }
         let classes = ["sign_round1", "sign_round2", "abort", "control"];
         for call in PEER_CALLS {
-            assert!(recorded.contains(*call) || classes.contains(call), "{call:?} is never recorded");
+            assert!(
+                recorded.contains(*call) || classes.contains(call),
+                "{call:?} is never recorded"
+            );
         }
     }
 
@@ -937,7 +1178,9 @@ mod tests {
                 }
                 for args in calls(src, callee) {
                     // `note(..)` is also a method elsewhere; only sync's two-string form counts.
-                    if callee == "note" && (args.len() != 2 || !args.iter().all(|a| a.starts_with('"'))) {
+                    if callee == "note"
+                        && (args.len() != 2 || !args.iter().all(|a| a.starts_with('"')))
+                    {
                         continue;
                     }
                     let what = format!("{file}: {callee}(..)");
@@ -945,11 +1188,17 @@ mod tests {
                     if ignored.contains(&lit) {
                         continue;
                     }
-                    assert!(LOCK_NAMES.contains(&lit), "{what}: lock {lit:?} is not in LOCK_NAMES");
+                    assert!(
+                        LOCK_NAMES.contains(&lit),
+                        "{what}: lock {lit:?} is not in LOCK_NAMES"
+                    );
                     seen += 1;
                 }
             }
-            assert!(seen > 0, "no {callee}(..) lock call found: the scan is stale");
+            assert!(
+                seen > 0,
+                "no {callee}(..) lock call found: the scan is stale"
+            );
         }
         // The direct counter increment (frost/core cannot export metrics, so node.rs publishes it).
         let mut direct = 0;
@@ -958,15 +1207,27 @@ mod tests {
                 continue; // forwards its caller's name
             }
             for args in calls(src, "metrics::counter!") {
-                if args.first().is_some_and(|a| a.ends_with("LOCK_POISON_RECOVERIES")) {
-                    let value = args.get(1).and_then(|a| a.split_once("=>")).map(|(_, v)| v.trim().to_owned());
+                if args
+                    .first()
+                    .is_some_and(|a| a.ends_with("LOCK_POISON_RECOVERIES"))
+                {
+                    let value = args
+                        .get(1)
+                        .and_then(|a| a.split_once("=>"))
+                        .map(|(_, v)| v.trim().to_owned());
                     let lit = literal(value.as_ref(), file);
-                    assert!(LOCK_NAMES.contains(&lit), "{file}: lock {lit:?} is not in LOCK_NAMES");
+                    assert!(
+                        LOCK_NAMES.contains(&lit),
+                        "{file}: lock {lit:?} is not in LOCK_NAMES"
+                    );
                     direct += 1;
                 }
             }
         }
-        assert!(direct > 0, "no direct LOCK_POISON_RECOVERIES increment found: the scan is stale");
+        assert!(
+            direct > 0,
+            "no direct LOCK_POISON_RECOVERIES increment found: the scan is stale"
+        );
     }
 
     /// The primed label values of the sign-session refusal counters are the ones the code emits:
@@ -974,7 +1235,9 @@ mod tests {
     #[test]
     fn session_refusal_labels_match_the_code() {
         use rutli_frost_core::session::PendingCap;
-        let caps: Vec<&str> = [PendingCap::Key, PendingCap::Opener, PendingCap::Request].map(PendingCap::as_str).into();
+        let caps: Vec<&str> = [PendingCap::Key, PendingCap::Opener, PendingCap::Request]
+            .map(PendingCap::as_str)
+            .into();
         assert_eq!(caps, SESSION_CAPS);
         let mut emitted = std::collections::BTreeSet::new();
         for (file, src) in &crate_sources() {
@@ -982,8 +1245,14 @@ mod tests {
                 emitted.insert(literal(args.first(), file).to_owned());
             }
         }
-        let listed: std::collections::BTreeSet<String> = SESSION_OWNER_CALLS.iter().map(|c| (*c).to_owned()).collect();
-        assert_eq!(emitted, listed, "not_session_owner call sites vs SESSION_OWNER_CALLS");
+        let listed: std::collections::BTreeSet<String> = SESSION_OWNER_CALLS
+            .iter()
+            .map(|c| (*c).to_owned())
+            .collect();
+        assert_eq!(
+            emitted, listed,
+            "not_session_owner call sites vs SESSION_OWNER_CALLS"
+        );
     }
 
     /// `BACKGROUND_LOOPS` (what `prime()` starts at 0) is exactly the set of names the background
@@ -994,11 +1263,18 @@ mod tests {
         for (file, src) in &crate_sources() {
             for args in calls(src, "spawn_supervised") {
                 let what = format!("{file}: spawn_supervised(..)");
-                assert!(spawned.insert(literal(args.first(), &what).to_owned()), "{what}: a loop name is used twice");
+                assert!(
+                    spawned.insert(literal(args.first(), &what).to_owned()),
+                    "{what}: a loop name is used twice"
+                );
             }
         }
-        let listed: std::collections::BTreeSet<String> = BACKGROUND_LOOPS.iter().map(|n| (*n).to_owned()).collect();
-        assert_eq!(spawned, listed, "rutli_background_loop_restarts_total: call sites vs BACKGROUND_LOOPS");
+        let listed: std::collections::BTreeSet<String> =
+            BACKGROUND_LOOPS.iter().map(|n| (*n).to_owned()).collect();
+        assert_eq!(
+            spawned, listed,
+            "rutli_background_loop_restarts_total: call sites vs BACKGROUND_LOOPS"
+        );
     }
 
     /// `TOMBSTONE_HOWS` (what `prime()` starts at 0) is exactly the set of `how` values the
@@ -1009,20 +1285,39 @@ mod tests {
         let mut emitted = std::collections::BTreeSet::new();
         for (file, src) in &crate_sources() {
             for args in calls(src, "metrics::counter!") {
-                if args.first().is_some_and(|a| a.ends_with("HOSTED_TOMBSTONES_WRITTEN")) {
-                    let value = args.get(1).and_then(|a| a.split_once("=>")).map(|(_, v)| v.trim().to_owned());
+                if args
+                    .first()
+                    .is_some_and(|a| a.ends_with("HOSTED_TOMBSTONES_WRITTEN"))
+                {
+                    let value = args
+                        .get(1)
+                        .and_then(|a| a.split_once("=>"))
+                        .map(|(_, v)| v.trim().to_owned());
                     emitted.insert(literal(value.as_ref(), file).to_owned());
                 }
             }
         }
-        let listed: std::collections::BTreeSet<String> = TOMBSTONE_HOWS.iter().map(|h| (*h).to_owned()).collect();
-        assert_eq!(emitted, listed, "rutli_hosted_tombstones_written_total: call sites vs TOMBSTONE_HOWS");
+        let listed: std::collections::BTreeSet<String> =
+            TOMBSTONE_HOWS.iter().map(|h| (*h).to_owned()).collect();
+        assert_eq!(
+            emitted, listed,
+            "rutli_hosted_tombstones_written_total: call sites vs TOMBSTONE_HOWS"
+        );
 
         let this = include_str!("metrics.rs");
-        let decl = this.find("pub const HOSTED_TOMBSTONES_WRITTEN").expect("the const is declared here");
-        let doc: Vec<&str> = this[..decl].lines().rev().take_while(|l| l.starts_with("///")).collect();
+        let decl = this
+            .find("pub const HOSTED_TOMBSTONES_WRITTEN")
+            .expect("the const is declared here");
+        let doc: Vec<&str> = this[..decl]
+            .lines()
+            .rev()
+            .take_while(|l| l.starts_with("///"))
+            .collect();
         let first = doc.last().expect("the const has a doc comment");
         let wanted = format!("label `how` ({})", TOMBSTONE_HOWS.join("|"));
-        assert!(first.contains(&wanted), "the HOSTED_TOMBSTONES_WRITTEN doc names other values than {wanted:?}: {first}");
+        assert!(
+            first.contains(&wanted),
+            "the HOSTED_TOMBSTONES_WRITTEN doc names other values than {wanted:?}: {first}"
+        );
     }
 }

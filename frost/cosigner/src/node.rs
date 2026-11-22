@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Per-node state and the typed peer operations. The gRPC [`crate::service`] layer and the
@@ -9,11 +9,11 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use frost_ed25519 as frost;
 use frost::keys::dkg::{round1, round2};
 use frost::round1::SigningCommitments;
 use frost::round2::SignatureShare;
 use frost::Identifier;
+use frost_ed25519 as frost;
 
 use rutli_frost_core::dkg::{group_verifying_key_bytes, DkgParticipant};
 use rutli_frost_core::nonce_store::NonceStore;
@@ -211,11 +211,12 @@ pub const MAX_PENDING_SIGN_SESSIONS_PER_OPENER: usize = MAX_PENDING_SIGN_SESSION
 pub const MAX_PENDING_SIGN_SESSIONS_PER_REQUEST: usize = 2 * 10;
 
 /// The caps above, as round 1 checks them.
-pub const PENDING_SIGN_CAPS: rutli_frost_core::session::PendingCaps = rutli_frost_core::session::PendingCaps {
-    per_key: MAX_PENDING_SIGN_SESSIONS_PER_KEY,
-    per_owner: MAX_PENDING_SIGN_SESSIONS_PER_OPENER,
-    per_request: MAX_PENDING_SIGN_SESSIONS_PER_REQUEST,
-};
+pub const PENDING_SIGN_CAPS: rutli_frost_core::session::PendingCaps =
+    rutli_frost_core::session::PendingCaps {
+        per_key: MAX_PENDING_SIGN_SESSIONS_PER_KEY,
+        per_owner: MAX_PENDING_SIGN_SESSIONS_PER_OPENER,
+        per_request: MAX_PENDING_SIGN_SESSIONS_PER_REQUEST,
+    };
 
 pub use rutli_frost_core::session::SessionOwner;
 
@@ -231,7 +232,8 @@ pub const MIXED_EVIDENCE_REGATHER: Duration = Duration::from_secs(2);
 /// pair. The refusal is counted every time; the log line names who to look at. Callers are
 /// allowlisted mesh CNs, so the map stays small; it is bounded anyway.
 fn once_a_minute(what: &'static str, who: &SessionOwner) -> bool {
-    static LAST: Mutex<Option<std::collections::HashMap<(&'static str, SessionOwner), u64>>> = Mutex::new(None);
+    static LAST: Mutex<Option<std::collections::HashMap<(&'static str, SessionOwner), u64>>> =
+        Mutex::new(None);
     let minute = crate::intent::now_ms() / 60_000;
     let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
     let map = last.get_or_insert_with(Default::default);
@@ -401,7 +403,12 @@ struct HostedCtx {
 }
 
 impl Node {
-    pub fn new(identifier: Identifier, max_signers: u16, min_signers: u16, keystore: KeyStore) -> Self {
+    pub fn new(
+        identifier: Identifier,
+        max_signers: u16,
+        min_signers: u16,
+        keystore: KeyStore,
+    ) -> Self {
         Self::new_with_ceremony_timeout(
             identifier,
             max_signers,
@@ -425,7 +432,12 @@ impl Node {
         let keystore_health = Arc::new(keystore_health);
         let record_store = CeremonyRecords::open(keystore.ceremony_dir());
         let (records, records_loaded) = match record_store.load_all() {
-            Ok(list) => (list.into_iter().map(|r| (r.ceremony_id.clone(), r)).collect(), true),
+            Ok(list) => (
+                list.into_iter()
+                    .map(|r| (r.ceremony_id.clone(), r))
+                    .collect(),
+                true,
+            ),
             Err(e) => {
                 // Unreadable record directory: start with no cached votes and say so. A ceremony this
                 // node voted in will read as unknown to peers — they wait, they never commit on it.
@@ -450,7 +462,10 @@ impl Node {
             ceremony_orphan_timeout,
             ceremony_fence_timeout: CEREMONY_FENCE_TIMEOUT,
             record_store,
-            book: Mutex::new(CeremonyBook { sessions: Default::default(), records }),
+            book: Mutex::new(CeremonyBook {
+                sessions: Default::default(),
+                records,
+            }),
             mesh: std::sync::OnceLock::new(),
             hosted: None,
             hosted_created_in: Mutex::new(Default::default()),
@@ -470,7 +485,9 @@ impl Node {
         if !records_loaded {
             // Without the votes the repair cannot tell an orphaned staged share from one this node
             // voted yes on (audit F4): leave everything as it is until a start that reads them.
-            tracing::error!("ceremony startup repair skipped: the ceremony records could not be read");
+            tracing::error!(
+                "ceremony startup repair skipped: the ceremony records could not be read"
+            );
         } else if let Err(e) = node.recover_ceremonies() {
             tracing::error!(error = %e, "ceremony recovery at startup failed");
         }
@@ -535,8 +552,11 @@ impl Node {
                 );
             }
         }
-        let pending: Vec<CeremonyRecord> =
-            records.values().filter(|r| r.state == RecordState::Staged).cloned().collect();
+        let pending: Vec<CeremonyRecord> = records
+            .values()
+            .filter(|r| r.state == RecordState::Staged)
+            .cloned()
+            .collect();
         for rec in pending {
             if self.keystore.has_staged(&rec.key_id, &rec.ceremony_id)? {
                 continue;
@@ -550,7 +570,12 @@ impl Node {
             };
             if promoted {
                 let now = crate::ceremony_record::now_ms();
-                let done = CeremonyRecord { state: RecordState::Committed, updated_ms: now, resolved_ms: now, ..rec.clone() };
+                let done = CeremonyRecord {
+                    state: RecordState::Committed,
+                    updated_ms: now,
+                    resolved_ms: now,
+                    ..rec.clone()
+                };
                 self.record_store.write(Some(&rec), &done)?;
                 records.insert(done.ceremony_id.clone(), done);
                 tracing::info!(
@@ -581,7 +606,9 @@ impl Node {
 
     /// Every ceremony record this node holds.
     pub fn all_records(&self) -> Vec<CeremonyRecord> {
-        self.book().map(|b| b.records.values().cloned().collect()).unwrap_or_default()
+        self.book()
+            .map(|b| b.records.values().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Staged share files on disk, as `(key_id, ceremony_id)`.
@@ -603,14 +630,24 @@ impl Node {
     }
 
     fn staged_records_checked(&self) -> Result<Vec<CeremonyRecord>> {
-        Ok(self.book()?.records.values().filter(|r| r.state == RecordState::Staged).cloned().collect())
+        Ok(self
+            .book()?
+            .records
+            .values()
+            .filter(|r| r.state == RecordState::Staged)
+            .cloned()
+            .collect())
     }
 
     /// The DKG ceremony this node committed `key_id` under, while it still holds that sharing: the
     /// COMMITTED "dkg" record for the key whose group key is `group_key` and whose epoch is the
     /// share's current one. `None` when the record is gone, the key was refreshed since, or it did
     /// not come from a DKG (`DkgReply.origin_ceremony_id`).
-    pub fn committed_dkg_ceremony(&self, key_id: &str, group_key: &[u8; 32]) -> Result<Option<String>> {
+    pub fn committed_dkg_ceremony(
+        &self,
+        key_id: &str,
+        group_key: &[u8; 32],
+    ) -> Result<Option<String>> {
         let epoch = match self.keystore.load_record(key_id) {
             Ok(crate::keystore::Record::Frost(share)) => share.epoch,
             Ok(_) | Err(DaemonError::UnknownKey(_)) => return Ok(None),
@@ -643,8 +680,13 @@ impl Node {
                 reply.present = true;
                 reply.epoch = share.epoch;
                 reply.pkp_digest = share.pkp_digest()?.to_vec();
-                reply.group_verifying_key = group_verifying_key_bytes(&share.public_key_package)?.to_vec();
-                reply.origin = share.origin.as_ref().map(|o| o.kind.clone()).unwrap_or_else(|| "dkg".into());
+                reply.group_verifying_key =
+                    group_verifying_key_bytes(&share.public_key_package)?.to_vec();
+                reply.origin = share
+                    .origin
+                    .as_ref()
+                    .map(|o| o.kind.clone())
+                    .unwrap_or_else(|| "dkg".into());
             }
             Ok(crate::keystore::Record::Hosted(_)) | Ok(crate::keystore::Record::Tombstone(_)) => {
                 reply.present = true;
@@ -658,7 +700,11 @@ impl Node {
             reply.stale_by_own_record = mark.by_own_record;
             reply.stale_reason = mark.reason;
         }
-        if let Some(r) = self.staged_records_checked()?.into_iter().find(|r| r.key_id == key_id) {
+        if let Some(r) = self
+            .staged_records_checked()?
+            .into_iter()
+            .find(|r| r.key_id == key_id)
+        {
             reply.staged = true;
             reply.staged_ceremony_id = r.ceremony_id;
             reply.staged_new_epoch = r.new_epoch;
@@ -775,7 +821,10 @@ impl Node {
                 Ok(())
             }
             // Preempted since part 1 took it (only possible for a fence already past its timeout).
-            _ => Err(DaemonError::CeremonySuperseded { key_id: key_id.to_string(), owner: owner.to_string() }),
+            _ => Err(DaemonError::CeremonySuperseded {
+                key_id: key_id.to_string(),
+                owner: owner.to_string(),
+            }),
         }
     }
 
@@ -818,7 +867,11 @@ impl Node {
     /// Release the guard for `key_id` iff `owner` still holds it.
     fn release_ceremony(&self, key_id: &str, owner: &str) {
         let mut guards = self.guards();
-        if guards.get(key_id).map(|c| c.owner == owner).unwrap_or(false) {
+        if guards
+            .get(key_id)
+            .map(|c| c.owner == owner)
+            .unwrap_or(false)
+        {
             guards.remove(key_id);
         }
     }
@@ -857,7 +910,12 @@ impl Node {
     /// was refused while this node held sign nonces for the key (the "reverse fence"), a leftover
     /// of ceremony protocol 1, where part 3 overwrote the live share. Under protocol 2 part 3 only
     /// stages; see [`Node::sign_round1`] for why signing and ceremonies may overlap.
-    pub fn ceremony_fence(&self, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<()> {
+    pub fn ceremony_fence(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        kind: &'static str,
+    ) -> Result<()> {
         self.ceremony_fence_from(ceremony_id, key_id, kind, None)
     }
 
@@ -876,7 +934,8 @@ impl Node {
         if kind == "genkey" {
             return self.genkey_begin_from(ceremony_id, key_id, None, None, leader, None);
         }
-        self.fence_created(ceremony_id, key_id, kind, leader, None).map(|_| ())
+        self.fence_created(ceremony_id, key_id, kind, leader, None)
+            .map(|_| ())
     }
 
     /// The fence of a hosted-key generation (`genkey`) for `ceremony_id` of `key_id`, asked by the
@@ -910,7 +969,9 @@ impl Node {
             crate::hosted::HostedSpec::parse(s)?;
         }
         let verified = match &self.sign_guard {
-            Some(g) => g.authorize_generate(key_id, spec.unwrap_or(""), leader_id, ceremony_id, intent)?,
+            Some(g) => {
+                g.authorize_generate(key_id, spec.unwrap_or(""), leader_id, ceremony_id, intent)?
+            }
             None => None,
         };
         if let Some(v) = &verified {
@@ -933,7 +994,10 @@ impl Node {
             None => {}
         }
         let auth = GenkeyAuth {
-            spec: verified.as_ref().map(|v| v.spec.clone()).or_else(|| spec.map(str::to_string)),
+            spec: verified
+                .as_ref()
+                .map(|v| v.spec.clone())
+                .or_else(|| spec.map(str::to_string)),
             intent: verified.clone(),
         };
         let created = self.fence_created(ceremony_id, key_id, "genkey", leader, Some(auth))?;
@@ -987,7 +1051,8 @@ impl Node {
         if kind == "delkey" && refuse_unless_hosted_id(key_id).is_err() {
             self.refuse_if_keystore_down()?;
             match self.keystore.load_record(key_id) {
-                Ok(crate::keystore::Record::Hosted(_)) | Ok(crate::keystore::Record::Tombstone(_)) => {}
+                Ok(crate::keystore::Record::Hosted(_))
+                | Ok(crate::keystore::Record::Tombstone(_)) => {}
                 Ok(crate::keystore::Record::Frost(_)) | Err(DaemonError::UnknownKey(_)) => {
                     return Err(DaemonError::NotHostedKeyId(key_id.to_string()))
                 }
@@ -1047,13 +1112,17 @@ impl Node {
     /// Lock order: may be taken while holding the book ([`Node::mark_session`], and the leader
     /// check of parts 2 and 3, [`Node::assert_leader`]); the book is never
     /// taken while holding this.
-    fn guards(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, CeremonyGuard>> {
+    fn guards(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, CeremonyGuard>> {
         crate::sync::recover(&self.ceremonies, "ceremony_guards")
     }
 
     /// The stale marks, **kept** on poison: every change is one insert or remove, so a mark is
     /// either set or not; keeping them fails closed, and the next epoch check recomputes every one.
-    fn stale_marks(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, StaleMark>> {
+    fn stale_marks(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, StaleMark>> {
         crate::sync::recover(&self.stale, "stale_marks")
     }
 
@@ -1073,7 +1142,10 @@ impl Node {
                     e
                 })?;
                 let mut book = poisoned.into_inner();
-                book.records = records.into_iter().map(|r| (r.ceremony_id.clone(), r)).collect();
+                book.records = records
+                    .into_iter()
+                    .map(|r| (r.ceremony_id.clone(), r))
+                    .collect();
                 book.sessions.clear();
                 // Still under the book lock (book -> guards), so no part 1 can mark a guard for a
                 // new session between the clear and the unmark.
@@ -1154,7 +1226,8 @@ impl Node {
     /// resolved again, which evicts.
     fn evict(&self, key_id: &str) {
         let mut map = self.cache();
-        self.cache_evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.cache_evictions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         map.remove(key_id);
     }
 
@@ -1178,7 +1251,11 @@ impl Node {
     /// What a leader needs to sign with `key_id`: threshold, its own sharing, its stale mark.
     pub fn signing_view(&self, key_id: &str) -> Result<SigningView> {
         let c = self.cached(key_id)?;
-        Ok(SigningView { threshold: c.cosigner.min_signers(), view: c.view, stale: self.stale_mark(key_id) })
+        Ok(SigningView {
+            threshold: c.cosigner.min_signers(),
+            view: c.view,
+            stale: self.stale_mark(key_id),
+        })
     }
 
     /// This node's stale mark for `key_id`, if its epoch check found the share stale.
@@ -1192,7 +1269,9 @@ impl Node {
     pub fn set_stale(&self, key_id: &str, mark: Option<StaleMark>) {
         let mut stale = self.stale_marks();
         let changed = match &mark {
-            Some(m) => !stale.insert(key_id.to_string(), m.clone()).is_some_and(|old| old.same_state(m)),
+            Some(m) => !stale
+                .insert(key_id.to_string(), m.clone())
+                .is_some_and(|old| old.same_state(m)),
             None => stale.remove(key_id).is_some(),
         };
         drop(stale);
@@ -1230,7 +1309,11 @@ impl Node {
     /// key store fails its readiness probe. See
     /// [`rutli_frost_core::nonce_store::NonceStore::prune_older_than`] for why pruning past
     /// [`rutli_frost_core::session::MARKER_RETENTION`] cannot enable nonce reuse.
-    pub fn prune_nonce_markers(&self, retention: Duration, budget: usize) -> Result<rutli_frost_core::nonce_store::PruneReport> {
+    pub fn prune_nonce_markers(
+        &self,
+        retention: Duration,
+        budget: usize,
+    ) -> Result<rutli_frost_core::nonce_store::PruneReport> {
         self.refuse_if_keystore_down()?;
         let mut total = rutli_frost_core::nonce_store::PruneReport::default();
         for entry in std::fs::read_dir(self.keystore.dir())? {
@@ -1239,7 +1322,8 @@ impl Node {
             if !name.to_string_lossy().ends_with(".nonces") || !entry.file_type()?.is_dir() {
                 continue;
             }
-            let r = NonceStore::open(entry.path())?.prune_older_than(retention, budget - total.removed)?;
+            let r = NonceStore::open(entry.path())?
+                .prune_older_than(retention, budget - total.removed)?;
             total.removed += r.removed;
             total.kept += r.kept;
             total.truncated |= r.truncated;
@@ -1247,7 +1331,11 @@ impl Node {
         metrics::counter!(crate::metrics::NONCE_MARKERS_PRUNED).increment(total.removed as u64);
         metrics::gauge!(crate::metrics::NONCE_MARKERS).set(total.kept as f64);
         if total.removed > 0 {
-            tracing::info!(removed = total.removed, kept = total.kept, "pruned expired nonce markers");
+            tracing::info!(
+                removed = total.removed,
+                kept = total.kept,
+                "pruned expired nonce markers"
+            );
         }
         Ok(total)
     }
@@ -1260,7 +1348,12 @@ impl Node {
         crate::supervise::spawn_supervised("nonce_pruner", node, |node| async move {
             loop {
                 let pass = node
-                    .blocking(|n| n.prune_nonce_markers(rutli_frost_core::session::MARKER_RETENTION, NONCE_PRUNE_BUDGET))
+                    .blocking(|n| {
+                        n.prune_nonce_markers(
+                            rutli_frost_core::session::MARKER_RETENTION,
+                            NONCE_PRUNE_BUDGET,
+                        )
+                    })
                     .await;
                 let wait = match pass {
                     Ok(r) if r.truncated => Duration::from_secs(5),
@@ -1443,7 +1536,9 @@ impl Node {
     }
 
     pub fn group_key(&self, key_id: &str) -> Result<[u8; 32]> {
-        Ok(group_verifying_key_bytes(self.cosigner(key_id)?.public_key_package())?)
+        Ok(group_verifying_key_bytes(
+            self.cosigner(key_id)?.public_key_package(),
+        )?)
     }
 
     /// This node's view of FROST key `key_id`, public values only, read from the key file (not the
@@ -1503,7 +1598,12 @@ impl Node {
     // -- signing peer ops --
 
     /// Sign round 1 opened by this node's own leader ([`SessionOwner::Local`]).
-    pub fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments> {
+    pub fn sign_round1(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        ctx: &Round1Ctx,
+    ) -> Result<SigningCommitments> {
         self.sign_round1_as(key_id, session_id, ctx, &SessionOwner::Local)
     }
 
@@ -1551,16 +1651,23 @@ impl Node {
         // already holds that request's cap. Round 1 checks again, under the lock that inserts.
         let claimed = ctx.intent.as_ref().and_then(|signed| {
             use prost::Message;
-            crate::pb::SignIntent::decode(signed.intent.as_slice()).ok().map(|i| hex::encode(i.request_id))
+            crate::pb::SignIntent::decode(signed.intent.as_slice())
+                .ok()
+                .map(|i| hex::encode(i.request_id))
         });
-        if let Err(e) = cached.cosigner.check_room(opener, claimed.as_deref(), PENDING_SIGN_CAPS) {
+        if let Err(e) = cached
+            .cosigner
+            .check_room(opener, claimed.as_deref(), PENDING_SIGN_CAPS)
+        {
             return Err(self.sessions_full(key_id, opener, e));
         }
         self.check_epoch(key_id, &cached, ctx)?;
         let mut binding = ctx.binding(key_id)?;
         // The signing policy (audit C2), before any nonce exists: what authorizes this session.
         let auth = match &self.sign_guard {
-            Some(g) => Some(g.authorize_round1(key_id, ctx, || self.ceremony_test_message(key_id))?),
+            Some(g) => {
+                Some(g.authorize_round1(key_id, ctx, || self.ceremony_test_message(key_id))?)
+            }
             None => None,
         };
         let mut request = None;
@@ -1568,14 +1675,22 @@ impl Node {
             binding = binding.with_message(&v.message);
             request = Some(hex::encode(v.request_id));
         }
-        let result = cached.cosigner.round1_owned(session_id, binding, opener.clone(), request, PENDING_SIGN_CAPS);
+        let result = cached.cosigner.round1_owned(
+            session_id,
+            binding,
+            opener.clone(),
+            request,
+            PENDING_SIGN_CAPS,
+        );
         if let (Ok(_), Some(g), Some(auth)) = (&result, &self.sign_guard, auth) {
             g.remember(key_id, session_id, auth, opener.clone());
         }
         self.update_pending_gauge();
         match result {
             Ok(c) => Ok(c),
-            Err(e @ rutli_frost_core::CoreError::SessionsFull { .. }) => Err(self.sessions_full(key_id, opener, e)),
+            Err(e @ rutli_frost_core::CoreError::SessionsFull { .. }) => {
+                Err(self.sessions_full(key_id, opener, e))
+            }
             Err(e) => Err(e.into()),
         }
     }
@@ -1584,10 +1699,21 @@ impl Node {
     /// per opener and cap) with the opener, and answered UNAVAILABLE. An opener at its own cap only
     /// stops its own sessions: the leader it is excludes this node from its signature, and every
     /// other leader keeps its room here.
-    fn sessions_full(&self, key_id: &str, opener: &SessionOwner, e: rutli_frost_core::CoreError) -> DaemonError {
+    fn sessions_full(
+        &self,
+        key_id: &str,
+        opener: &SessionOwner,
+        e: rutli_frost_core::CoreError,
+    ) -> DaemonError {
         self.prune_expired_sign_sessions();
-        if let rutli_frost_core::CoreError::SessionsFull { cap_kind, open, cap } = &e {
-            metrics::counter!(crate::metrics::SIGN_SESSIONS_REFUSED, "cap" => cap_kind.as_str()).increment(1);
+        if let rutli_frost_core::CoreError::SessionsFull {
+            cap_kind,
+            open,
+            cap,
+        } = &e
+        {
+            metrics::counter!(crate::metrics::SIGN_SESSIONS_REFUSED, "cap" => cap_kind.as_str())
+                .increment(1);
             if once_a_minute(cap_kind.as_str(), opener) {
                 tracing::warn!(
                     key_id,
@@ -1622,7 +1748,11 @@ impl Node {
         match ctx.leader_view {
             Some(leader) if leader != cached.view => {
                 metrics::counter!(crate::metrics::EPOCH_MISMATCH).increment(1);
-                let err = DaemonError::EpochMismatch { key_id: key_id.to_string(), peer: cached.view, leader };
+                let err = DaemonError::EpochMismatch {
+                    key_id: key_id.to_string(),
+                    peer: cached.view,
+                    leader,
+                };
                 tracing::error!(key_id, error = %err, "sign round 1 refused: the leader signs with another sharing");
                 Err(err)
             }
@@ -1662,7 +1792,14 @@ impl Node {
         commitments: &BTreeMap<Identifier, SigningCommitments>,
         intent_digest: Option<[u8; 32]>,
     ) -> Result<SignatureShare> {
-        self.sign_round2_as(key_id, session_id, message, commitments, intent_digest, &SessionOwner::Local)
+        self.sign_round2_as(
+            key_id,
+            session_id,
+            message,
+            commitments,
+            intent_digest,
+            &SessionOwner::Local,
+        )
     }
 
     /// Sign round 2, presenting the digest of the signing intent round 1 carried (`None`: round 1
@@ -1710,9 +1847,15 @@ impl Node {
             return Err(self.not_session_owner("round2", key_id, caller, e));
         }
         let result = match &self.sign_guard {
-            None => cosigner.round2_guarded_as(caller, session_id, key_id, message, commitments, intent_digest.as_ref(), || {
-                self.sign_store_work(key_id, session_id)
-            }),
+            None => cosigner.round2_guarded_as(
+                caller,
+                session_id,
+                key_id,
+                message,
+                commitments,
+                intent_digest.as_ref(),
+                || self.sign_store_work(key_id, session_id),
+            ),
             Some(g) => {
                 // Taken on every path from here on: a round 2 that gets this far uses up the
                 // session's authorization, whatever it then answers. (One refused before this
@@ -1733,7 +1876,8 @@ impl Node {
                 let held = cosigner.holds_session(session_id);
                 #[cfg(test)]
                 {
-                    let hook = crate::sync::recover(&self.hooks.after_round2_held, "test_hook").clone();
+                    let hook =
+                        crate::sync::recover(&self.hooks.after_round2_held, "test_hook").clone();
                     if let Some(hook) = hook {
                         hook(key_id, session_id);
                     }
@@ -1750,7 +1894,9 @@ impl Node {
                     // nonces belong to a round 2 that passes the policy checks and is journaled;
                     // core round 2 here would take them out of the session map unchecked (and
                     // sign with them, did this request carry that round 1's commitment).
-                    Err(DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(session_id.to_string())))
+                    Err(DaemonError::Core(
+                        rutli_frost_core::CoreError::UnknownSession(session_id.to_string()),
+                    ))
                 } else {
                     let auth = match auth {
                         Some(a) => a,
@@ -1785,7 +1931,12 @@ impl Node {
                             // Refused before the nonces were taken (the entry changed hands since
                             // `take_as`): put the authorization back, so the call leaves the session
                             // as it found it.
-                            if matches!(result, Err(DaemonError::Core(rutli_frost_core::CoreError::NotSessionOwner { .. }))) {
+                            if matches!(
+                                result,
+                                Err(DaemonError::Core(
+                                    rutli_frost_core::CoreError::NotSessionOwner { .. }
+                                ))
+                            ) {
                                 g.restore(key_id, session_id, auth, caller.clone());
                             }
                             result
@@ -1801,7 +1952,12 @@ impl Node {
             }
             other => other,
         };
-        if matches!(result, Err(DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_)))) {
+        if matches!(
+            result,
+            Err(DaemonError::Core(
+                rutli_frost_core::CoreError::UnknownSession(_)
+            ))
+        ) {
             metrics::counter!(crate::metrics::SIGN_ROUND2_UNKNOWN_SESSION).increment(1);
         }
         self.update_pending_gauge();
@@ -1814,7 +1970,9 @@ impl Node {
     /// node at once. The next readiness probe that finds the store working clears it.
     fn store_failure<T>(&self, result: Result<T>) -> Result<T> {
         let Err(e) = &result else { return result };
-        let Some(detail) = crate::health::is_definite_io(e) else { return result };
+        let Some(detail) = crate::health::is_definite_io(e) else {
+            return result;
+        };
         self.keystore_health.report_definite(&detail);
         tracing::error!(
             error = %e,
@@ -1861,7 +2019,12 @@ impl Node {
     /// Asked by `caller`: a live session another caller opened is refused
     /// ([`rutli_frost_core::CoreError::NotSessionOwner`], PERMISSION_DENIED) and kept, nonces and
     /// authorization.
-    pub fn abort_sign_as(&self, key_id: &str, session_id: &str, caller: &SessionOwner) -> Result<()> {
+    pub fn abort_sign_as(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        caller: &SessionOwner,
+    ) -> Result<()> {
         // The nonces first, then the authorization: a round 2 racing this abort (a leader that
         // timed out on this node and gave up) must not find the nonces without the authorization,
         // which is a policy refusal. In this order it finds no nonces: an unknown session.
@@ -1901,7 +2064,11 @@ impl Node {
     /// Drop in-flight sign sessions past their TTL on every cached key (see
     /// [`crate::health::spawn_monitor`]), and refresh the pending gauge.
     pub fn prune_expired_sign_sessions(&self) {
-        let pruned: usize = self.cached_cosigners().iter().map(|c| c.prune_expired()).sum();
+        let pruned: usize = self
+            .cached_cosigners()
+            .iter()
+            .map(|c| c.prune_expired())
+            .sum();
         if pruned > 0 {
             tracing::debug!(pruned, "dropped expired in-flight sign sessions");
         }
@@ -1923,13 +2090,17 @@ impl Node {
 
     /// In-flight sign sessions across all cached keys on this node.
     pub fn pending_sign_total(&self) -> usize {
-        self.cached_cosigners().iter().map(|c| c.pending_count()).sum()
+        self.cached_cosigners()
+            .iter()
+            .map(|c| c.pending_count())
+            .sum()
     }
 
     /// Keep the pending-sessions gauge in step after any round1/round2/abort. No-op without an
     /// installed metrics recorder (tests, metrics disabled).
     fn update_pending_gauge(&self) {
-        metrics::gauge!(crate::metrics::PENDING_SIGN_SESSIONS).set(self.pending_sign_total() as f64);
+        metrics::gauge!(crate::metrics::PENDING_SIGN_SESSIONS)
+            .set(self.pending_sign_total() as f64);
     }
 
     /// Leader-side aggregation using this node's copy of the group public key.
@@ -1940,7 +2111,12 @@ impl Node {
         commitments: &BTreeMap<Identifier, SigningCommitments>,
         shares: &BTreeMap<Identifier, SignatureShare>,
     ) -> Result<[u8; 64]> {
-        Ok(aggregate(message, commitments, shares, self.cosigner(key_id)?.public_key_package())?)
+        Ok(aggregate(
+            message,
+            commitments,
+            shares,
+            self.cosigner(key_id)?.public_key_package(),
+        )?)
     }
 
     // -- two-phase DKG / refresh (see crate::ceremony_record for the state machine) --
@@ -1963,14 +2139,22 @@ impl Node {
     pub fn mesh_ids(&self) -> Vec<u16> {
         self.mesh
             .get()
-            .map(|m| m.iter().filter_map(|p| crate::hosted::identifier_index(p.identifier()).ok()).collect())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|p| crate::hosted::identifier_index(p.identifier()).ok())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
     /// The mesh peer with configured identifier `id`, if this node has one.
     pub fn mesh_peer(&self, id: u16) -> Option<Arc<dyn crate::peer::PeerApi>> {
         let want = Identifier::try_from(id).ok()?;
-        self.mesh.get()?.iter().find(|p| p.identifier() == want).cloned()
+        self.mesh
+            .get()?
+            .iter()
+            .find(|p| p.identifier() == want)
+            .cloned()
     }
 
     /// This node's configured identifier as a number.
@@ -2043,7 +2227,8 @@ impl Node {
             CeremonyKind::Refresh => {
                 // Before the share is even unsealed, and before any fence mark or guard.
                 let requested_by = verified.as_ref().map(|v| v.signer_cn.as_str());
-                waived = self.check_refresh_interval(key_id, Some(ceremony_id), requested_by, leader)?;
+                waived =
+                    self.check_refresh_interval(key_id, Some(ceremony_id), requested_by, leader)?;
                 let share = self.keystore.load(key_id)?;
                 if let Some((epoch, digest)) = expect {
                     let mine = share.pkp_digest()?;
@@ -2081,7 +2266,14 @@ impl Node {
             )));
         }
         if let Some((last, at)) = &waived {
-            self.note_waiver_used(key_id, ceremony_id, last, *at, requested_by.as_deref(), leader);
+            self.note_waiver_used(
+                key_id,
+                ceremony_id,
+                last,
+                *at,
+                requested_by.as_deref(),
+                leader,
+            );
         }
         Ok(())
     }
@@ -2107,7 +2299,9 @@ impl Node {
     /// Whether this node refuses a DKG/refresh without a client-signed ceremony intent
     /// (`signing_policy.require_ceremony_intent`).
     fn ceremony_intent_required(&self) -> bool {
-        self.sign_guard.as_ref().is_some_and(|g| g.require_ceremony_intent())
+        self.sign_guard
+            .as_ref()
+            .is_some_and(|g| g.require_ceremony_intent())
     }
 
     /// Durably mark `ceremony_id` fenced on this node, or refuse: a fence mark exists, so it was
@@ -2142,8 +2336,13 @@ impl Node {
     /// The refresh-interval verdict for `key_id` on this node now
     /// ([`crate::refresh_interval::verdict`]). No signing policy (a node built by hand, as some
     /// tests do; the daemon always installs one): no limit, as no intents.
-    pub fn refresh_interval_verdict(&self, key_id: &str) -> Result<crate::refresh_interval::Verdict> {
-        let Some(g) = &self.sign_guard else { return Ok(crate::refresh_interval::Verdict::Allowed) };
+    pub fn refresh_interval_verdict(
+        &self,
+        key_id: &str,
+    ) -> Result<crate::refresh_interval::Verdict> {
+        let Some(g) = &self.sign_guard else {
+            return Ok(crate::refresh_interval::Verdict::Allowed);
+        };
         let policy = g.verifier().policy();
         let last = crate::refresh_interval::last_counted(self.book()?.records.values(), key_id);
         Ok(crate::refresh_interval::verdict(
@@ -2158,7 +2357,8 @@ impl Node {
     /// a refresh this node would refuse at its own fence is refused before anything starts.
     /// `requested_by`: the calling client's CN, for the log.
     pub fn refuse_refresh_too_soon(&self, key_id: &str, requested_by: Option<&str>) -> Result<()> {
-        self.check_refresh_interval(key_id, None, requested_by, None).map(|_| ())
+        self.check_refresh_interval(key_id, None, requested_by, None)
+            .map(|_| ())
     }
 
     /// Log and count a refresh this node let through the interval under the operator's waiver —
@@ -2208,7 +2408,10 @@ impl Node {
             Verdict::Waived { last, waived_at_ms } => Ok(Some((last, waived_at_ms))),
             Verdict::TooSoon { last, next_ms } => {
                 metrics::counter!(crate::metrics::REFRESH_INTERVAL_REFUSALS).increment(1);
-                let interval = self.sign_guard.as_ref().map_or(0, |g| g.verifier().policy().refresh_min_interval_secs);
+                let interval = self
+                    .sign_guard
+                    .as_ref()
+                    .map_or(0, |g| g.verifier().policy().refresh_min_interval_secs);
                 let msg = format!(
                     "refresh of {key_id} refused by node {}: it took part in refresh {} at {}, less than \
                      signing_policy.refresh_min_interval_secs ({interval} s) ago; it takes part in the next \
@@ -2238,8 +2441,10 @@ impl Node {
 
     fn refuse_if_staged(&self, key_id: &str) -> Result<()> {
         let book = self.book()?;
-        if let Some(r) =
-            book.records.values().find(|r| r.state == RecordState::Staged && r.key_id == key_id)
+        if let Some(r) = book
+            .records
+            .values()
+            .find(|r| r.state == RecordState::Staged && r.key_id == key_id)
         {
             return Err(DaemonError::CeremonyRefused(format!(
                 "ceremony {} for {key_id} is staged on this node and not yet resolved — its \
@@ -2298,14 +2503,18 @@ impl Node {
         // Held by this ceremony (its fence): part 1 joins it, never recreates it if it goes
         // meanwhile. Not held: under ceremony intents part 1 never creates it; otherwise it may,
         // once per intent.
-        let held = self.guards().get(key_id).is_some_and(|g| g.owner == ceremony_id);
+        let held = self
+            .guards()
+            .get(key_id)
+            .is_some_and(|g| g.owner == ceremony_id);
         let may_create = !held && !self.ceremony_intent_required();
         match (may_create, intent) {
             (true, true) => self.mark_fenced(ceremony_id, key_id, leader)?,
             (true, false) => self.refuse_if_fenced(ceremony_id)?,
             (false, _) => {}
         }
-        let created = self.acquire_ceremony(key_id, ceremony_id, kind.as_str(), leader, may_create, None)?;
+        let created =
+            self.acquire_ceremony(key_id, ceremony_id, kind.as_str(), leader, may_create, None)?;
         let result = self.open_session(ceremony_id, key_id, kind, roster, old);
         if result.is_err() && created {
             self.release_ceremony(key_id, ceremony_id);
@@ -2325,13 +2534,17 @@ impl Node {
         old: Option<KeyVersion>,
     ) -> Result<round1::Package> {
         #[cfg(test)]
-        if let Some(hook) = crate::sync::recover(&self.hooks.after_part1_acquire, "test_hook").take() {
+        if let Some(hook) =
+            crate::sync::recover(&self.hooks.after_part1_acquire, "test_hook").take()
+        {
             hook(self);
         }
         let mut participant = match kind {
-            CeremonyKind::Dkg => {
-                Participant::Dkg(DkgParticipant::new(self.identifier, self.max_signers, self.min_signers))
-            }
+            CeremonyKind::Dkg => Participant::Dkg(DkgParticipant::new(
+                self.identifier,
+                self.max_signers,
+                self.min_signers,
+            )),
             CeremonyKind::Refresh => Participant::Refresh(RefreshParticipant::new(
                 self.identifier,
                 self.max_signers,
@@ -2438,7 +2651,9 @@ impl Node {
     ) -> Result<round1::Package> {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
         crate::keystore::validate_key_id(key_id)?;
-        let verified_by = self.authorize_ceremony(kind, key_id, ceremony_id, intent)?.map(|v| v.signer_cn);
+        let verified_by = self
+            .authorize_ceremony(kind, key_id, ceremony_id, intent)?
+            .map(|v| v.signer_cn);
         let verified = verified_by.is_some();
         let mut waived = None;
         let old = match kind {
@@ -2460,7 +2675,12 @@ impl Node {
                     return Err(DaemonError::UnknownKey(key_id.to_string()));
                 }
                 // Again at part 1: where intents are not required, part 1 may run with no fence.
-                waived = self.check_refresh_interval(key_id, Some(ceremony_id), verified_by.as_deref(), leader)?;
+                waived = self.check_refresh_interval(
+                    key_id,
+                    Some(ceremony_id),
+                    verified_by.as_deref(),
+                    leader,
+                )?;
                 // No reverse fence over in-flight signs: see `ceremony_fence`.
                 let share = self.keystore.load(key_id)?;
                 Some((share.epoch, share.pkp_digest()?))
@@ -2468,10 +2688,28 @@ impl Node {
         };
         self.check_roster(roster)?;
         // A waiver use is noted where the guard is taken: here only when no fence took it first.
-        let fenced = self.guards().get(key_id).is_some_and(|g| g.owner == ceremony_id);
-        let package = self.start_session(ceremony_id, key_id, kind, roster.to_vec(), old, leader, verified)?;
+        let fenced = self
+            .guards()
+            .get(key_id)
+            .is_some_and(|g| g.owner == ceremony_id);
+        let package = self.start_session(
+            ceremony_id,
+            key_id,
+            kind,
+            roster.to_vec(),
+            old,
+            leader,
+            verified,
+        )?;
         if let (Some((last, at)), false) = (&waived, fenced) {
-            self.note_waiver_used(key_id, ceremony_id, last, *at, verified_by.as_deref(), leader);
+            self.note_waiver_used(
+                key_id,
+                ceremony_id,
+                last,
+                *at,
+                verified_by.as_deref(),
+                leader,
+            );
         }
         Ok(package)
     }
@@ -2492,27 +2730,40 @@ impl Node {
     ) -> Result<([u8; 32], BTreeMap<u16, round2::Package>)> {
         let (key_id, kind, roster, old, own) = {
             let book = self.book()?;
-            let s = book.sessions.get(ceremony_id).ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.into()))?;
+            let s = book
+                .sessions
+                .get(ceremony_id)
+                .ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.into()))?;
             // The leader first (lock order: the book, then the guards).
             self.assert_leader(&s.key_id, ceremony_id, leader)?;
             if s.part2.is_some() {
-                return Err(DaemonError::CeremonyRefused(format!("ceremony {ceremony_id}: part 2 already ran")));
+                return Err(DaemonError::CeremonyRefused(format!(
+                    "ceremony {ceremony_id}: part 2 already ran"
+                )));
             }
-            (s.key_id.clone(), s.kind, s.roster.clone(), s.old, s.own_round1.clone())
+            (
+                s.key_id.clone(),
+                s.kind,
+                s.roster.clone(),
+                s.old,
+                s.own_round1.clone(),
+            )
         };
         self.assert_owns(&key_id, ceremony_id)?; // refuse if a newer ceremony superseded this one
         let result = (|| -> Result<([u8; 32], BTreeMap<u16, round2::Package>)> {
-            let mut ids =
-                round1_map.keys().map(|&id| crate::hosted::identifier_index(id)).collect::<Result<Vec<_>>>()?;
+            let mut ids = round1_map
+                .keys()
+                .map(|&id| crate::hosted::identifier_index(id))
+                .collect::<Result<Vec<_>>>()?;
             ids.sort_unstable();
             if ids != roster {
                 return Err(DaemonError::CeremonyRefused(format!(
                     "the round-1 map covers nodes {ids:?}, but the ceremony roster is {roster:?}"
                 )));
             }
-            let mine = round1_map
-                .get(&self.identifier)
-                .ok_or_else(|| DaemonError::CeremonyRefused("the round-1 map lacks this node".into()))?;
+            let mine = round1_map.get(&self.identifier).ok_or_else(|| {
+                DaemonError::CeremonyRefused("the round-1 map lacks this node".into())
+            })?;
             if mine.serialize()? != own {
                 return Err(DaemonError::Disagreement(
                     "the leader's round-1 map carries a different package for this node — \
@@ -2540,10 +2791,15 @@ impl Node {
                     Some(Participant::Dkg(p)) => p.part2(&others)?,
                     Some(Participant::Refresh(p)) => p.part2(&others)?,
                     None => {
-                        return Err(DaemonError::CeremonyRefused(format!("ceremony {ceremony_id} is finishing")))
+                        return Err(DaemonError::CeremonyRefused(format!(
+                            "ceremony {ceremony_id} is finishing"
+                        )))
                     }
                 };
-                s.part2 = Some(Part2State { digest, round1_map: round1_map.clone() });
+                s.part2 = Some(Part2State {
+                    digest,
+                    round1_map: round1_map.clone(),
+                });
                 packages
             };
             let mut by_index = BTreeMap::new();
@@ -2578,24 +2834,32 @@ impl Node {
             )));
         }
         if from == me {
-            return Err(DaemonError::CeremonyRefused("a node never delivers to itself".into()));
+            return Err(DaemonError::CeremonyRefused(
+                "a node never delivers to itself".into(),
+            ));
         }
         let mut book = self.book()?;
-        let s = book.sessions.get_mut(ceremony_id).ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.into()))?;
+        let s = book
+            .sessions
+            .get_mut(ceremony_id)
+            .ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.into()))?;
         if !s.roster.contains(&from) {
             return Err(DaemonError::CeremonyRefused(format!(
                 "node {from} is not in the roster of ceremony {ceremony_id}"
             )));
         }
         if s.participant.is_none() {
-            return Err(DaemonError::CeremonyRefused(format!("ceremony {ceremony_id} is finishing")));
+            return Err(DaemonError::CeremonyRefused(format!(
+                "ceremony {ceremony_id} is finishing"
+            )));
         }
         match s.inbox.get(&from) {
             Some((d, p)) if *d == digest && p.serialize()? == package.serialize()? => Ok(()), // a retry
             Some(_) => {
                 let key_id = s.key_id.clone();
                 drop(book);
-                let why = format!("node {from} delivered two different round-2 packages — equivocation");
+                let why =
+                    format!("node {from} delivered two different round-2 packages — equivocation");
                 self.fail_session(ceremony_id, &key_id, &why);
                 Err(DaemonError::Disagreement(why))
             }
@@ -2609,7 +2873,11 @@ impl Node {
     /// Part 3: require a round-2 package from every other roster node, each computed over the
     /// same round-1 map as this node's (equal digests) and the leader's digest equal too; then
     /// stage the new share and vote yes ([`Node::finish_session`]). Any mismatch votes no.
-    pub fn ceremony_part3(&self, ceremony_id: &str, leader_digest: &[u8; 32]) -> Result<StagedOutcome> {
+    pub fn ceremony_part3(
+        &self,
+        ceremony_id: &str,
+        leader_digest: &[u8; 32],
+    ) -> Result<StagedOutcome> {
         self.ceremony_part3_from(ceremony_id, leader_digest, None)
     }
 
@@ -2624,27 +2892,42 @@ impl Node {
     ) -> Result<StagedOutcome> {
         let (key_id, kind, roster, old, digest, round1_map, inbox) = {
             let book = self.book()?;
-            let s = book.sessions.get(ceremony_id).ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.into()))?;
+            let s = book
+                .sessions
+                .get(ceremony_id)
+                .ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.into()))?;
             // The leader first: a peer that is not it learns nothing about the session's progress.
             // (Lock order: the book, then the guards.)
             self.assert_leader(&s.key_id, ceremony_id, leader)?;
-            let p2 = s
-                .part2
-                .as_ref()
-                .ok_or_else(|| DaemonError::CeremonyRefused(format!("ceremony {ceremony_id}: part 3 before part 2")))?;
-            (s.key_id.clone(), s.kind, s.roster.clone(), s.old, p2.digest, p2.round1_map.clone(), s.inbox.clone())
+            let p2 = s.part2.as_ref().ok_or_else(|| {
+                DaemonError::CeremonyRefused(format!(
+                    "ceremony {ceremony_id}: part 3 before part 2"
+                ))
+            })?;
+            (
+                s.key_id.clone(),
+                s.kind,
+                s.roster.clone(),
+                s.old,
+                p2.digest,
+                p2.round1_map.clone(),
+                s.inbox.clone(),
+            )
         };
         let me = self.index()?;
         let checked = (|| -> Result<BTreeMap<Identifier, round2::Package>> {
             if digest != *leader_digest {
                 return Err(DaemonError::Disagreement(
-                    "the leader's round-1 digest differs from this node's — equivocation; aborting".into(),
+                    "the leader's round-1 digest differs from this node's — equivocation; aborting"
+                        .into(),
                 ));
             }
             let mut for_me = BTreeMap::new();
             for &id in roster.iter().filter(|&&id| id != me) {
                 let (d, pkg) = inbox.get(&id).ok_or_else(|| {
-                    DaemonError::CeremonyRefused(format!("no round-2 package was delivered by node {id}"))
+                    DaemonError::CeremonyRefused(format!(
+                        "no round-2 package was delivered by node {id}"
+                    ))
                 })?;
                 if *d != digest {
                     return Err(DaemonError::Disagreement(format!(
@@ -2663,18 +2946,25 @@ impl Node {
                 return Err(e);
             }
         };
-        self.finish_session(ceremony_id, kind, roster, Some(digest), |key_id, participant| match kind {
-            CeremonyKind::Dkg => self.dkg_share(key_id, participant, &round1_map, &for_me),
-            CeremonyKind::Refresh => {
-                let (share, was) = self.refresh_share(key_id, participant, &round1_map, &for_me)?;
-                if was != old {
-                    return Err(DaemonError::Disagreement(format!(
-                        "the share of {key_id} changed during the refresh — aborting"
-                    )));
+        self.finish_session(
+            ceremony_id,
+            kind,
+            roster,
+            Some(digest),
+            |key_id, participant| match kind {
+                CeremonyKind::Dkg => self.dkg_share(key_id, participant, &round1_map, &for_me),
+                CeremonyKind::Refresh => {
+                    let (share, was) =
+                        self.refresh_share(key_id, participant, &round1_map, &for_me)?;
+                    if was != old {
+                        return Err(DaemonError::Disagreement(format!(
+                            "the share of {key_id} changed during the refresh — aborting"
+                        )));
+                    }
+                    Ok((share, was))
                 }
-                Ok((share, was))
-            }
-        })
+            },
+        )
     }
 
     /// Record a no-vote for `ceremony_id` unless this node already recorded a vote. Caller holds
@@ -2684,7 +2974,12 @@ impl Node {
     /// [`MAX_UNKNOWN_NO_VOTES`] roster-less no-votes for failed or orphaned sessions are kept (a
     /// peer can open sessions for made-up key ids and let them orphan). Beyond it the session is
     /// dropped without a record and nothing is answered — the same safe refusal.
-    fn record_abort_locked(&self, book: &mut CeremonyBook, ceremony_id: &str, reason: &str) -> Result<()> {
+    fn record_abort_locked(
+        &self,
+        book: &mut CeremonyBook,
+        ceremony_id: &str,
+        reason: &str,
+    ) -> Result<()> {
         if book.records.contains_key(ceremony_id) {
             return Ok(());
         }
@@ -2692,7 +2987,11 @@ impl Node {
         let held = book
             .records
             .values()
-            .filter(|r| r.state == RecordState::Aborted && r.roster.is_empty() && r.unknown_asked_by.is_none())
+            .filter(|r| {
+                r.state == RecordState::Aborted
+                    && r.roster.is_empty()
+                    && r.unknown_asked_by.is_none()
+            })
             .count();
         if held >= cap {
             metrics::counter!(crate::metrics::CEREMONY_UNKNOWN_REFUSED).increment(1);
@@ -2717,7 +3016,9 @@ impl Node {
                     tracing::warn!(ceremony_id, error = %e, "could not record an aborted ceremony");
                 }
             }
-            Err(e) => tracing::warn!(ceremony_id, error = %e, "could not record an aborted ceremony"),
+            Err(e) => {
+                tracing::warn!(ceremony_id, error = %e, "could not record an aborted ceremony")
+            }
         }
         self.release_ceremony(key_id, ceremony_id);
     }
@@ -2749,7 +3050,17 @@ impl Node {
         let staged = self
             .assert_owns(&key_id, ceremony_id)
             .and_then(|_| finish(&key_id, participant))
-            .and_then(|(share, old)| self.stage_vote(ceremony_id, kind, &key_id, roster, round1_digest, share, old));
+            .and_then(|(share, old)| {
+                self.stage_vote(
+                    ceremony_id,
+                    kind,
+                    &key_id,
+                    roster,
+                    round1_digest,
+                    share,
+                    old,
+                )
+            });
         if let Err(e) = &staged {
             // No STAGED record exists, so the staged share (if written) is nobody's yes-vote.
             let _ = self.keystore.discard_staged(&key_id, ceremony_id);
@@ -2802,7 +3113,8 @@ impl Node {
         };
         let mut book = self.book()?;
         // `write` refuses if a vote already exists (a no-vote recorded meanwhile stays a no-vote).
-        self.record_store.write(book.records.get(ceremony_id), &rec)?;
+        self.record_store
+            .write(book.records.get(ceremony_id), &rec)?;
         book.records.insert(ceremony_id.to_string(), rec);
         book.sessions.remove(ceremony_id);
         tracing::info!(
@@ -2891,13 +3203,19 @@ impl Node {
         let orphaned: Vec<String> = book
             .sessions
             .iter()
-            .filter(|(_, s)| s.participant.is_some() && s.started.elapsed() >= self.ceremony_orphan_timeout)
+            .filter(|(_, s)| {
+                s.participant.is_some() && s.started.elapsed() >= self.ceremony_orphan_timeout
+            })
             .map(|(id, _)| id.clone())
             .collect();
         let mut out = Vec::new();
         for id in orphaned {
             if let Some(s) = book.sessions.remove(&id) {
-                if let Err(e) = self.record_abort_locked(book, &id, "orphaned: no part 3 within the orphan timeout") {
+                if let Err(e) = self.record_abort_locked(
+                    book,
+                    &id,
+                    "orphaned: no part 3 within the orphan timeout",
+                ) {
                     tracing::warn!(ceremony_id = %id, error = %e, "could not record an orphaned ceremony's no-vote");
                 }
                 out.push((s.key_id, id));
@@ -2922,7 +3240,12 @@ impl Node {
     /// said. The cost is liveness only, and only once a peer has spent its quota: a STAGED peer
     /// asking about a ceremony this node really lost waits (or uses `ceremony resolve
     /// --assume-lost`) instead of aborting, while signing continues on the old share.
-    fn record_unknown_locked(&self, book: &mut CeremonyBook, ceremony_id: &str, asker: Option<&str>) -> Result<()> {
+    fn record_unknown_locked(
+        &self,
+        book: &mut CeremonyBook,
+        ceremony_id: &str,
+        asker: Option<&str>,
+    ) -> Result<()> {
         let asker = asker.unwrap_or("");
         let (per_asker, total) = self.unknown_no_vote_caps;
         let mut mine = 0usize;
@@ -2951,7 +3274,10 @@ impl Node {
                  not answering (this is no vote)"
             )));
         }
-        let mut rec = CeremonyRecord::aborted(ceremony_id, "unknown here: no session and no record when a peer asked");
+        let mut rec = CeremonyRecord::aborted(
+            ceremony_id,
+            "unknown here: no session and no record when a peer asked",
+        );
         rec.unknown_asked_by = Some(asker.to_string());
         self.record_store.write(None, &rec)?;
         book.records.insert(ceremony_id.to_string(), rec);
@@ -2970,7 +3296,11 @@ impl Node {
 
     /// [`Node::ceremony_status`] asked by the peer whose certificate CN is `asker`: a no-vote for
     /// an unknown id is bounded per asker ([`Node::record_unknown_locked`]).
-    pub fn ceremony_status_from(&self, ceremony_id: &str, asker: Option<&str>) -> Result<StatusInfo> {
+    pub fn ceremony_status_from(
+        &self,
+        ceremony_id: &str,
+        asker: Option<&str>,
+    ) -> Result<StatusInfo> {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
         let mut release = None;
         let info = {
@@ -2979,17 +3309,26 @@ impl Node {
                 return Ok(StatusInfo::from_record(r));
             }
             match book.sessions.get(ceremony_id) {
-                Some(s) if s.participant.is_none() || s.started.elapsed() < self.ceremony_orphan_timeout => {
+                Some(s)
+                    if s.participant.is_none()
+                        || s.started.elapsed() < self.ceremony_orphan_timeout =>
+                {
                     return Ok(StatusInfo::in_progress());
                 }
                 Some(_) => {
                     let s = book.sessions.remove(ceremony_id).expect("present");
                     release = Some(s.key_id);
-                    self.record_abort_locked(&mut book, ceremony_id, "orphaned: no part 3 within the orphan timeout")
+                    self.record_abort_locked(
+                        &mut book,
+                        ceremony_id,
+                        "orphaned: no part 3 within the orphan timeout",
+                    )
                 }
                 None => self.record_unknown_locked(&mut book, ceremony_id, asker),
             }
-            .map(|()| StatusInfo::from_record(book.records.get(ceremony_id).expect("just recorded")))
+            .map(|()| {
+                StatusInfo::from_record(book.records.get(ceremony_id).expect("just recorded"))
+            })
         };
         // The orphaned session is gone either way, so its guard goes too — even when its no-vote
         // could not be recorded (a cap).
@@ -3010,15 +3349,17 @@ impl Node {
     /// binds the ceremony to its leader ([`CeremonyGuard::leader`]), only that leader may abort it:
     /// otherwise any fenced peer could fail the leader's ceremony here. An orphaned guard, or none,
     /// leaves the abort to anyone, as before (an orphan's leader is gone).
-    pub fn ceremony_abort_from(&self, ceremony_id: &str, asker: Option<&str>) -> Result<StatusInfo> {
+    pub fn ceremony_abort_from(
+        &self,
+        ceremony_id: &str,
+        asker: Option<&str>,
+    ) -> Result<StatusInfo> {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
         // Every live guard under the id (one key per id — see `acquire_ceremony` — but checked
         // over all of them, so no other guard can stand in for the leader's).
-        if let Some(g) = self
-            .guards()
-            .values()
-            .find(|g| g.owner == ceremony_id && !self.guard_orphaned(g) && g.leader.as_deref() != asker)
-        {
+        if let Some(g) = self.guards().values().find(|g| {
+            g.owner == ceremony_id && !self.guard_orphaned(g) && g.leader.as_deref() != asker
+        }) {
             return Err(not_the_leader(ceremony_id, g.leader.as_deref(), asker));
         }
         self.abort_unchecked(ceremony_id, asker)
@@ -3047,7 +3388,9 @@ impl Node {
             } else {
                 self.record_unknown_locked(&mut book, ceremony_id, asker)
             }
-            .map(|()| StatusInfo::from_record(book.records.get(ceremony_id).expect("just recorded")))
+            .map(|()| {
+                StatusInfo::from_record(book.records.get(ceremony_id).expect("just recorded"))
+            })
         };
         if let Some(key_id) = release {
             self.release_ceremony(&key_id, ceremony_id);
@@ -3064,7 +3407,13 @@ impl Node {
 
     /// [`Node::apply_resolution`]; an abort with `quarantine` keeps the staged share (audit F3),
     /// and `split` flags the ceremony as resolved differently elsewhere (a peer COMMITTED it).
-    pub fn apply_resolution_with(&self, ceremony_id: &str, decision: &Decision, quarantine: bool, split: bool) -> Result<StatusInfo> {
+    pub fn apply_resolution_with(
+        &self,
+        ceremony_id: &str,
+        decision: &Decision,
+        quarantine: bool,
+        split: bool,
+    ) -> Result<StatusInfo> {
         let mut book = self.book()?;
         let rec = book
             .records
@@ -3120,7 +3469,8 @@ impl Node {
         } else {
             tracing::warn!(ceremony_id, key_id = %rec.key_id, reason = %done.reason, quarantined = quarantine, "ceremony aborted");
         }
-        metrics::counter!(crate::metrics::CEREMONY_RESOLUTIONS, "result" => state.as_str()).increment(1);
+        metrics::counter!(crate::metrics::CEREMONY_RESOLUTIONS, "result" => state.as_str())
+            .increment(1);
         Ok(StatusInfo::from_record(&done))
     }
 
@@ -3141,33 +3491,41 @@ impl Node {
             };
         }
         match CeremonyKind::parse(&rec.kind)? {
-            CeremonyKind::Dkg => match self.keystore.promote_staged(&rec.key_id, &rec.ceremony_id, false)? {
-                crate::keystore::Promotion::Promoted => Ok(()),
-                crate::keystore::Promotion::TargetExists => {
-                    if is_outcome(&self.keystore.load(&rec.key_id)?)? {
-                        self.keystore.discard_staged(&rec.key_id, &rec.ceremony_id)
-                    } else {
-                        Err(DaemonError::Disagreement(format!(
+            CeremonyKind::Dkg => {
+                match self
+                    .keystore
+                    .promote_staged(&rec.key_id, &rec.ceremony_id, false)?
+                {
+                    crate::keystore::Promotion::Promoted => Ok(()),
+                    crate::keystore::Promotion::TargetExists => {
+                        if is_outcome(&self.keystore.load(&rec.key_id)?)? {
+                            self.keystore.discard_staged(&rec.key_id, &rec.ceremony_id)
+                        } else {
+                            Err(DaemonError::Disagreement(format!(
                             "ceremony {}: a different key appeared under {} — refusing to commit \
                              over it",
                             rec.ceremony_id, rec.key_id
                         )))
+                        }
                     }
                 }
-            },
+            }
             CeremonyKind::Refresh => {
                 let live = self.keystore.load(&rec.key_id)?;
                 if is_outcome(&live)? {
                     return self.keystore.discard_staged(&rec.key_id, &rec.ceremony_id);
                 }
-                if live.epoch != rec.old_epoch || hex::encode(live.pkp_digest()?) != rec.old_pkp_digest {
+                if live.epoch != rec.old_epoch
+                    || hex::encode(live.pkp_digest()?) != rec.old_pkp_digest
+                {
                     return Err(DaemonError::Disagreement(format!(
                         "ceremony {}: the live share of {} (epoch {}) is not the one this refresh \
                          started from (epoch {}) — refusing to replace it",
                         rec.ceremony_id, rec.key_id, live.epoch, rec.old_epoch
                     )));
                 }
-                self.keystore.promote_staged(&rec.key_id, &rec.ceremony_id, true)?;
+                self.keystore
+                    .promote_staged(&rec.key_id, &rec.ceremony_id, true)?;
                 Ok(())
             }
         }
@@ -3177,7 +3535,11 @@ impl Node {
     /// `true` (fail closed: the caller refuses to discard) when the ceremony state cannot be read.
     pub fn has_ceremony_for(&self, key_id: &str) -> bool {
         self.book()
-            .map(|b| b.records.values().any(|r| r.key_id == key_id && r.state != RecordState::Aborted))
+            .map(|b| {
+                b.records
+                    .values()
+                    .any(|r| r.key_id == key_id && r.state != RecordState::Aborted)
+            })
             .unwrap_or(true)
     }
 
@@ -3198,7 +3560,10 @@ impl Node {
             std::fs::remove_dir(&nonces)?;
         }
         self.evict(key_id);
-        tracing::warn!(key_id, "discarded this node's file for a legacy partial DKG key");
+        tracing::warn!(
+            key_id,
+            "discarded this node's file for a legacy partial DKG key"
+        );
         Ok(())
     }
 
@@ -3218,11 +3583,17 @@ impl Node {
     /// Note that every peer has resolved `ceremony_id` too.
     pub fn mark_settled(&self, ceremony_id: &str) -> Result<()> {
         let mut book = self.book()?;
-        let Some(rec) = book.records.get(ceremony_id).cloned() else { return Ok(()) };
+        let Some(rec) = book.records.get(ceremony_id).cloned() else {
+            return Ok(());
+        };
         if !rec.is_terminal() || rec.peers_settled {
             return Ok(());
         }
-        let done = CeremonyRecord { peers_settled: true, updated_ms: crate::ceremony_record::now_ms(), ..rec.clone() };
+        let done = CeremonyRecord {
+            peers_settled: true,
+            updated_ms: crate::ceremony_record::now_ms(),
+            ..rec.clone()
+        };
         self.record_store.write(Some(&rec), &done)?;
         book.records.insert(ceremony_id.to_string(), done);
         Ok(())
@@ -3236,7 +3607,12 @@ impl Node {
         let old: Vec<String> = book
             .records
             .values()
-            .filter(|r| r.is_terminal() && !r.quarantined && (r.peers_settled || r.roster.is_empty()) && r.updated_ms < cutoff)
+            .filter(|r| {
+                r.is_terminal()
+                    && !r.quarantined
+                    && (r.peers_settled || r.roster.is_empty())
+                    && r.updated_ms < cutoff
+            })
             .map(|r| r.ceremony_id.clone())
             .collect();
         for id in &old {
@@ -3249,7 +3625,13 @@ impl Node {
     /// ABORTED records whose staged share is quarantined (audit F3).
     pub fn quarantined_records(&self) -> Vec<CeremonyRecord> {
         self.book()
-            .map(|b| b.records.values().filter(|r| r.quarantined).cloned().collect())
+            .map(|b| {
+                b.records
+                    .values()
+                    .filter(|r| r.quarantined)
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -3257,12 +3639,18 @@ impl Node {
     /// Returns whether it was newly flagged.
     pub fn flag_split(&self, ceremony_id: &str) -> Result<bool> {
         let mut book = self.book()?;
-        let Some(rec) = book.records.get(ceremony_id).cloned() else { return Ok(false) };
+        let Some(rec) = book.records.get(ceremony_id).cloned() else {
+            return Ok(false);
+        };
         if !rec.quarantined || rec.split_detected_ms != 0 {
             return Ok(false);
         }
         let now = crate::ceremony_record::now_ms();
-        let done = CeremonyRecord { split_detected_ms: now, updated_ms: now, ..rec.clone() };
+        let done = CeremonyRecord {
+            split_detected_ms: now,
+            updated_ms: now,
+            ..rec.clone()
+        };
         self.record_store.write(Some(&rec), &done)?;
         book.records.insert(ceremony_id.to_string(), done);
         Ok(true)
@@ -3279,7 +3667,11 @@ impl Node {
             return Ok(());
         }
         self.keystore.discard_staged(&rec.key_id, ceremony_id)?;
-        let done = CeremonyRecord { quarantined: false, updated_ms: crate::ceremony_record::now_ms(), ..rec.clone() };
+        let done = CeremonyRecord {
+            quarantined: false,
+            updated_ms: crate::ceremony_record::now_ms(),
+            ..rec.clone()
+        };
         self.record_store.write(Some(&rec), &done)?;
         book.records.insert(ceremony_id.to_string(), done);
         tracing::info!(ceremony_id, key_id = %rec.key_id, "dropped a quarantined staged share");
@@ -3308,18 +3700,31 @@ impl Node {
     pub fn publish_refresh_gauge(&self) {
         let Ok(book) = self.book() else { return };
         let since = crate::ceremony_record::now_ms().saturating_sub(6 * 24 * 3600 * 1000);
-        let keys: std::collections::BTreeSet<&str> =
-            book.records.values().filter(|r| r.kind == "refresh" && !r.key_id.is_empty()).map(|r| r.key_id.as_str()).collect();
+        let keys: std::collections::BTreeSet<&str> = book
+            .records
+            .values()
+            .filter(|r| r.kind == "refresh" && !r.key_id.is_empty())
+            .map(|r| r.key_id.as_str())
+            .collect();
         let counts: Vec<(String, usize)> = keys
             .into_iter()
-            .map(|k| (k.to_string(), crate::refresh_interval::committed_since(book.records.values(), k, since)))
+            .map(|k| {
+                (
+                    k.to_string(),
+                    crate::refresh_interval::committed_since(book.records.values(), k, since),
+                )
+            })
             .collect();
         drop(book);
         // Keys published before whose records have since been garbage-collected read 0, not stale.
         static PUBLISHED: std::sync::Mutex<std::collections::BTreeSet<String>> =
             std::sync::Mutex::new(std::collections::BTreeSet::new());
         let mut published = PUBLISHED.lock().unwrap_or_else(|p| p.into_inner());
-        let gone: Vec<String> = published.iter().filter(|k| !counts.iter().any(|(c, _)| c == *k)).cloned().collect();
+        let gone: Vec<String> = published
+            .iter()
+            .filter(|k| !counts.iter().any(|(c, _)| c == *k))
+            .cloned()
+            .collect();
         for key in gone {
             metrics::gauge!(crate::metrics::REFRESHES_6D, "key" => key.clone()).set(0.0);
             published.remove(&key);
@@ -3331,7 +3736,10 @@ impl Node {
     }
 
     pub fn split_count(&self) -> usize {
-        self.quarantined_records().iter().filter(|r| r.split_detected_ms != 0).count()
+        self.quarantined_records()
+            .iter()
+            .filter(|r| r.split_detected_ms != 0)
+            .count()
     }
 
     /// The last step of [`crate::ceremony::recover_commit`] (which checks the peers first): make
@@ -3347,7 +3755,11 @@ impl Node {
             return Err(DaemonError::CeremonyRefused(format!(
                 "ceremony {ceremony_id} is {} here{} — only a quarantined abort can be recovered",
                 rec.state.as_str(),
-                if rec.state == RecordState::Aborted { " without a quarantined share" } else { "" }
+                if rec.state == RecordState::Aborted {
+                    " without a quarantined share"
+                } else {
+                    ""
+                }
             )));
         }
         if !self.keystore.has_staged(&rec.key_id, ceremony_id)? {
@@ -3374,7 +3786,8 @@ impl Node {
         if self.stale_mark(&rec.key_id).is_some() {
             self.set_stale(&rec.key_id, None);
         }
-        metrics::counter!(crate::metrics::CEREMONY_RESOLUTIONS, "result" => "recovered").increment(1);
+        metrics::counter!(crate::metrics::CEREMONY_RESOLUTIONS, "result" => "recovered")
+            .increment(1);
         tracing::warn!(ceremony_id, key_id = %rec.key_id, epoch = rec.new_epoch, "quarantined ceremony share recovered and committed by the operator");
         Ok(StatusInfo::from_record(&done))
     }
@@ -3387,13 +3800,22 @@ impl Node {
 
     /// [`Node::ceremony_part1`] for a refresh over this node's own roster.
     pub fn refresh_part1(&self, refresh_id: &str, key_id: &str) -> Result<round1::Package> {
-        self.ceremony_part1(refresh_id, key_id, CeremonyKind::Refresh, &self.own_roster()?, None)
+        self.ceremony_part1(
+            refresh_id,
+            key_id,
+            CeremonyKind::Refresh,
+            &self.own_roster()?,
+            None,
+        )
     }
 
     fn own_roster(&self) -> Result<Vec<u16>> {
         let me = self.index()?;
         let mut roster: Vec<u16> = match self.mesh.get() {
-            Some(mesh) => mesh.iter().map(|p| crate::hosted::identifier_index(p.identifier())).collect::<Result<_>>()?,
+            Some(mesh) => mesh
+                .iter()
+                .map(|p| crate::hosted::identifier_index(p.identifier()))
+                .collect::<Result<_>>()?,
             None => (1..=self.max_signers).filter(|&i| i != me).collect(),
         };
         roster.push(me);
@@ -3445,12 +3867,16 @@ impl Round1Ctx {
             b = b.with_message(m);
         }
         if let Some(ids) = &self.signers {
-            let set: std::collections::BTreeSet<Identifier> =
-                ids.iter().map(|&i| Identifier::try_from(i)).collect::<std::result::Result<_, _>>()?;
+            let set: std::collections::BTreeSet<Identifier> = ids
+                .iter()
+                .map(|&i| Identifier::try_from(i))
+                .collect::<std::result::Result<_, _>>()?;
             if set.len() != ids.len() {
-                return Err(DaemonError::Core(rutli_frost_core::CoreError::InvalidBinding(format!(
-                    "the declared signer set {ids:?} repeats a cosigner"
-                ))));
+                return Err(DaemonError::Core(
+                    rutli_frost_core::CoreError::InvalidBinding(format!(
+                        "the declared signer set {ids:?} repeats a cosigner"
+                    )),
+                ));
             }
             b = b.with_signers(set);
         }
@@ -3476,7 +3902,8 @@ pub struct StaleMark {
 impl StaleMark {
     /// Whether `other` says the same thing: the reason's wording may differ between passes.
     pub(crate) fn same_state(&self, other: &StaleMark) -> bool {
-        (self.own_epoch, self.newer_epoch, self.by_own_record) == (other.own_epoch, other.newer_epoch, other.by_own_record)
+        (self.own_epoch, self.newer_epoch, self.by_own_record)
+            == (other.own_epoch, other.newer_epoch, other.by_own_record)
     }
 }
 
@@ -3502,7 +3929,8 @@ pub struct StagedOutcome {
 /// key (every refusal is counted in `rutli_refresh_interval_refusals_total`), so a client looping
 /// refreshes cannot flood the log.
 fn refresh_refusal_log_due(key_id: &str) -> bool {
-    static LAST: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> = std::sync::Mutex::new(None);
+    static LAST: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> =
+        std::sync::Mutex::new(None);
     let minute = crate::ceremony_record::now_ms() / 60_000;
     let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
     let map = last.get_or_insert_with(Default::default);
@@ -3528,7 +3956,9 @@ pub(crate) fn unfenced_push(key_id: &str, ceremony_id: &str, caller: Option<&str
         "{key_id} is not held here, and {} holds no generation fence for it on this node under \
          ceremony {ceremony_id:?} — a key this node lacks is pulled from two agreeing peers, never \
          accepted from one",
-        caller.map(|c| format!("caller {c:?}")).unwrap_or_else(|| "the caller".into())
+        caller
+            .map(|c| format!("caller {c:?}"))
+            .unwrap_or_else(|| "the caller".into())
     ))
 }
 
@@ -3536,15 +3966,21 @@ pub(crate) fn unfenced_push(key_id: &str, ceremony_id: &str, caller: Option<&str
 /// digits, [`crate::intent::generate_ceremony_id`]): the only genkey ids that can carry a fence
 /// mark. A 0.4.0 leader's random ids (`genkey-<uuid>`) never do.
 fn is_generate_ceremony_id(ceremony_id: &str) -> bool {
-    ceremony_id
-        .strip_prefix("genkey-")
-        .is_some_and(|h| h.len() == 2 * crate::intent::REQUEST_ID_LEN && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+    ceremony_id.strip_prefix("genkey-").is_some_and(|h| {
+        h.len() == 2 * crate::intent::REQUEST_ID_LEN
+            && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }
 
 /// The refusal of a ceremony part (or a second fence) from a caller that is not the ceremony's
 /// leader on this node.
 fn not_the_leader(owner: &str, leader: Option<&str>, caller: Option<&str>) -> DaemonError {
-    let who = |c: Option<&str>| c.map_or_else(|| "this node itself".to_string(), |cn| format!("peer {cn:?}"));
+    let who = |c: Option<&str>| {
+        c.map_or_else(
+            || "this node itself".to_string(),
+            |cn| format!("peer {cn:?}"),
+        )
+    };
     DaemonError::CeremonyRefused(format!(
         "ceremony {owner} is led by {} on this node, not by {} — only the leader that fenced a \
          ceremony may run it",
@@ -3566,8 +4002,15 @@ pub(crate) fn refuse_reserved_for_hosted(key_id: &str) -> Result<()> {
 /// prefix, and whatever the Canton key name after the tag contains.
 pub(crate) fn routing_tag(key_id: &str) -> Option<&'static str> {
     use crate::export::{FROST_ROUTING_TAG, HOSTED_ROUTING_TAG};
-    match (key_id.find(FROST_ROUTING_TAG), key_id.find(HOSTED_ROUTING_TAG)) {
-        (Some(f), Some(h)) => Some(if f < h { FROST_ROUTING_TAG } else { HOSTED_ROUTING_TAG }),
+    match (
+        key_id.find(FROST_ROUTING_TAG),
+        key_id.find(HOSTED_ROUTING_TAG),
+    ) {
+        (Some(f), Some(h)) => Some(if f < h {
+            FROST_ROUTING_TAG
+        } else {
+            HOSTED_ROUTING_TAG
+        }),
         (Some(_), None) => Some(FROST_ROUTING_TAG),
         (None, Some(_)) => Some(HOSTED_ROUTING_TAG),
         (None, None) => None,
@@ -3595,7 +4038,10 @@ fn without_self(
     map: &BTreeMap<Identifier, round1::Package>,
     me: Identifier,
 ) -> BTreeMap<Identifier, round1::Package> {
-    map.iter().filter(|(&id, _)| id != me).map(|(&id, p)| (id, p.clone())).collect()
+    map.iter()
+        .filter(|(&id, _)| id != me)
+        .map(|(&id, p)| (id, p.clone()))
+        .collect()
 }
 
 // ── cluster-hosted (non-FROST) keys ────────────────────────────────────────────────────────────
@@ -3610,7 +4056,12 @@ impl Node {
             dist_key: crate::wrap::DistKey::derive(master_secret, id),
             commitment_key: crate::wrap::legacy_commitment_key(master_secret),
             peer_dist_keys: (1..=self.max_signers)
-                .map(|j| (j, crate::wrap::DistKey::derive(master_secret, j).public_bytes()))
+                .map(|j| {
+                    (
+                        j,
+                        crate::wrap::DistKey::derive(master_secret, j).public_bytes(),
+                    )
+                })
                 .collect(),
         };
         self.with_hosted_keyring(keyring, cluster_id)
@@ -3619,7 +4070,11 @@ impl Node {
     /// Enable hosted keys with an explicit keyring and bind envelopes to `cluster_id`. Without
     /// this, every hosted-key op returns an error. Refuses a keyring whose own key is for another
     /// node, or which pins a different key for this node than the one it holds.
-    pub fn with_hosted_keyring(mut self, keyring: HostedKeyring, cluster_id: String) -> Result<Self> {
+    pub fn with_hosted_keyring(
+        mut self,
+        keyring: HostedKeyring,
+        cluster_id: String,
+    ) -> Result<Self> {
         let id = crate::hosted::identifier_index(self.identifier)?;
         if keyring.dist_key.identifier() != id {
             return Err(DaemonError::Config(format!(
@@ -3650,7 +4105,10 @@ impl Node {
     /// with hosted keys off. Reported in `Capabilities` (to the driver) and `NodeInfo` (to peers).
     pub fn hosted_specs(&self) -> Vec<String> {
         if self.hosted_enabled() {
-            crate::hosted::HostedSpec::ALL.iter().map(|s| s.as_str().to_string()).collect()
+            crate::hosted::HostedSpec::ALL
+                .iter()
+                .map(|s| s.as_str().to_string())
+                .collect()
         } else {
             Vec::new()
         }
@@ -3679,11 +4137,14 @@ impl Node {
     /// to it. A node outside the roster has none, so nothing is ever wrapped to it.
     pub fn dist_public_key_for(&self, node_identifier: u16) -> Result<[u8; 32]> {
         let ctx = self.hosted_ctx()?;
-        ctx.peer_dist_keys.get(&node_identifier).copied().ok_or_else(|| {
-            DaemonError::Config(format!(
+        ctx.peer_dist_keys
+            .get(&node_identifier)
+            .copied()
+            .ok_or_else(|| {
+                DaemonError::Config(format!(
                 "node {node_identifier} is not in this node's roster — no distribution key for it"
             ))
-        })
+            })
     }
 
     /// The existing hosted key for `key_id`, if this node already has one.
@@ -3756,13 +4217,24 @@ impl Node {
 
     /// [`Node::hosted_store`], noting the genkey ceremony that created it here (`created_by`), so
     /// that generation — and only it, while it holds its fence — may roll it back.
-    pub fn hosted_store_for(&self, key_id: &str, key: &crate::hosted::HostedKey, created_by: Option<&str>) -> Result<()> {
-        self.hosted_store_created(key_id, key, created_by).map(|_| ())
+    pub fn hosted_store_for(
+        &self,
+        key_id: &str,
+        key: &crate::hosted::HostedKey,
+        created_by: Option<&str>,
+    ) -> Result<()> {
+        self.hosted_store_created(key_id, key, created_by)
+            .map(|_| ())
     }
 
     /// [`Node::hosted_store_for`], returning whether this call created the file (`false`: an
     /// identical copy was already here).
-    fn hosted_store_created(&self, key_id: &str, key: &crate::hosted::HostedKey, created_by: Option<&str>) -> Result<bool> {
+    fn hosted_store_created(
+        &self,
+        key_id: &str,
+        key: &crate::hosted::HostedKey,
+        created_by: Option<&str>,
+    ) -> Result<bool> {
         self.hosted_ctx()?;
         // A peer may never push a hosted key under an id reserved for the split ceremony: it would
         // squat on an import, or (with a rename-based write) replace an installed share.
@@ -3780,7 +4252,9 @@ impl Node {
                 HostedState::Tombstone(_) => return Err(tombstoned(key_id)),
                 HostedState::Live(k) => k,
                 HostedState::Frost => {
-                    return Err(DaemonError::KeyExists(format!("{key_id} is a FROST share here")))
+                    return Err(DaemonError::KeyExists(format!(
+                        "{key_id} is a FROST share here"
+                    )))
                 }
                 HostedState::Absent => return Err(DaemonError::UnknownKey(key_id.to_string())),
             };
@@ -3789,7 +4263,9 @@ impl Node {
                 // (`orchestrator::is_material_conflict`); keep "different material" in it.
                 return Err(DaemonError::HostedConflict {
                     key_id: key_id.to_string(),
-                    detail: "it already exists here with different material — refusing to overwrite".into(),
+                    detail:
+                        "it already exists here with different material — refusing to overwrite"
+                            .into(),
                 });
             }
             Ok(()) // identical replica: idempotent no-op
@@ -3835,7 +4311,8 @@ impl Node {
 
     /// Whether `key_id` is tombstoned on this node.
     pub fn hosted_tombstoned(&self, key_id: &str) -> Result<bool> {
-        Ok(self.keystore.exists(key_id) && matches!(self.hosted_state(key_id)?, HostedState::Tombstone(_)))
+        Ok(self.keystore.exists(key_id)
+            && matches!(self.hosted_state(key_id)?, HostedState::Tombstone(_)))
     }
 
     /// How long a tombstone keeps the deleted key's material (`hosted_keys.delete_grace_secs`).
@@ -3871,7 +4348,10 @@ impl Node {
 
     /// This node's tombstone for `key_id` as `ListKeys` reports it, if it holds one: what a peer's
     /// `FetchKey` with `include_tombstone` gets, so it never pulls a deleted key back.
-    pub fn hosted_tombstone_manifest(&self, key_id: &str) -> Result<Option<crate::pb::KeyManifest>> {
+    pub fn hosted_tombstone_manifest(
+        &self,
+        key_id: &str,
+    ) -> Result<Option<crate::pb::KeyManifest>> {
         use prost::Message;
         self.hosted_ctx()?;
         match self.hosted_state(key_id)? {
@@ -3922,15 +4402,17 @@ impl Node {
             crate::intent::Expiry::Propagated { deleted_at_ms } => deleted_at_ms,
             crate::intent::Expiry::Enforce => now,
         };
-        let tombstone = |info: DeletedKeyInfo, retained: Option<crate::hosted::HostedKey>| crate::hosted::Tombstone {
-            key_id: key_id.to_string(),
-            spec: info.spec,
-            created_at: info.created_at,
-            commitment: hex::encode(info.commitment),
-            deleted_at_ms,
-            purge_after_ms: now.saturating_add(grace_ms),
-            delete_intent: hex::encode(intent.encode_to_vec()),
-            retained: if grace_ms == 0 { None } else { retained },
+        let tombstone = |info: DeletedKeyInfo, retained: Option<crate::hosted::HostedKey>| {
+            crate::hosted::Tombstone {
+                key_id: key_id.to_string(),
+                spec: info.spec,
+                created_at: info.created_at,
+                commitment: hex::encode(info.commitment),
+                deleted_at_ms,
+                purge_after_ms: now.saturating_add(grace_ms),
+                delete_intent: hex::encode(intent.encode_to_vec()),
+                retained: if grace_ms == 0 { None } else { retained },
+            }
         };
         for _ in 0..3 {
             match self.hosted_state(key_id)? {
@@ -3955,7 +4437,8 @@ impl Node {
                         created_at: k.created_at,
                         commitment: self.hosted_commitment(&k)?,
                     };
-                    self.keystore.save_tombstone(key_id, &tombstone(info, Some(*k)))?;
+                    self.keystore
+                        .save_tombstone(key_id, &tombstone(info, Some(*k)))?;
                     metrics::counter!(crate::metrics::HOSTED_TOMBSTONES_WRITTEN, "how" => "converted").increment(1);
                     tracing::warn!(key_id, signer = %v.signer_cn, "hosted key deleted: replaced by a tombstone");
                     return Ok(TombstoneOutcome::Converted);
@@ -3965,7 +4448,10 @@ impl Node {
                     // or a tombstone could squat on a FROST key's DKG like a key could (F1). A
                     // squatted copy that exists is converted above, so it stays deletable.
                     refuse_unless_hosted_id(key_id)?;
-                    match self.keystore.create_tombstone(key_id, &tombstone(known.cloned().unwrap_or_default(), None)) {
+                    match self.keystore.create_tombstone(
+                        key_id,
+                        &tombstone(known.cloned().unwrap_or_default(), None),
+                    ) {
                         Ok(()) => {
                             metrics::counter!(crate::metrics::HOSTED_TOMBSTONES_WRITTEN, "how" => "recorded").increment(1);
                             tracing::info!(key_id, signer = %v.signer_cn, "tombstone recorded for a hosted key this node does not hold");
@@ -3978,7 +4464,9 @@ impl Node {
                 }
             }
         }
-        Err(DaemonError::Config(format!("{key_id}: the key file kept changing while it was being tombstoned")))
+        Err(DaemonError::Config(format!(
+            "{key_id}: the key file kept changing while it was being tombstoned"
+        )))
     }
 
     /// PurgeKey without a delete intent: the rollback of a key this node created in genkey
@@ -3992,12 +4480,19 @@ impl Node {
     /// [`Node::hosted_rollback_purge`] asked by the peer whose certificate CN is `leader` (`None`:
     /// this node's own leader): only the generation's leader, the caller whose fence took the
     /// guard, may roll it back — not any peer that learned the generation's ceremony id.
-    pub fn hosted_rollback_purge_from(&self, ceremony_id: &str, key_id: &str, leader: Option<&str>) -> Result<bool> {
+    pub fn hosted_rollback_purge_from(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        leader: Option<&str>,
+    ) -> Result<bool> {
         self.hosted_ctx()?;
         let guard_started = self
             .guards()
             .get(key_id)
-            .filter(|g| g.owner == ceremony_id && g.kind == "genkey" && g.leader.as_deref() == leader)
+            .filter(|g| {
+                g.owner == ceremony_id && g.kind == "genkey" && g.leader.as_deref() == leader
+            })
             .map(|g| g.started);
         let fenced = guard_started.is_some();
         let created_here = crate::sync::recover(&self.hosted_created_in, "hosted_created_in")
@@ -4025,7 +4520,11 @@ impl Node {
                 true
             }
             HostedState::Absent => false,
-            _ => return Err(DaemonError::Config(format!("{key_id} is no longer the key this generation created"))),
+            _ => {
+                return Err(DaemonError::Config(format!(
+                    "{key_id} is no longer the key this generation created"
+                )))
+            }
         };
         self.end_genkey_instance(ceremony_id, key_id);
         Ok(outcome)
@@ -4105,13 +4604,21 @@ impl Node {
         self.hosted_ctx()?;
         refuse_reserved_for_hosted(key_id)?;
         let identifier = u32::from(crate::hosted::identifier_index(self.identifier)?);
-        let absent = crate::pb::HostedKeyStatusReply { identifier, present: false, ..Default::default() };
+        let absent = crate::pb::HostedKeyStatusReply {
+            identifier,
+            present: false,
+            ..Default::default()
+        };
         match self.keystore.load_record(key_id) {
             Ok(crate::keystore::Record::Hosted(key)) => Ok(crate::pb::HostedKeyStatusReply {
                 identifier,
                 present: true,
                 spec: key.spec.as_str().to_string(),
-                public_key_der: if key.spec.is_asymmetric() { key.derived_public_key_der()? } else { Vec::new() },
+                public_key_der: if key.spec.is_asymmetric() {
+                    key.derived_public_key_der()?
+                } else {
+                    Vec::new()
+                },
                 created_at: key.created_at,
             }),
             Ok(crate::keystore::Record::Frost(_))
@@ -4173,7 +4680,9 @@ impl Node {
         w: &crate::wrap::Wrapped,
     ) -> Result<crate::hosted::HostedKey> {
         let ctx = self.hosted_ctx()?;
-        let plain = ctx.dist_key.unwrap_key(w, &ctx.cluster_id, key_id, spec.as_str())?;
+        let plain = ctx
+            .dist_key
+            .unwrap_key(w, &ctx.cluster_id, key_id, spec.as_str())?;
         let key: crate::hosted::HostedKey = serde_json::from_slice(&plain)?;
         if key.spec != spec {
             return Err(DaemonError::Config(
@@ -4202,10 +4711,15 @@ impl Node {
     /// `leader` (the caller's certificate CN; `None` for this node's own in-process leader). The
     /// same test the rollback purge applies: only the caller that fenced a generation here may
     /// create the key here.
-    pub fn hosted_genkey_fenced_by(&self, key_id: &str, ceremony_id: &str, leader: Option<&str>) -> bool {
-        self.guards()
-            .get(key_id)
-            .is_some_and(|g| g.owner == ceremony_id && g.kind == "genkey" && g.leader.as_deref() == leader)
+    pub fn hosted_genkey_fenced_by(
+        &self,
+        key_id: &str,
+        ceremony_id: &str,
+        leader: Option<&str>,
+    ) -> bool {
+        self.guards().get(key_id).is_some_and(|g| {
+            g.owner == ceremony_id && g.kind == "genkey" && g.leader.as_deref() == leader
+        })
     }
 
     /// Why a push of a `spec` key under `key_id` from `leader` (the caller's certificate CN; `None`
@@ -4225,7 +4739,11 @@ impl Node {
         let auth = {
             let guards = self.guards();
             match guards.get(key_id) {
-                Some(g) if g.owner == ceremony_id && g.kind == "genkey" && g.leader.as_deref() == leader => {
+                Some(g)
+                    if g.owner == ceremony_id
+                        && g.kind == "genkey"
+                        && g.leader.as_deref() == leader =>
+                {
                     g.genkey.clone().unwrap_or_default()
                 }
                 _ => return Some(("unfenced", unfenced_push(key_id, ceremony_id, leader))),
@@ -4259,20 +4777,28 @@ impl Node {
     /// `None` when the id is absent. A different key here is [`DaemonError::HostedConflict`]; a
     /// tombstone, a FROST share, a reserved or non-hosted id are refused as by
     /// [`Node::hosted_store_for`].
-    pub fn hosted_push_check(&self, key_id: &str, key: &crate::hosted::HostedKey) -> Result<Option<Vec<u8>>> {
+    pub fn hosted_push_check(
+        &self,
+        key_id: &str,
+        key: &crate::hosted::HostedKey,
+    ) -> Result<Option<Vec<u8>>> {
         self.hosted_ctx()?;
         refuse_reserved_for_hosted(key_id)?;
         refuse_unless_hosted_id(key_id)?;
         match self.hosted_state(key_id)? {
             HostedState::Absent => Ok(None),
             HostedState::Tombstone(_) => Err(tombstoned(key_id)),
-            HostedState::Frost => Err(DaemonError::KeyExists(format!("{key_id} is a FROST share here"))),
+            HostedState::Frost => Err(DaemonError::KeyExists(format!(
+                "{key_id} is a FROST share here"
+            ))),
             HostedState::Live(existing) => {
                 let mine = self.hosted_commitment(&existing)?;
                 if mine != self.hosted_commitment(key)? {
                     return Err(DaemonError::HostedConflict {
                         key_id: key_id.to_string(),
-                        detail: "it already exists here with different material — refusing to overwrite".into(),
+                        detail:
+                            "it already exists here with different material — refusing to overwrite"
+                                .into(),
                     });
                 }
                 Ok(Some(mine))
@@ -4294,14 +4820,20 @@ impl Node {
         if let Some(c) = self.hosted_push_check(key_id, key)? {
             return Ok(c);
         }
-        if let Some((_, e)) = self.genkey_push_refusal(key_id, ceremony_id, leader, key.spec.as_str()) {
+        if let Some((_, e)) =
+            self.genkey_push_refusal(key_id, ceremony_id, leader, key.spec.as_str())
+        {
             return Err(e);
         }
         let created = self.hosted_store_created(key_id, key, Some(ceremony_id))?;
         // The generation may have been rolled back while this push was checking its peers (the
         // rollback ends the fence instance here): then the copy just written is this push's own
         // orphan, and it goes again.
-        if created && self.genkey_push_refusal(key_id, ceremony_id, leader, key.spec.as_str()).is_some() {
+        if created
+            && self
+                .genkey_push_refusal(key_id, ceremony_id, leader, key.spec.as_str())
+                .is_some()
+        {
             self.keystore.delete(key_id)?;
             crate::sync::recover(&self.hosted_created_in, "hosted_created_in").remove(key_id);
             return Err(unfenced_push(key_id, ceremony_id, leader));
@@ -4375,13 +4907,16 @@ mod poison_tests {
             })
             .collect();
         crate::peer::wire_local_mesh(&nodes).unwrap();
-        let peers: Vec<Arc<dyn PeerApi>> =
-            nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+        let peers: Vec<Arc<dyn PeerApi>> = nodes
+            .iter()
+            .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+            .collect();
         let group = crate::orchestrator::run_dkg(&peers, "k").await.unwrap();
         let n = &nodes[0];
         let records_before = n.all_records().len();
         assert!(records_before > 0);
-        n.sign_round1("k", "in-flight", &Round1Ctx::default()).unwrap();
+        n.sign_round1("k", "in-flight", &Round1Ctx::default())
+            .unwrap();
 
         crate::sync::poison(&n.cosigners);
         crate::sync::poison(&n.ceremonies);
@@ -4390,13 +4925,18 @@ mod poison_tests {
 
         // Signing, led by the node and with it as a member, works.
         let msg = rutli_frost_core::dealer::canton_test_message(b"after a panic");
-        let sig = crate::orchestrator::sign(n, &peers, "k", &msg).await.unwrap();
+        let sig = crate::orchestrator::sign(n, &peers, "k", &msg)
+            .await
+            .unwrap();
         assert!(crate::verify_key::signature_verifies(&group, &msg, &sig));
         // The key cache was emptied (its in-flight nonces with it), not trusted.
         assert_eq!(n.pending_sign_count("k"), 0);
         // Ceremony state was rebuilt from disk: the votes are all there, and new ones record.
         assert_eq!(n.all_records().len(), records_before);
-        assert_eq!(n.ceremony_status("never-seen").unwrap().phase, crate::ceremony_record::Phase::Aborted);
+        assert_eq!(
+            n.ceremony_status("never-seen").unwrap().phase,
+            crate::ceremony_record::Phase::Aborted
+        );
         assert_eq!(n.all_records().len(), records_before + 1);
         assert!(n.key_epoch("k").unwrap().present);
         assert!(n.stale_mark("k").is_none());
@@ -4404,7 +4944,10 @@ mod poison_tests {
         assert!(!n.stale.is_poisoned() && !n.book.is_poisoned());
         // A refresh (fence, guards, book, staged votes) runs end to end afterwards. Signing never
         // touches the ceremony guards, so this is what recovers that lock.
-        assert_eq!(crate::orchestrator::run_refresh(&peers, "k").await.unwrap(), group);
+        assert_eq!(
+            crate::orchestrator::run_refresh(&peers, "k").await.unwrap(),
+            group
+        );
         assert!(!n.ceremonies.is_poisoned());
     }
 }
@@ -4436,12 +4979,15 @@ mod guard_tests {
     }
 
     fn guard(node: &Node, key_id: &str) -> Option<(String, bool)> {
-        node.guards().get(key_id).map(|g| (g.owner.clone(), g.session))
+        node.guards()
+            .get(key_id)
+            .map(|g| (g.owner.clone(), g.session))
     }
 
     fn node(tmp: &tempfile::TempDir, fence_timeout: Duration) -> Node {
         let ks = KeyStore::open(tmp.path().join("n1")).unwrap();
-        Node::new(Identifier::try_from(1).unwrap(), 3, 2, ks).with_ceremony_fence_timeout(fence_timeout)
+        Node::new(Identifier::try_from(1).unwrap(), 3, 2, ks)
+            .with_ceremony_fence_timeout(fence_timeout)
     }
 
     /// A part 1 that fails between taking the guard and creating its session (here: the book
@@ -4457,17 +5003,27 @@ mod guard_tests {
         n.ceremony_fence("dkg-a", "k", "dkg").unwrap();
         let broken: Arc<Mutex<Option<PathBuf>>> = Arc::default();
         let b = broken.clone();
-        *n.hooks.after_part1_acquire.lock().unwrap() =
-            Some(Box::new(move |node: &Node| *b.lock().unwrap() = Some(break_book(node))));
+        *n.hooks.after_part1_acquire.lock().unwrap() = Some(Box::new(move |node: &Node| {
+            *b.lock().unwrap() = Some(break_book(node))
+        }));
 
-        assert!(n.ceremony_part1("dkg-a", "k", CeremonyKind::Dkg, &[1, 2, 3], None).is_err());
+        assert!(n
+            .ceremony_part1("dkg-a", "k", CeremonyKind::Dkg, &[1, 2, 3], None)
+            .is_err());
         mend_book(broken.lock().unwrap().as_ref().expect("the hook ran"));
 
-        assert_eq!(guard(&n, "k"), Some(("dkg-a".to_string(), false)), "kept, and fence-only");
+        assert_eq!(
+            guard(&n, "k"),
+            Some(("dkg-a".to_string(), false)),
+            "kept, and fence-only"
+        );
         assert!(n.book().unwrap().sessions.is_empty());
         // Still the leader's fence: another ceremony is refused within the fence timeout...
         let refused = n.ceremony_fence("dkg-b", "k", "dkg");
-        assert!(matches!(refused, Err(DaemonError::CeremonyInProgress { .. })), "{refused:?}");
+        assert!(
+            matches!(refused, Err(DaemonError::CeremonyInProgress { .. })),
+            "{refused:?}"
+        );
         // ...and preempts it after the fence timeout, not the 15-minute orphan timeout.
         std::thread::sleep(fence_timeout + Duration::from_millis(250));
         n.ceremony_fence("dkg-b", "k", "dkg").unwrap();
@@ -4482,15 +5038,19 @@ mod guard_tests {
         let n = node(&tmp, CEREMONY_FENCE_TIMEOUT);
         let broken: Arc<Mutex<Option<PathBuf>>> = Arc::default();
         let b = broken.clone();
-        *n.hooks.after_part1_acquire.lock().unwrap() =
-            Some(Box::new(move |node: &Node| *b.lock().unwrap() = Some(break_book(node))));
+        *n.hooks.after_part1_acquire.lock().unwrap() = Some(Box::new(move |node: &Node| {
+            *b.lock().unwrap() = Some(break_book(node))
+        }));
 
-        assert!(n.ceremony_part1("dkg-a", "k", CeremonyKind::Dkg, &[1, 2, 3], None).is_err());
+        assert!(n
+            .ceremony_part1("dkg-a", "k", CeremonyKind::Dkg, &[1, 2, 3], None)
+            .is_err());
         mend_book(broken.lock().unwrap().as_ref().expect("the hook ran"));
         assert_eq!(guard(&n, "k"), None, "released");
 
         // The key is free at once, and a part 1 that succeeds marks the guard with its session.
-        n.ceremony_part1("dkg-b", "k", CeremonyKind::Dkg, &[1, 2, 3], None).unwrap();
+        n.ceremony_part1("dkg-b", "k", CeremonyKind::Dkg, &[1, 2, 3], None)
+            .unwrap();
         assert_eq!(guard(&n, "k"), Some(("dkg-b".to_string(), true)));
         assert!(n.book().unwrap().sessions.contains_key("dkg-b"));
     }
@@ -4504,7 +5064,8 @@ mod guard_tests {
         let fence_timeout = Duration::from_secs(2); // outlasts a loaded CI runner between steps
         let n = node(&tmp, fence_timeout);
         n.ceremony_fence("dkg-a", "k", "dkg").unwrap();
-        n.ceremony_part1("dkg-a", "k", CeremonyKind::Dkg, &[1, 2, 3], None).unwrap();
+        n.ceremony_part1("dkg-a", "k", CeremonyKind::Dkg, &[1, 2, 3], None)
+            .unwrap();
         assert_eq!(guard(&n, "k"), Some(("dkg-a".to_string(), true)));
         // A hosted-key guard, marked by hand to show recovery leaves its kind alone (hosted guards
         // never carry a session in practice).
@@ -4521,15 +5082,29 @@ mod guard_tests {
         );
 
         crate::sync::poison(&n.book);
-        assert!(n.book().unwrap().sessions.is_empty(), "recovered: sessions dropped");
+        assert!(
+            n.book().unwrap().sessions.is_empty(),
+            "recovered: sessions dropped"
+        );
 
-        assert_eq!(guard(&n, "k"), Some(("dkg-a".to_string(), false)), "back to a fence");
-        assert_eq!(guard(&n, "h"), Some(("genkey-a".to_string(), true)), "hosted guard untouched");
+        assert_eq!(
+            guard(&n, "k"),
+            Some(("dkg-a".to_string(), false)),
+            "back to a fence"
+        );
+        assert_eq!(
+            guard(&n, "h"),
+            Some(("genkey-a".to_string(), true)),
+            "hosted guard untouched"
+        );
         // The dropped ceremony cannot go on here.
         assert!(n.ceremony_part3("dkg-a", &[0u8; 32]).is_err());
         // Still a fence within its timeout; preemptible after it, not after 15 minutes.
         let refused = n.ceremony_fence("dkg-b", "k", "dkg");
-        assert!(matches!(refused, Err(DaemonError::CeremonyInProgress { .. })), "{refused:?}");
+        assert!(
+            matches!(refused, Err(DaemonError::CeremonyInProgress { .. })),
+            "{refused:?}"
+        );
         std::thread::sleep(fence_timeout + Duration::from_millis(250));
         n.ceremony_fence("dkg-b", "k", "dkg").unwrap();
         assert_eq!(guard(&n, "k"), Some(("dkg-b".to_string(), false)));
@@ -4557,7 +5132,10 @@ mod sign_across_commit_tests {
             })
             .collect();
         crate::peer::wire_local_mesh(&nodes).unwrap();
-        let peers = nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+        let peers = nodes
+            .iter()
+            .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+            .collect();
         (nodes, peers)
     }
 
@@ -4573,8 +5151,10 @@ mod sign_across_commit_tests {
             let mut s = self.state.lock().unwrap();
             s.0.push(session_id.to_string());
             self.cv.notify_all();
-            let (_s, timeout) =
-                self.cv.wait_timeout_while(s, Duration::from_secs(30), |s| !s.1).unwrap();
+            let (_s, timeout) = self
+                .cv
+                .wait_timeout_while(s, Duration::from_secs(30), |s| !s.1)
+                .unwrap();
             assert!(!timeout.timed_out(), "the gate was never opened");
         }
 
@@ -4585,7 +5165,11 @@ mod sign_across_commit_tests {
                 if parked.len() >= n {
                     return parked;
                 }
-                assert!(Instant::now() < deadline, "only {} round 2 call(s) parked, expected {n}", parked.len());
+                assert!(
+                    Instant::now() < deadline,
+                    "only {} round 2 call(s) parked, expected {n}",
+                    parked.len()
+                );
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         }
@@ -4599,18 +5183,26 @@ mod sign_across_commit_tests {
     /// Park round 2 on `node` for `session` (any session: `None`) once it holds its cosigner.
     fn pause_round2(node: &Node, gate: &Arc<Gate>, session: Option<&'static str>) {
         let gate = gate.clone();
-        *node.hooks.after_round2_cosigner.lock().unwrap() = Some(Arc::new(move |_key: &str, s: &str| {
-            if session.is_none_or(|want| want == s) {
-                gate.park(s);
-            }
-        }));
+        *node.hooks.after_round2_cosigner.lock().unwrap() =
+            Some(Arc::new(move |_key: &str, s: &str| {
+                if session.is_none_or(|want| want == s) {
+                    gate.park(s);
+                }
+            }));
     }
 
     fn assert_burned_once(node: &Node, session: &str) {
         let store = NonceStore::open(node.keystore.nonce_dir(KEY)).unwrap();
-        assert!(store.is_consumed(session).unwrap(), "node {:?} burned {session}", node.identifier);
         assert!(
-            matches!(store.consume(session), Err(rutli_frost_core::CoreError::NonceReuse(_))),
+            store.is_consumed(session).unwrap(),
+            "node {:?} burned {session}",
+            node.identifier
+        );
+        assert!(
+            matches!(
+                store.consume(session),
+                Err(rutli_frost_core::CoreError::NonceReuse(_))
+            ),
             "a second burn of {session} is refused"
         );
     }
@@ -4628,7 +5220,10 @@ mod sign_across_commit_tests {
         let msg = rutli_frost_core::dealer::canton_test_message(b"round 2 spans a commit");
         let session = "in-flight";
         let old_view = nodes[0].signing_view(KEY).unwrap().view;
-        let ctx = Round1Ctx { leader_view: Some(old_view), ..Default::default() };
+        let ctx = Round1Ctx {
+            leader_view: Some(old_view),
+            ..Default::default()
+        };
         let mut commitments = BTreeMap::new();
         for n in &nodes[..2] {
             commitments.insert(n.identifier, n.sign_round1(KEY, session, &ctx).unwrap());
@@ -4651,22 +5246,42 @@ mod sign_across_commit_tests {
             let v = n.signing_view(KEY).unwrap().view;
             assert_eq!(v.0, old_view.0 + 1);
             assert_ne!(v.1, old_view.1, "a new sharing");
-            assert_eq!(n.pending_sign_count(KEY), 0, "the new cosigner holds no old nonces");
+            assert_eq!(
+                n.pending_sign_count(KEY),
+                0,
+                "the new cosigner holds no old nonces"
+            );
         }
 
         gate.open();
         let mut shares = BTreeMap::new();
         for (n, h) in nodes[..2].iter().zip(members) {
-            shares.insert(n.identifier, h.join().unwrap().expect("the old cosigner signs its own session"));
+            shares.insert(
+                n.identifier,
+                h.join()
+                    .unwrap()
+                    .expect("the old cosigner signs its own session"),
+            );
         }
-        let sig = nodes[0].aggregate(KEY, &msg, &commitments, &shares).unwrap();
+        let sig = nodes[0]
+            .aggregate(KEY, &msg, &commitments, &shares)
+            .unwrap();
         assert!(crate::verify_key::signature_verifies(&group, &msg, &sig));
 
-        let new_ctx = Round1Ctx { leader_view: Some(nodes[0].signing_view(KEY).unwrap().view), ..Default::default() };
+        let new_ctx = Round1Ctx {
+            leader_view: Some(nodes[0].signing_view(KEY).unwrap().view),
+            ..Default::default()
+        };
         for n in &nodes[..2] {
             assert_burned_once(n, session);
-            assert!(n.sign_round2(KEY, session, &msg, &commitments).is_err(), "no second share");
-            assert!(n.sign_round1(KEY, session, &new_ctx).is_err(), "no fresh nonces for a burned session");
+            assert!(
+                n.sign_round2(KEY, session, &msg, &commitments).is_err(),
+                "no second share"
+            );
+            assert!(
+                n.sign_round1(KEY, session, &new_ctx).is_err(),
+                "no fresh nonces for a burned session"
+            );
             assert_eq!(n.pending_sign_count(KEY), 0);
         }
     }
@@ -4698,7 +5313,17 @@ mod sign_across_commit_tests {
         gate.open();
 
         let err = leading.await.unwrap().unwrap_err();
-        assert!(matches!(err, DaemonError::AttemptsExhausted { needed: 2, usable: 1, .. }), "{err:?}");
+        assert!(
+            matches!(
+                err,
+                DaemonError::AttemptsExhausted {
+                    needed: 2,
+                    usable: 1,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
         // Node 1 (the leader) released its old share; node 2's round 2 found no session on its new
         // cosigner and burned nothing; its old nonces went with the evicted cosigner.
         assert_burned_once(&nodes[0], &session);
@@ -4734,7 +5359,10 @@ mod cache_first_use_tests {
             })
             .collect();
         crate::peer::wire_local_mesh(&nodes).unwrap();
-        let peers = nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+        let peers = nodes
+            .iter()
+            .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+            .collect();
         (nodes, peers)
     }
 
@@ -4749,7 +5377,9 @@ mod cache_first_use_tests {
             let first = slot.lock().unwrap().take();
             if let Some((parked, release)) = first {
                 parked.send(()).unwrap();
-                release.recv_timeout(WAIT).expect("the parked load was never released");
+                release
+                    .recv_timeout(WAIT)
+                    .expect("the parked load was never released");
             }
         }));
         (parked, release)
@@ -4778,7 +5408,10 @@ mod cache_first_use_tests {
         };
         parked.recv_timeout(WAIT).expect("the first load parks");
 
-        let ctx = Round1Ctx { leader_view: Some(view), ..Default::default() };
+        let ctx = Round1Ctx {
+            leader_view: Some(view),
+            ..Default::default()
+        };
         let mut commitments = BTreeMap::new();
         for n in &nodes[..2] {
             commitments.insert(n.identifier, n.sign_round1(KEY, session, &ctx).unwrap());
@@ -4787,25 +5420,42 @@ mod cache_first_use_tests {
 
         release.send(()).unwrap();
         assert_eq!(other.join().unwrap().unwrap(), view);
-        assert_eq!(node.pending_sign_count(KEY), 1, "the cached cosigner is still the one holding the session");
+        assert_eq!(
+            node.pending_sign_count(KEY),
+            1,
+            "the cached cosigner is still the one holding the session"
+        );
 
         let mut shares = BTreeMap::new();
         for n in &nodes[..2] {
-            let share = n.sign_round2(KEY, session, &msg, &commitments).expect("round 2 finds the session round 1 opened");
+            let share = n
+                .sign_round2(KEY, session, &msg, &commitments)
+                .expect("round 2 finds the session round 1 opened");
             shares.insert(n.identifier, share);
         }
-        let sig = nodes[1].aggregate(KEY, &msg, &commitments, &shares).unwrap();
+        let sig = nodes[1]
+            .aggregate(KEY, &msg, &commitments, &shares)
+            .unwrap();
         assert!(crate::verify_key::signature_verifies(&group, &msg, &sig));
 
         // One share per session, whichever load won.
         let store = NonceStore::open(node.keystore.nonce_dir(KEY)).unwrap();
         assert!(store.is_consumed(session).unwrap());
         assert!(
-            matches!(store.consume(session), Err(rutli_frost_core::CoreError::NonceReuse(_))),
+            matches!(
+                store.consume(session),
+                Err(rutli_frost_core::CoreError::NonceReuse(_))
+            ),
             "a second burn of {session} is refused"
         );
-        assert!(node.sign_round2(KEY, session, &msg, &commitments).is_err(), "no second share");
-        assert!(node.sign_round1(KEY, session, &ctx).is_err(), "no fresh nonces for a burned session");
+        assert!(
+            node.sign_round2(KEY, session, &msg, &commitments).is_err(),
+            "no second share"
+        );
+        assert!(
+            node.sign_round1(KEY, session, &ctx).is_err(),
+            "no fresh nonces for a burned session"
+        );
         assert_eq!(node.pending_sign_count(KEY), 0);
     }
 
@@ -4835,8 +5485,16 @@ mod cache_first_use_tests {
         assert_eq!(new_view.0, old_view.0 + 1);
 
         release.send(()).unwrap();
-        assert_eq!(other.join().unwrap().unwrap(), new_view, "the overtaken load reads the share again");
-        assert_eq!(node.signing_view(KEY).unwrap().view, new_view, "the cache holds the committed sharing");
+        assert_eq!(
+            other.join().unwrap().unwrap(),
+            new_view,
+            "the overtaken load reads the share again"
+        );
+        assert_eq!(
+            node.signing_view(KEY).unwrap().view,
+            new_view,
+            "the cache holds the committed sharing"
+        );
         let sig = sign(&node, &peers, KEY, &msg).await.unwrap();
         assert!(crate::verify_key::signature_verifies(&group, &msg, &sig));
     }
@@ -4862,8 +5520,14 @@ mod cache_first_use_tests {
         node.discard_local_key(KEY).unwrap();
 
         release.send(()).unwrap();
-        assert!(other.join().unwrap().is_err(), "the overtaken load reads again and finds no share");
-        assert!(node.cache().get(KEY).is_none(), "nothing is cached for the discarded key");
+        assert!(
+            other.join().unwrap().is_err(),
+            "the overtaken load reads again and finds no share"
+        );
+        assert!(
+            node.cache().get(KEY).is_none(),
+            "nothing is cached for the discarded key"
+        );
         assert!(node.signing_view(KEY).is_err());
         assert!(!node.keystore.nonce_dir(KEY).exists());
     }
@@ -4878,7 +5542,10 @@ mod cache_first_use_tests {
         let msg = rutli_frost_core::dealer::canton_test_message(b"round 2 after a restart");
         let session = "lost";
         let node = nodes[0].clone();
-        let ctx = Round1Ctx { leader_view: Some(node.signing_view(KEY).unwrap().view), ..Default::default() };
+        let ctx = Round1Ctx {
+            leader_view: Some(node.signing_view(KEY).unwrap().view),
+            ..Default::default()
+        };
         let mut commitments = BTreeMap::new();
         for n in &nodes[..2] {
             commitments.insert(n.identifier, n.sign_round1(KEY, session, &ctx).unwrap());
@@ -4887,9 +5554,17 @@ mod cache_first_use_tests {
 
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
-        let err = metrics::with_local_recorder(&recorder, || node.sign_round2(KEY, session, &msg, &commitments))
-            .expect_err("the nonces of the session are gone");
-        assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))), "{err}");
+        let err = metrics::with_local_recorder(&recorder, || {
+            node.sign_round2(KEY, session, &msg, &commitments)
+        })
+        .expect_err("the nonces of the session are gone");
+        assert!(
+            matches!(
+                err,
+                DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))
+            ),
+            "{err}"
+        );
         assert_eq!(tonic::Status::from(err).code(), tonic::Code::Aborted);
         let out = handle.render();
         let line = format!("{} 1", crate::metrics::SIGN_ROUND2_UNKNOWN_SESSION);
@@ -4952,17 +5627,33 @@ mod sign_policy_race_tests {
                     &policy,
                 )
                 .unwrap();
-                let journal =
-                    SignJournal::open(root.join("journal"), i, Retention { days: 90, max_bytes: 64 << 20 }).unwrap();
+                let journal = SignJournal::open(
+                    root.join("journal"),
+                    i,
+                    Retention {
+                        days: 90,
+                        max_bytes: 64 << 20,
+                    },
+                )
+                .unwrap();
                 let guard = Arc::new(SignGuard::new(Arc::new(verifier), journal, 10));
-                Arc::new(Node::new(Identifier::try_from(i).unwrap(), 3, 2, ks).with_sign_guard(guard))
+                Arc::new(
+                    Node::new(Identifier::try_from(i).unwrap(), 3, 2, ks).with_sign_guard(guard),
+                )
             })
             .collect();
         crate::peer::wire_local_mesh(&nodes).unwrap();
-        let peers: Vec<Arc<dyn PeerApi>> =
-            nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+        let peers: Vec<Arc<dyn PeerApi>> = nodes
+            .iter()
+            .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+            .collect();
         let group = run_dkg(&peers, KEY).await.unwrap();
-        Rig { nodes, group, pki, tmp }
+        Rig {
+            nodes,
+            group,
+            pki,
+            tmp,
+        }
     }
 
     impl Rig {
@@ -4987,9 +5678,12 @@ mod sign_policy_race_tests {
 
         /// Node 1's burned nonce markers and journal entries for `KEY`.
         fn released(&self) -> (usize, usize) {
-            let markers = std::fs::read_dir(self.nodes[0].keystore.nonce_dir(KEY)).map(|d| d.count()).unwrap_or(0);
-            let journaled =
-                read_key_dir(&self.tmp.path().join("n1/journal").join(KEY)).map(|r| r.entries.len()).unwrap_or(0);
+            let markers = std::fs::read_dir(self.nodes[0].keystore.nonce_dir(KEY))
+                .map(|d| d.count())
+                .unwrap_or(0);
+            let journaled = read_key_dir(&self.tmp.path().join("n1/journal").join(KEY))
+                .map(|r| r.entries.len())
+                .unwrap_or(0);
             (markers, journaled)
         }
     }
@@ -5006,8 +5700,12 @@ mod sign_policy_race_tests {
         let session = "late";
         let i1 = r.intent(&msg, 1);
         let digest = intent::intent_digest(&i1);
-        let ctx =
-            Round1Ctx { message: Some(msg.to_vec()), signers: Some(vec![1, 2]), intent: Some(i1), ..Default::default() };
+        let ctx = Round1Ctx {
+            message: Some(msg.to_vec()),
+            signers: Some(vec![1, 2]),
+            intent: Some(i1),
+            ..Default::default()
+        };
         let c2 = r.nodes[1].sign_round1(KEY, session, &ctx).unwrap();
 
         // The racing round 1, run where round 2 has looked for nonces and not answered yet.
@@ -5016,23 +5714,40 @@ mod sign_policy_race_tests {
             let (n, ctx, landed) = (Arc::downgrade(&node), ctx.clone(), landed.clone());
             move |key: &str, session: &str| {
                 let n = n.upgrade().unwrap();
-                *landed.lock().unwrap() = Some(n.sign_round1(key, session, &ctx).expect("round 1 opens the session"));
+                *landed.lock().unwrap() = Some(
+                    n.sign_round1(key, session, &ctx)
+                        .expect("round 1 opens the session"),
+                );
             }
         }));
         // This round 2 cannot know the commitment of a round 1 that has not answered yet.
         let guess = BTreeMap::from([(node.identifier, c2), (r.nodes[1].identifier, c2)]);
-        let err = node.sign_round2_with(KEY, session, &msg, &guess, Some(digest)).unwrap_err();
+        let err = node
+            .sign_round2_with(KEY, session, &msg, &guess, Some(digest))
+            .unwrap_err();
         *node.hooks.after_round2_held.lock().unwrap() = None;
-        assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))), "{err:?}");
+        assert!(
+            matches!(
+                err,
+                DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))
+            ),
+            "{err:?}"
+        );
         let c1 = landed.lock().unwrap().take().expect("the round 1 ran");
-        assert_eq!(node.pending_sign_count(KEY), 1, "the session that round 1 opened still has its nonces");
+        assert_eq!(
+            node.pending_sign_count(KEY),
+            1,
+            "the session that round 1 opened still has its nonces"
+        );
         assert_eq!(r.released(), (0, 0), "no marker burned, nothing journaled");
 
         // Its own round 2 goes through the policy: journaled, then released.
         let cs = BTreeMap::from([(node.identifier, c1), (r.nodes[1].identifier, c2)]);
         let mut shares = BTreeMap::new();
         for n in &r.nodes[..2] {
-            let share = n.sign_round2_with(KEY, session, &msg, &cs, Some(digest)).expect("the session completes");
+            let share = n
+                .sign_round2_with(KEY, session, &msg, &cs, Some(digest))
+                .expect("the session completes");
             shares.insert(n.identifier, share);
         }
         let sig = node.aggregate(KEY, &msg, &cs, &shares).unwrap();
@@ -5053,8 +5768,12 @@ mod sign_policy_race_tests {
         let session = "aborting";
         let i1 = r.intent(&msg, 2);
         let digest = intent::intent_digest(&i1);
-        let ctx =
-            Round1Ctx { message: Some(msg.to_vec()), signers: Some(vec![1, 2]), intent: Some(i1), ..Default::default() };
+        let ctx = Round1Ctx {
+            message: Some(msg.to_vec()),
+            signers: Some(vec![1, 2]),
+            intent: Some(i1),
+            ..Default::default()
+        };
         let mut cs = BTreeMap::new();
         for n in &r.nodes[..2] {
             cs.insert(n.identifier, n.sign_round1(KEY, session, &ctx).unwrap());
@@ -5067,22 +5786,47 @@ mod sign_policy_race_tests {
             let (n, answer) = (Arc::downgrade(&node), answer.clone());
             move |key: &str, session: &str| {
                 let n = n.upgrade().unwrap();
-                *answer.lock().unwrap() = Some(n.sign_round2_with(key, session, &msg, &cs, Some(digest)));
+                *answer.lock().unwrap() =
+                    Some(n.sign_round2_with(key, session, &msg, &cs, Some(digest)));
             }
         }));
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
-        metrics::with_local_recorder(&recorder, || node.abort_sign_as(KEY, session, &SessionOwner::Local)).unwrap();
+        metrics::with_local_recorder(&recorder, || {
+            node.abort_sign_as(KEY, session, &SessionOwner::Local)
+        })
+        .unwrap();
         *node.hooks.mid_abort_sign.lock().unwrap() = None;
 
-        let err = answer.lock().unwrap().take().expect("the round 2 ran").expect_err("an aborted session never signs");
-        assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))), "{err:?}");
+        let err = answer
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the round 2 ran")
+            .expect_err("an aborted session never signs");
+        assert!(
+            matches!(
+                err,
+                DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))
+            ),
+            "{err:?}"
+        );
         let out = handle.render();
-        assert!(out.lines().any(|l| l == "rutli_sign_round2_unknown_session_total 1"), "{out}");
-        assert!(!out.contains("rutli_sign_policy_refusals_total"), "not counted as a policy refusal:\n{out}");
+        assert!(
+            out.lines()
+                .any(|l| l == "rutli_sign_round2_unknown_session_total 1"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("rutli_sign_policy_refusals_total"),
+            "not counted as a policy refusal:\n{out}"
+        );
         assert_eq!(node.pending_sign_count(KEY), 0);
         assert_eq!(r.released(), (0, 0), "no marker burned, nothing journaled");
-        assert!(!node.sign_guard().unwrap().holds(KEY, session), "no authorization is left behind");
+        assert!(
+            !node.sign_guard().unwrap().holds(KEY, session),
+            "no authorization is left behind"
+        );
     }
 
     fn peer(cn: &str) -> SessionOwner {
@@ -5090,7 +5834,9 @@ mod sign_policy_race_tests {
     }
 
     fn line(out: &str, series: &str) -> Option<String> {
-        out.lines().find(|l| l.starts_with(series)).map(str::to_owned)
+        out.lines()
+            .find(|l| l.starts_with(series))
+            .map(str::to_owned)
     }
 
     /// A member of a session knows its id. Its round 2 or abort for a session another leader
@@ -5105,11 +5851,17 @@ mod sign_policy_race_tests {
         let session = "owned";
         let i1 = r.intent(&msg, 3);
         let digest = intent::intent_digest(&i1);
-        let ctx =
-            Round1Ctx { message: Some(msg.to_vec()), signers: Some(vec![1, 2]), intent: Some(i1), ..Default::default() };
+        let ctx = Round1Ctx {
+            message: Some(msg.to_vec()),
+            signers: Some(vec![1, 2]),
+            intent: Some(i1),
+            ..Default::default()
+        };
         // Node 2 leads: its own share in process, node 1 over the mesh as `cosigner2`.
         let leader = peer("cosigner2");
-        let c1 = r.nodes[0].sign_round1_as(KEY, session, &ctx, &leader).unwrap();
+        let c1 = r.nodes[0]
+            .sign_round1_as(KEY, session, &ctx, &leader)
+            .unwrap();
         let c2 = r.nodes[1].sign_round1(KEY, session, &ctx).unwrap();
         let cs = BTreeMap::from([(r.nodes[0].identifier, c1), (r.nodes[1].identifier, c2)]);
 
@@ -5124,30 +5876,74 @@ mod sign_policy_race_tests {
                 (&r.nodes[1], peer("cosigner1")),
                 (&r.nodes[1], SessionOwner::Unidentified),
             ] {
-                let err = n.sign_round2_as(KEY, session, &msg, &cs, Some(digest), &intruder).unwrap_err();
+                let err = n
+                    .sign_round2_as(KEY, session, &msg, &cs, Some(digest), &intruder)
+                    .unwrap_err();
                 assert!(
                     matches!(&err, DaemonError::Core(rutli_frost_core::CoreError::NotSessionOwner { caller, .. }) if *caller == intruder.to_string()),
                     "{intruder}: {err:?}"
                 );
-                assert_eq!(tonic::Status::from(err).code(), tonic::Code::PermissionDenied);
+                assert_eq!(
+                    tonic::Status::from(err).code(),
+                    tonic::Code::PermissionDenied
+                );
                 let err = n.abort_sign_as(KEY, session, &intruder).unwrap_err();
-                assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::NotSessionOwner { .. })), "{err:?}");
+                assert!(
+                    matches!(
+                        err,
+                        DaemonError::Core(rutli_frost_core::CoreError::NotSessionOwner { .. })
+                    ),
+                    "{err:?}"
+                );
             }
         });
         let out = handle.render();
-        assert_eq!(line(&out, "rutli_sign_session_owner_refusals_total{call=\"round2\"}").as_deref(),
-            Some("rutli_sign_session_owner_refusals_total{call=\"round2\"} 6"), "{out}");
-        assert_eq!(line(&out, "rutli_sign_session_owner_refusals_total{call=\"abort\"}").as_deref(),
-            Some("rutli_sign_session_owner_refusals_total{call=\"abort\"} 6"), "{out}");
-        assert!(!out.contains("rutli_sign_round2_unknown_session_total"), "not an unknown session:\n{out}");
-        assert!(!out.contains("rutli_sign_policy_refusals_total"), "not a policy refusal:\n{out}");
-        assert!(!out.contains("rutli_sign_journal_entries_total"), "nothing journaled:\n{out}");
-        assert_eq!((r.nodes[0].pending_sign_count(KEY), r.nodes[1].pending_sign_count(KEY)), (1, 1));
+        assert_eq!(
+            line(
+                &out,
+                "rutli_sign_session_owner_refusals_total{call=\"round2\"}"
+            )
+            .as_deref(),
+            Some("rutli_sign_session_owner_refusals_total{call=\"round2\"} 6"),
+            "{out}"
+        );
+        assert_eq!(
+            line(
+                &out,
+                "rutli_sign_session_owner_refusals_total{call=\"abort\"}"
+            )
+            .as_deref(),
+            Some("rutli_sign_session_owner_refusals_total{call=\"abort\"} 6"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("rutli_sign_round2_unknown_session_total"),
+            "not an unknown session:\n{out}"
+        );
+        assert!(
+            !out.contains("rutli_sign_policy_refusals_total"),
+            "not a policy refusal:\n{out}"
+        );
+        assert!(
+            !out.contains("rutli_sign_journal_entries_total"),
+            "nothing journaled:\n{out}"
+        );
+        assert_eq!(
+            (
+                r.nodes[0].pending_sign_count(KEY),
+                r.nodes[1].pending_sign_count(KEY)
+            ),
+            (1, 1)
+        );
         assert_eq!(r.released(), (0, 0), "no marker burned, nothing journaled");
 
         // The leader's own round 2s still find nonces and authorization: one signature.
-        let s1 = r.nodes[0].sign_round2_as(KEY, session, &msg, &cs, Some(digest), &leader).unwrap();
-        let s2 = r.nodes[1].sign_round2_with(KEY, session, &msg, &cs, Some(digest)).unwrap();
+        let s1 = r.nodes[0]
+            .sign_round2_as(KEY, session, &msg, &cs, Some(digest), &leader)
+            .unwrap();
+        let s2 = r.nodes[1]
+            .sign_round2_with(KEY, session, &msg, &cs, Some(digest))
+            .unwrap();
         let shares = BTreeMap::from([(r.nodes[0].identifier, s1), (r.nodes[1].identifier, s2)]);
         let sig = r.nodes[1].aggregate(KEY, &msg, &cs, &shares).unwrap();
         assert!(crate::verify_key::signature_verifies(&r.group, &msg, &sig));
@@ -5167,15 +5963,20 @@ mod sign_policy_race_tests {
             ..Default::default()
         };
         let node = &r.nodes[0];
-        node.sign_round1_as(KEY, "mine", &ctx, &peer("cosigner2")).unwrap();
+        node.sign_round1_as(KEY, "mine", &ctx, &peer("cosigner2"))
+            .unwrap();
         node.abort_sign_as(KEY, "mine", &peer("cosigner2")).unwrap();
         assert_eq!(node.pending_sign_count(KEY), 0);
-        assert!(!node.sign_guard().unwrap().holds(KEY, "mine"), "no authorization is left behind");
+        assert!(
+            !node.sign_guard().unwrap().holds(KEY, "mine"),
+            "no authorization is left behind"
+        );
         node.abort_sign_as(KEY, "mine", &peer("cosigner3")).unwrap();
 
         // The in-process leader's own: `abort_sign` is the local owner.
         node.sign_round1(KEY, "local", &ctx).unwrap();
-        node.abort_sign_as(KEY, "local", &SessionOwner::Local).unwrap();
+        node.abort_sign_as(KEY, "local", &SessionOwner::Local)
+            .unwrap();
         assert_eq!(node.pending_sign_count(KEY), 0);
     }
 
@@ -5195,25 +5996,47 @@ mod sign_policy_race_tests {
         };
         let (replayed, bad) = (ctx(7), peer("cosigner3"));
         for i in 0..MAX_PENDING_SIGN_SESSIONS_PER_REQUEST {
-            node.sign_round1_as(KEY, &format!("r7-{i}"), &replayed, &bad).unwrap();
+            node.sign_round1_as(KEY, &format!("r7-{i}"), &replayed, &bad)
+                .unwrap();
         }
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
-        let err = metrics::with_local_recorder(&recorder, || node.sign_round1_as(KEY, "r7-x", &replayed, &bad)).unwrap_err();
+        let err = metrics::with_local_recorder(&recorder, || {
+            node.sign_round1_as(KEY, "r7-x", &replayed, &bad)
+        })
+        .unwrap_err();
         match &err {
-            DaemonError::Core(rutli_frost_core::CoreError::SessionsFull { cap_kind, open, cap }) => {
-                assert_eq!((*cap_kind, *open, *cap), (rutli_frost_core::session::PendingCap::Request, 20, 20));
+            DaemonError::Core(rutli_frost_core::CoreError::SessionsFull {
+                cap_kind,
+                open,
+                cap,
+            }) => {
+                assert_eq!(
+                    (*cap_kind, *open, *cap),
+                    (rutli_frost_core::session::PendingCap::Request, 20, 20)
+                );
             }
             other => panic!("{other:?}"),
         }
-        assert!(err.to_string().contains("for this signing request from this opener"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("for this signing request from this opener"),
+            "{err}"
+        );
         assert_eq!(tonic::Status::from(err).code(), tonic::Code::Unavailable);
         let out = handle.render();
-        assert!(out.contains("rutli_sign_sessions_refused_total{cap=\"request\"} 1"), "{out}");
+        assert!(
+            out.contains("rutli_sign_sessions_refused_total{cap=\"request\"} 1"),
+            "{out}"
+        );
         node.sign_round1_as(KEY, "r8", &ctx(8), &bad).unwrap();
-        node.sign_round1_as(KEY, "r7-honest", &replayed, &peer("cosigner2")).unwrap();
+        node.sign_round1_as(KEY, "r7-honest", &replayed, &peer("cosigner2"))
+            .unwrap();
         node.sign_round1(KEY, "r7-local", &replayed).unwrap();
-        assert_eq!(node.pending_sign_count(KEY), MAX_PENDING_SIGN_SESSIONS_PER_REQUEST + 3);
+        assert_eq!(
+            node.pending_sign_count(KEY),
+            MAX_PENDING_SIGN_SESSIONS_PER_REQUEST + 3
+        );
     }
 
     /// Once one opener holds a request's cap, a further replay of that request is refused before
@@ -5226,7 +6049,12 @@ mod sign_policy_race_tests {
         let node = &r.nodes[0];
         let msg = rutli_frost_core::dealer::canton_test_message(b"replay at the cap");
         let bad = peer("cosigner3");
-        let ctx = |intent| Round1Ctx { message: Some(msg.to_vec()), signers: Some(vec![1, 2]), intent: Some(intent), ..Default::default() };
+        let ctx = |intent| Round1Ctx {
+            message: Some(msg.to_vec()),
+            signers: Some(vec![1, 2]),
+            intent: Some(intent),
+            ..Default::default()
+        };
         let broken = |request: u8| {
             let mut i = r.intent(&msg, request);
             let last = i.signature.len() - 1;
@@ -5234,17 +6062,33 @@ mod sign_policy_race_tests {
             i
         };
         for i in 0..MAX_PENDING_SIGN_SESSIONS_PER_REQUEST {
-            node.sign_round1_as(KEY, &format!("r7-{i}"), &ctx(r.intent(&msg, 7)), &bad).unwrap();
+            node.sign_round1_as(KEY, &format!("r7-{i}"), &ctx(r.intent(&msg, 7)), &bad)
+                .unwrap();
         }
-        let err = node.sign_round1_as(KEY, "r7-broken", &ctx(broken(7)), &bad).unwrap_err();
+        let err = node
+            .sign_round1_as(KEY, "r7-broken", &ctx(broken(7)), &bad)
+            .unwrap_err();
         assert!(
-            matches!(err, DaemonError::Core(rutli_frost_core::CoreError::SessionsFull {
-                cap_kind: rutli_frost_core::session::PendingCap::Request, .. })),
+            matches!(
+                err,
+                DaemonError::Core(rutli_frost_core::CoreError::SessionsFull {
+                    cap_kind: rutli_frost_core::session::PendingCap::Request,
+                    ..
+                })
+            ),
             "refused at the cap, not for the signature: {err:?}"
         );
-        let err = node.sign_round1_as(KEY, "r9-broken", &ctx(broken(9)), &bad).unwrap_err();
-        assert!(matches!(err, DaemonError::PolicyRefused(ref m) if m.contains("signature")), "{err:?}");
-        assert_eq!(node.pending_sign_count(KEY), MAX_PENDING_SIGN_SESSIONS_PER_REQUEST);
+        let err = node
+            .sign_round1_as(KEY, "r9-broken", &ctx(broken(9)), &bad)
+            .unwrap_err();
+        assert!(
+            matches!(err, DaemonError::PolicyRefused(ref m) if m.contains("signature")),
+            "{err:?}"
+        );
+        assert_eq!(
+            node.pending_sign_count(KEY),
+            MAX_PENDING_SIGN_SESSIONS_PER_REQUEST
+        );
     }
 
     /// A round 2 that took its authorization, then found the session's nonces owned by another
@@ -5258,7 +6102,12 @@ mod sign_policy_race_tests {
         let session = "changes-hands";
         let i1 = r.intent(&msg, 11);
         let digest = intent::intent_digest(&i1);
-        let ctx = Round1Ctx { message: Some(msg.to_vec()), signers: Some(vec![1, 2]), intent: Some(i1), ..Default::default() };
+        let ctx = Round1Ctx {
+            message: Some(msg.to_vec()),
+            signers: Some(vec![1, 2]),
+            intent: Some(i1),
+            ..Default::default()
+        };
         let (a, b) = (peer("cosigner2"), peer("cosigner3"));
         node.sign_round1_as(KEY, session, &ctx, &a).unwrap();
         let c2 = r.nodes[1].sign_round1(KEY, session, &ctx).unwrap();
@@ -5266,7 +6115,13 @@ mod sign_policy_race_tests {
         // Between A's authorization take and its nonce take: A's session goes, B opens the id.
         let reopened = Arc::new(Mutex::new(None));
         *node.hooks.after_round2_held.lock().unwrap() = Some(Arc::new({
-            let (n, ctx, a, b, reopened) = (Arc::downgrade(&node), ctx.clone(), a.clone(), b.clone(), reopened.clone());
+            let (n, ctx, a, b, reopened) = (
+                Arc::downgrade(&node),
+                ctx.clone(),
+                a.clone(),
+                b.clone(),
+                reopened.clone(),
+            );
             move |key: &str, session: &str| {
                 let n = n.upgrade().unwrap();
                 n.abort_sign_as(key, session, &a).unwrap();
@@ -5274,16 +6129,28 @@ mod sign_policy_race_tests {
             }
         }));
         let stale = BTreeMap::from([(node.identifier, c2), (r.nodes[1].identifier, c2)]);
-        let err = node.sign_round2_as(KEY, session, &msg, &stale, Some(digest), &a).unwrap_err();
+        let err = node
+            .sign_round2_as(KEY, session, &msg, &stale, Some(digest), &a)
+            .unwrap_err();
         *node.hooks.after_round2_held.lock().unwrap() = None;
-        assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::NotSessionOwner { .. })), "{err:?}");
+        assert!(
+            matches!(
+                err,
+                DaemonError::Core(rutli_frost_core::CoreError::NotSessionOwner { .. })
+            ),
+            "{err:?}"
+        );
         assert_eq!(node.pending_sign_count(KEY), 1);
-        assert!(node.sign_guard().unwrap().holds(KEY, session), "B's authorization is still there");
+        assert!(
+            node.sign_guard().unwrap().holds(KEY, session),
+            "B's authorization is still there"
+        );
         assert_eq!(r.released(), (0, 0));
 
         let c1 = reopened.lock().unwrap().take().unwrap();
         let cs = BTreeMap::from([(node.identifier, c1), (r.nodes[1].identifier, c2)]);
-        node.sign_round2_as(KEY, session, &msg, &cs, Some(digest), &b).expect("B's round 2 signs");
+        node.sign_round2_as(KEY, session, &msg, &cs, Some(digest), &b)
+            .expect("B's round 2 signs");
         assert_eq!(r.released(), (1, 1));
     }
 
@@ -5295,45 +6162,84 @@ mod sign_policy_race_tests {
         let r = rig_with(false).await;
         let node = &r.nodes[0];
         let ctx = Round1Ctx::default();
-        let openers = [peer("cosigner3"), peer("cosigner2"), SessionOwner::Local, SessionOwner::Unidentified];
+        let openers = [
+            peer("cosigner3"),
+            peer("cosigner2"),
+            SessionOwner::Local,
+            SessionOwner::Unidentified,
+        ];
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
             for (k, opener) in openers.iter().enumerate() {
                 for i in 0..MAX_PENDING_SIGN_SESSIONS_PER_OPENER {
-                    node.sign_round1_as(KEY, &format!("o{k}-{i}"), &ctx, opener).unwrap();
+                    node.sign_round1_as(KEY, &format!("o{k}-{i}"), &ctx, opener)
+                        .unwrap();
                 }
-                let err = node.sign_round1_as(KEY, &format!("o{k}-x"), &ctx, opener).unwrap_err();
+                let err = node
+                    .sign_round1_as(KEY, &format!("o{k}-x"), &ctx, opener)
+                    .unwrap_err();
                 assert!(
-                    matches!(err, DaemonError::Core(rutli_frost_core::CoreError::SessionsFull {
-                        cap_kind: rutli_frost_core::session::PendingCap::Opener, .. })),
+                    matches!(
+                        err,
+                        DaemonError::Core(rutli_frost_core::CoreError::SessionsFull {
+                            cap_kind: rutli_frost_core::session::PendingCap::Opener,
+                            ..
+                        })
+                    ),
                     "{opener}: {err:?}"
                 );
                 // Up to the key's total, the next opener still gets in.
                 if k + 1 < openers.len() {
-                    node.sign_round1_as(KEY, &format!("probe-{k}"), &ctx, &openers[k + 1]).unwrap();
-                    node.abort_sign_as(KEY, &format!("probe-{k}"), &openers[k + 1]).unwrap();
+                    node.sign_round1_as(KEY, &format!("probe-{k}"), &ctx, &openers[k + 1])
+                        .unwrap();
+                    node.abort_sign_as(KEY, &format!("probe-{k}"), &openers[k + 1])
+                        .unwrap();
                 }
             }
-            assert_eq!(node.pending_sign_count(KEY), MAX_PENDING_SIGN_SESSIONS_PER_KEY);
-            let err = node.sign_round1_as(KEY, "fifth", &ctx, &peer("cosigner4")).unwrap_err();
+            assert_eq!(
+                node.pending_sign_count(KEY),
+                MAX_PENDING_SIGN_SESSIONS_PER_KEY
+            );
+            let err = node
+                .sign_round1_as(KEY, "fifth", &ctx, &peer("cosigner4"))
+                .unwrap_err();
             assert!(
-                matches!(err, DaemonError::Core(rutli_frost_core::CoreError::SessionsFull {
-                    cap_kind: rutli_frost_core::session::PendingCap::Key, .. })),
+                matches!(
+                    err,
+                    DaemonError::Core(rutli_frost_core::CoreError::SessionsFull {
+                        cap_kind: rutli_frost_core::session::PendingCap::Key,
+                        ..
+                    })
+                ),
                 "{err:?}"
             );
-            assert!(err.to_string().contains("for this key from all openers"), "{err}");
+            assert!(
+                err.to_string().contains("for this key from all openers"),
+                "{err}"
+            );
         });
         let out = handle.render();
-        assert!(out.contains("rutli_sign_sessions_refused_total{cap=\"opener\"} 4"), "{out}");
-        assert!(out.contains("rutli_sign_sessions_refused_total{cap=\"key\"} 1"), "{out}");
-        assert!(out.contains("rutli_sign_intent_absent_total"), "accepted without intents:\n{out}");
+        assert!(
+            out.contains("rutli_sign_sessions_refused_total{cap=\"opener\"} 4"),
+            "{out}"
+        );
+        assert!(
+            out.contains("rutli_sign_sessions_refused_total{cap=\"key\"} 1"),
+            "{out}"
+        );
+        assert!(
+            out.contains("rutli_sign_intent_absent_total"),
+            "accepted without intents:\n{out}"
+        );
 
         // Room comes back as an opener's sessions go.
         for i in 0..MAX_PENDING_SIGN_SESSIONS_PER_OPENER {
-            node.abort_sign_as(KEY, &format!("o0-{i}"), &openers[0]).unwrap();
+            node.abort_sign_as(KEY, &format!("o0-{i}"), &openers[0])
+                .unwrap();
         }
-        node.sign_round1_as(KEY, "fifth", &ctx, &peer("cosigner4")).unwrap();
+        node.sign_round1_as(KEY, "fifth", &ctx, &peer("cosigner4"))
+            .unwrap();
     }
 }
 
@@ -5363,11 +6269,29 @@ mod hosted_id_tests {
             "frost-import-1220cb0e",
         ] {
             assert_eq!(routing_tag(id), Some("frost-"), "{id}");
-            assert!(matches!(refuse_unless_hosted_id(id), Err(DaemonError::NotHostedKeyId(_))), "{id}");
+            assert!(
+                matches!(
+                    refuse_unless_hosted_id(id),
+                    Err(DaemonError::NotHostedKeyId(_))
+                ),
+                "{id}"
+            );
         }
-        for id in ["namespace-participant1", "k", "ci-smoke-namespace", "rutli", "frost"] {
+        for id in [
+            "namespace-participant1",
+            "k",
+            "ci-smoke-namespace",
+            "rutli",
+            "frost",
+        ] {
             assert_eq!(routing_tag(id), None, "{id}");
-            assert!(matches!(refuse_unless_hosted_id(id), Err(DaemonError::NotHostedKeyId(_))), "{id}");
+            assert!(
+                matches!(
+                    refuse_unless_hosted_id(id),
+                    Err(DaemonError::NotHostedKeyId(_))
+                ),
+                "{id}"
+            );
         }
     }
 }
@@ -5389,24 +6313,52 @@ mod dkg_existing_tests {
             })
             .collect();
         crate::peer::wire_local_mesh(&nodes).unwrap();
-        let peers: Vec<Arc<dyn PeerApi>> =
-            nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+        let peers: Vec<Arc<dyn PeerApi>> = nodes
+            .iter()
+            .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+            .collect();
 
-        let first = crate::orchestrator::run_dkg_outcome(&peers, "k", None).await.unwrap();
+        let first = crate::orchestrator::run_dkg_outcome(&peers, "k", None)
+            .await
+            .unwrap();
         assert!(!first.existing);
-        let made_by = first.ceremony_id.clone().expect("a new key names its ceremony");
+        let made_by = first
+            .ceremony_id
+            .clone()
+            .expect("a new key names its ceremony");
         assert!(made_by.starts_with("dkg"), "{made_by}");
 
-        let again = crate::orchestrator::run_dkg_outcome(&peers, "k", None).await.unwrap();
-        assert_eq!((again.group_key, again.existing, again.ceremony_id.clone()), (first.group_key, true, None));
+        let again = crate::orchestrator::run_dkg_outcome(&peers, "k", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            (again.group_key, again.existing, again.ceremony_id.clone()),
+            (first.group_key, true, None)
+        );
         for n in &nodes {
-            assert_eq!(n.committed_dkg_ceremony("k", &first.group_key).unwrap(), Some(made_by.clone()));
-            assert_eq!(n.committed_dkg_ceremony("k", &[7u8; 32]).unwrap(), None, "another group key");
-            assert_eq!(n.committed_dkg_ceremony("other", &first.group_key).unwrap(), None, "no such key");
+            assert_eq!(
+                n.committed_dkg_ceremony("k", &first.group_key).unwrap(),
+                Some(made_by.clone())
+            );
+            assert_eq!(
+                n.committed_dkg_ceremony("k", &[7u8; 32]).unwrap(),
+                None,
+                "another group key"
+            );
+            assert_eq!(
+                n.committed_dkg_ceremony("other", &first.group_key).unwrap(),
+                None,
+                "no such key"
+            );
         }
 
         // After a refresh the sharing is no longer the DKG's: no origin to name.
         crate::orchestrator::run_refresh(&peers, "k").await.unwrap();
-        assert_eq!(nodes[0].committed_dkg_ceremony("k", &first.group_key).unwrap(), None);
+        assert_eq!(
+            nodes[0]
+                .committed_dkg_ceremony("k", &first.group_key)
+                .unwrap(),
+            None
+        );
     }
 }

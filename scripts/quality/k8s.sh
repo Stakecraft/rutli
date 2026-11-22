@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Helm / Kubernetes metrics: kubeconform on the rendered manifests. Renders what
 # scripts/ci-deploy-policy.sh renders (the chart's defaults with placeholder peer pins, every

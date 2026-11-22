@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! The cluster id this node runs under, recorded in `data_dir/cluster-id` (review M2).
@@ -54,7 +54,12 @@ pub enum Recorded {
 /// The daemon at startup: compare the effective id (`source` says where it came from, for the
 /// message) with the record, record it if there is none, and refuse a different one unless
 /// `change_allowed`, in which case the record is replaced.
-pub fn reconcile(data_dir: &Path, effective: &str, source: &str, change_allowed: bool) -> Result<Recorded> {
+pub fn reconcile(
+    data_dir: &Path,
+    effective: &str,
+    source: &str,
+    change_allowed: bool,
+) -> Result<Recorded> {
     match read(data_dir)? {
         None => {
             write(data_dir, effective)?;
@@ -63,7 +68,9 @@ pub fn reconcile(data_dir: &Path, effective: &str, source: &str, change_allowed:
         Some(Ok(recorded)) if recorded == effective => Ok(Recorded::Unchanged),
         Some(previous) if change_allowed => {
             write(data_dir, effective)?;
-            Ok(Recorded::Changed { previous: previous.ok() })
+            Ok(Recorded::Changed {
+                previous: previous.ok(),
+            })
         }
         Some(Ok(recorded)) => Err(mismatch(data_dir, &recorded, effective, source)),
         Some(Err(bad)) => Err(malformed(data_dir, &bad)),
@@ -89,7 +96,10 @@ fn read(data_dir: &Path) -> Result<Option<std::result::Result<String, String>>> 
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
-            return Err(DaemonError::Config(format!("cannot read {}: {e}", p.display())));
+            return Err(DaemonError::Config(format!(
+                "cannot read {}: {e}",
+                p.display()
+            )));
         }
     };
     let id = text.trim_end_matches('\n').to_string();
@@ -102,13 +112,20 @@ fn write(data_dir: &Path, id: &str) -> Result<()> {
     std::fs::create_dir_all(data_dir)?;
     let p = path(data_dir);
     let tmp = data_dir.join(format!(".{FILE_NAME}.tmp"));
-    let io = |e: std::io::Error| DaemonError::Config(format!("cannot record the cluster id in {}: {e}", p.display()));
+    let io = |e: std::io::Error| {
+        DaemonError::Config(format!(
+            "cannot record the cluster id in {}: {e}",
+            p.display()
+        ))
+    };
     let mut f = std::fs::File::create(&tmp).map_err(io)?;
     f.write_all(format!("{id}\n").as_bytes()).map_err(io)?;
     f.sync_all().map_err(io)?;
     drop(f);
     std::fs::rename(&tmp, &p).map_err(io)?;
-    std::fs::File::open(data_dir).and_then(|d| d.sync_all()).map_err(io)?;
+    std::fs::File::open(data_dir)
+        .and_then(|d| d.sync_all())
+        .map_err(io)?;
     Ok(())
 }
 
@@ -147,26 +164,49 @@ mod tests {
         let d = dir.path();
         check(d, A, "pinned in config", false).unwrap(); // nothing recorded: offline commands pass
         assert!(!path(d).exists(), "check never writes");
-        assert_eq!(reconcile(d, A, "derived from tls.ca_cert", false).unwrap(), Recorded::First);
+        assert_eq!(
+            reconcile(d, A, "derived from tls.ca_cert", false).unwrap(),
+            Recorded::First
+        );
         assert_eq!(std::fs::read_to_string(path(d)).unwrap(), format!("{A}\n"));
         // CA rotation Phase 0: the pin equals the derived value, nothing changes.
-        assert_eq!(reconcile(d, A, "pinned in config", false).unwrap(), Recorded::Unchanged);
+        assert_eq!(
+            reconcile(d, A, "pinned in config", false).unwrap(),
+            Recorded::Unchanged
+        );
         check(d, A, "pinned in config", false).unwrap();
 
         // The pin dropped by a helm upgrade: the id derived from the rotation bundle differs.
-        let e = reconcile(d, B, "derived from tls.ca_cert", false).unwrap_err().to_string();
-        assert!(e.contains(A) && e.contains(B) && e.contains("derived from tls.ca_cert"), "{e}");
-        assert!(e.contains("--reuse-values") && e.contains("cluster_id_change_allowed"), "{e}");
+        let e = reconcile(d, B, "derived from tls.ca_cert", false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains(A) && e.contains(B) && e.contains("derived from tls.ca_cert"),
+            "{e}"
+        );
+        assert!(
+            e.contains("--reuse-values") && e.contains("cluster_id_change_allowed"),
+            "{e}"
+        );
         assert!(check(d, B, "derived from tls.ca_cert", false).is_err());
-        assert_eq!(std::fs::read_to_string(path(d)).unwrap(), format!("{A}\n"), "a refusal changes nothing");
+        assert_eq!(
+            std::fs::read_to_string(path(d)).unwrap(),
+            format!("{A}\n"),
+            "a refusal changes nothing"
+        );
 
         // A deliberate change.
         check(d, B, "pinned in config", true).unwrap();
         assert_eq!(
             reconcile(d, B, "pinned in config", true).unwrap(),
-            Recorded::Changed { previous: Some(A.into()) }
+            Recorded::Changed {
+                previous: Some(A.into())
+            }
         );
-        assert_eq!(reconcile(d, B, "pinned in config", false).unwrap(), Recorded::Unchanged);
+        assert_eq!(
+            reconcile(d, B, "pinned in config", false).unwrap(),
+            Recorded::Unchanged
+        );
         assert!(!d.join(format!(".{FILE_NAME}.tmp")).exists());
     }
 
@@ -174,21 +214,35 @@ mod tests {
     fn plaintext_dev_is_recorded_and_a_malformed_record_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
-        assert_eq!(reconcile(d, "plaintext-dev", "plaintext-dev, no TLS", false).unwrap(), Recorded::First);
-        assert_eq!(reconcile(d, "plaintext-dev", "plaintext-dev, no TLS", false).unwrap(), Recorded::Unchanged);
+        assert_eq!(
+            reconcile(d, "plaintext-dev", "plaintext-dev, no TLS", false).unwrap(),
+            Recorded::First
+        );
+        assert_eq!(
+            reconcile(d, "plaintext-dev", "plaintext-dev, no TLS", false).unwrap(),
+            Recorded::Unchanged
+        );
         assert!(reconcile(d, A, "derived from tls.ca_cert", false).is_err());
 
         std::fs::write(path(d), "garbage").unwrap();
-        let e = reconcile(d, A, "pinned in config", false).unwrap_err().to_string();
+        let e = reconcile(d, A, "pinned in config", false)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("not a cluster id"), "{e}");
         assert!(check(d, A, "pinned in config", false).is_err());
         assert_eq!(
             reconcile(d, A, "pinned in config", true).unwrap(),
             Recorded::Changed { previous: None }
         );
-        assert_eq!(reconcile(d, A, "pinned in config", false).unwrap(), Recorded::Unchanged);
+        assert_eq!(
+            reconcile(d, A, "pinned in config", false).unwrap(),
+            Recorded::Unchanged
+        );
         // No trailing newline is fine too (a hand-written file).
         std::fs::write(path(d), A).unwrap();
-        assert_eq!(reconcile(d, A, "pinned in config", false).unwrap(), Recorded::Unchanged);
+        assert_eq!(
+            reconcile(d, A, "pinned in config", false).unwrap(),
+            Recorded::Unchanged
+        );
     }
 }

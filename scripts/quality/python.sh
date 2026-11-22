@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Python metrics: ruff findings (ruff's default rules, or the repository's ruff config if one is
 # added) on the tracked *.py files. Run by collect.sh.

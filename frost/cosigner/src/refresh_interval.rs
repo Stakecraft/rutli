@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! The per-key minimum interval between refreshes (`signing_policy.refresh_min_interval_secs`).
@@ -48,7 +48,10 @@ pub enum Verdict {
     /// No counted refresh within the interval (or the interval is off).
     Allowed,
     /// Within the interval, but let through by the operator's waiver (`waived_at_ms`).
-    Waived { last: CountedRefresh, waived_at_ms: u64 },
+    Waived {
+        last: CountedRefresh,
+        waived_at_ms: u64,
+    },
     /// Within the interval: refused until `next_ms`.
     TooSoon { last: CountedRefresh, next_ms: u64 },
 }
@@ -79,19 +82,35 @@ pub fn counts(rec: &CeremonyRecord, key_id: &str) -> bool {
 }
 
 /// The newest refresh of `key_id` among `records` that counts against the interval.
-pub fn last_counted<'a>(records: impl IntoIterator<Item = &'a CeremonyRecord>, key_id: &str) -> Option<CountedRefresh> {
+pub fn last_counted<'a>(
+    records: impl IntoIterator<Item = &'a CeremonyRecord>,
+    key_id: &str,
+) -> Option<CountedRefresh> {
     records
         .into_iter()
         .filter(|r| counts(r, key_id))
         .max_by_key(|r| at_ms(r))
-        .map(|r| CountedRefresh { ceremony_id: r.ceremony_id.clone(), at_ms: at_ms(r), state: r.state })
+        .map(|r| CountedRefresh {
+            ceremony_id: r.ceremony_id.clone(),
+            at_ms: at_ms(r),
+            state: r.state,
+        })
 }
 
 /// Refreshes of `key_id` among `records` that committed at or after `since_ms`.
-pub fn committed_since<'a>(records: impl IntoIterator<Item = &'a CeremonyRecord>, key_id: &str, since_ms: u64) -> usize {
+pub fn committed_since<'a>(
+    records: impl IntoIterator<Item = &'a CeremonyRecord>,
+    key_id: &str,
+    since_ms: u64,
+) -> usize {
     records
         .into_iter()
-        .filter(|r| r.key_id == key_id && r.kind == "refresh" && r.state == RecordState::Committed && at_ms(r) >= since_ms)
+        .filter(|r| {
+            r.key_id == key_id
+                && r.kind == "refresh"
+                && r.state == RecordState::Committed
+                && at_ms(r) >= since_ms
+        })
         .count()
 }
 
@@ -102,22 +121,38 @@ pub fn committed_since<'a>(records: impl IntoIterator<Item = &'a CeremonyRecord>
 /// waiver applies from its time (`now_ms >= waived_at_ms`, so a refresh it let through stages
 /// after it and the next one is held to the interval again) for
 /// [`crate::config::REFRESH_WAIVER_LIFETIME_MS`], and only while no counted refresh is newer than it.
-pub fn verdict(last: Option<&CountedRefresh>, now_ms: u64, interval_secs: u64, waived_at_ms: Option<u64>) -> Verdict {
-    let Some(last) = last else { return Verdict::Allowed };
+pub fn verdict(
+    last: Option<&CountedRefresh>,
+    now_ms: u64,
+    interval_secs: u64,
+    waived_at_ms: Option<u64>,
+) -> Verdict {
+    let Some(last) = last else {
+        return Verdict::Allowed;
+    };
     if interval_secs == 0 {
         return Verdict::Allowed;
     }
-    let next_ms = last.at_ms.saturating_add(interval_secs.saturating_mul(1000));
+    let next_ms = last
+        .at_ms
+        .saturating_add(interval_secs.saturating_mul(1000));
     if now_ms >= next_ms {
         return Verdict::Allowed;
     }
     if let Some(w) = waived_at_ms {
-        let live = now_ms >= w && now_ms < w.saturating_add(crate::config::REFRESH_WAIVER_LIFETIME_MS);
+        let live =
+            now_ms >= w && now_ms < w.saturating_add(crate::config::REFRESH_WAIVER_LIFETIME_MS);
         if live && last.at_ms < w {
-            return Verdict::Waived { last: last.clone(), waived_at_ms: w };
+            return Verdict::Waived {
+                last: last.clone(),
+                waived_at_ms: w,
+            };
         }
     }
-    Verdict::TooSoon { last: last.clone(), next_ms }
+    Verdict::TooSoon {
+        last: last.clone(),
+        next_ms,
+    }
 }
 
 #[cfg(test)]
@@ -129,7 +164,14 @@ mod tests {
     const T0: u64 = 1_800_000_000_000;
     const INTERVAL: u64 = crate::config::DEFAULT_REFRESH_MIN_INTERVAL_SECS;
 
-    fn rec(id: &str, key: &str, kind: &str, state: RecordState, staged: bool, at: u64) -> CeremonyRecord {
+    fn rec(
+        id: &str,
+        key: &str,
+        kind: &str,
+        state: RecordState,
+        staged: bool,
+        at: u64,
+    ) -> CeremonyRecord {
         CeremonyRecord {
             ceremony_id: id.into(),
             state,
@@ -164,13 +206,34 @@ mod tests {
         use RecordState::*;
         let records = vec![
             rec("dkg-1", "k", "dkg", Committed, true, T0 + 5 * DAY),
-            rec("refresh-early", "k", "refresh", Aborted, false, T0 + 6 * DAY),
-            rec("refresh-other-key", "other", "refresh", Committed, true, T0 + 7 * DAY),
+            rec(
+                "refresh-early",
+                "k",
+                "refresh",
+                Aborted,
+                false,
+                T0 + 6 * DAY,
+            ),
+            rec(
+                "refresh-other-key",
+                "other",
+                "refresh",
+                Committed,
+                true,
+                T0 + 7 * DAY,
+            ),
             rec("refresh-1", "k", "refresh", Committed, true, T0),
         ];
         assert_eq!(last(&records).unwrap().ceremony_id, "refresh-1");
         let mut late = records.clone();
-        late.push(rec("refresh-late", "k", "refresh", Aborted, true, T0 + 2 * DAY));
+        late.push(rec(
+            "refresh-late",
+            "k",
+            "refresh",
+            Aborted,
+            true,
+            T0 + 2 * DAY,
+        ));
         assert_eq!(last(&late).unwrap().ceremony_id, "refresh-late");
         // An ABORTED no-vote for an id this node never knew names no key at all.
         let unknown = CeremonyRecord::aborted("refresh-x", "unknown");
@@ -180,42 +243,110 @@ mod tests {
 
     #[test]
     fn the_weekly_schedule_passes_and_a_second_refresh_inside_the_interval_does_not() {
-        let l = last(&[rec("refresh-1", "k", "refresh", RecordState::Committed, true, T0)]);
+        let l = last(&[rec(
+            "refresh-1",
+            "k",
+            "refresh",
+            RecordState::Committed,
+            true,
+            T0,
+        )]);
         // Weekly CronJob: the next Monday.
-        assert_eq!(verdict(l.as_ref(), T0 + 7 * DAY, INTERVAL, None), Verdict::Allowed);
+        assert_eq!(
+            verdict(l.as_ref(), T0 + 7 * DAY, INTERVAL, None),
+            Verdict::Allowed
+        );
         // A missed run redone a few days later, and the boundary itself.
-        assert_eq!(verdict(l.as_ref(), T0 + 3 * DAY, INTERVAL, None), Verdict::Allowed);
-        assert!(matches!(verdict(l.as_ref(), T0 + 3 * DAY - 1, INTERVAL, None), Verdict::TooSoon { next_ms, .. } if next_ms == T0 + 3 * DAY));
+        assert_eq!(
+            verdict(l.as_ref(), T0 + 3 * DAY, INTERVAL, None),
+            Verdict::Allowed
+        );
+        assert!(
+            matches!(verdict(l.as_ref(), T0 + 3 * DAY - 1, INTERVAL, None), Verdict::TooSoon { next_ms, .. } if next_ms == T0 + 3 * DAY)
+        );
         // A loop: every attempt after the first is refused.
         for dt in [1, 60_000, H, DAY, 2 * DAY] {
-            assert!(matches!(verdict(l.as_ref(), T0 + dt, INTERVAL, None), Verdict::TooSoon { .. }), "{dt}");
+            assert!(
+                matches!(
+                    verdict(l.as_ref(), T0 + dt, INTERVAL, None),
+                    Verdict::TooSoon { .. }
+                ),
+                "{dt}"
+            );
         }
         // No refresh yet, or the limit off.
         assert_eq!(verdict(None, T0, INTERVAL, None), Verdict::Allowed);
         assert_eq!(verdict(l.as_ref(), T0 + 1, 0, None), Verdict::Allowed);
         // A clock that went back is held, not let through.
-        assert!(matches!(verdict(l.as_ref(), T0 - DAY, INTERVAL, None), Verdict::TooSoon { .. }));
+        assert!(matches!(
+            verdict(l.as_ref(), T0 - DAY, INTERVAL, None),
+            Verdict::TooSoon { .. }
+        ));
     }
 
     #[test]
     fn the_waiver_lets_one_refresh_through_after_its_time_then_the_interval_applies_again() {
-        let first = rec("refresh-1", "k", "refresh", RecordState::Committed, true, T0);
+        let first = rec(
+            "refresh-1",
+            "k",
+            "refresh",
+            RecordState::Committed,
+            true,
+            T0,
+        );
         let w = T0 + 2 * H; // the operator decides two hours after the weekly refresh
         let l = last(std::slice::from_ref(&first));
-        assert!(matches!(verdict(l.as_ref(), w + 60_000, INTERVAL, Some(w)), Verdict::Waived { waived_at_ms, .. } if waived_at_ms == w));
+        assert!(
+            matches!(verdict(l.as_ref(), w + 60_000, INTERVAL, Some(w)), Verdict::Waived { waived_at_ms, .. } if waived_at_ms == w)
+        );
         // Not before its time.
-        assert!(matches!(verdict(l.as_ref(), w - 1, INTERVAL, Some(w)), Verdict::TooSoon { .. }));
+        assert!(matches!(
+            verdict(l.as_ref(), w - 1, INTERVAL, Some(w)),
+            Verdict::TooSoon { .. }
+        ));
         // The waived refresh staged after the waiver time: the next one is held to the interval.
-        let after = vec![first.clone(), rec("refresh-2", "k", "refresh", RecordState::Committed, true, w + 61_000)];
+        let after = vec![
+            first.clone(),
+            rec(
+                "refresh-2",
+                "k",
+                "refresh",
+                RecordState::Committed,
+                true,
+                w + 61_000,
+            ),
+        ];
         let l2 = last(&after);
-        assert!(matches!(verdict(l2.as_ref(), w + 120_000, INTERVAL, Some(w)), Verdict::TooSoon { .. }));
+        assert!(matches!(
+            verdict(l2.as_ref(), w + 120_000, INTERVAL, Some(w)),
+            Verdict::TooSoon { .. }
+        ));
         // A waived refresh that failed before staging leaves no record: the waiver still applies.
-        let failed = vec![first.clone(), rec("refresh-f", "k", "refresh", RecordState::Aborted, false, w + 61_000)];
-        assert!(matches!(verdict(last(&failed).as_ref(), w + 120_000, INTERVAL, Some(w)), Verdict::Waived { .. }));
+        let failed = vec![
+            first.clone(),
+            rec(
+                "refresh-f",
+                "k",
+                "refresh",
+                RecordState::Aborted,
+                false,
+                w + 61_000,
+            ),
+        ];
+        assert!(matches!(
+            verdict(last(&failed).as_ref(), w + 120_000, INTERVAL, Some(w)),
+            Verdict::Waived { .. }
+        ));
         // It lapses 24 h after its time.
-        assert!(matches!(verdict(l.as_ref(), w + DAY, INTERVAL, Some(w)), Verdict::TooSoon { .. }));
+        assert!(matches!(
+            verdict(l.as_ref(), w + DAY, INTERVAL, Some(w)),
+            Verdict::TooSoon { .. }
+        ));
         // A waiver older than the last refresh waives nothing.
-        assert!(matches!(verdict(l.as_ref(), T0 + H, INTERVAL, Some(T0 - H)), Verdict::TooSoon { .. }));
+        assert!(matches!(
+            verdict(l.as_ref(), T0 + H, INTERVAL, Some(T0 - H)),
+            Verdict::TooSoon { .. }
+        ));
     }
 
     /// A commit delayed past the interval counts from the commit, not from the staging; a record
@@ -224,13 +355,32 @@ mod tests {
     fn a_late_commit_counts_from_the_commit() {
         let staged_at = T0;
         let committed_at = T0 + 4 * DAY;
-        let mut late = rec("refresh-late", "k", "refresh", RecordState::Committed, true, committed_at);
+        let mut late = rec(
+            "refresh-late",
+            "k",
+            "refresh",
+            RecordState::Committed,
+            true,
+            committed_at,
+        );
         late.created_ms = staged_at;
         let l = last(std::slice::from_ref(&late));
-        assert!(matches!(verdict(l.as_ref(), committed_at + H, INTERVAL, None), Verdict::TooSoon { next_ms, .. } if next_ms == committed_at + 3 * DAY));
-        assert_eq!(verdict(l.as_ref(), committed_at + 3 * DAY, INTERVAL, None), Verdict::Allowed);
-        let old = CeremonyRecord { resolved_ms: 0, updated_ms: committed_at + H, ..late };
-        assert_eq!(last(std::slice::from_ref(&old)).unwrap().at_ms, committed_at + H);
+        assert!(
+            matches!(verdict(l.as_ref(), committed_at + H, INTERVAL, None), Verdict::TooSoon { next_ms, .. } if next_ms == committed_at + 3 * DAY)
+        );
+        assert_eq!(
+            verdict(l.as_ref(), committed_at + 3 * DAY, INTERVAL, None),
+            Verdict::Allowed
+        );
+        let old = CeremonyRecord {
+            resolved_ms: 0,
+            updated_ms: committed_at + H,
+            ..late
+        };
+        assert_eq!(
+            last(std::slice::from_ref(&old)).unwrap().at_ms,
+            committed_at + H
+        );
     }
 
     #[test]
@@ -240,7 +390,14 @@ mod tests {
             rec("refresh-1", "k", "refresh", Committed, true, T0),
             rec("refresh-2", "k", "refresh", Committed, true, T0 + 3 * DAY),
             rec("refresh-3", "k", "refresh", Aborted, true, T0 + 4 * DAY),
-            rec("refresh-4", "other", "refresh", Committed, true, T0 + 4 * DAY),
+            rec(
+                "refresh-4",
+                "other",
+                "refresh",
+                Committed,
+                true,
+                T0 + 4 * DAY,
+            ),
         ];
         assert_eq!(committed_since(&records, "k", T0), 2);
         assert_eq!(committed_since(&records, "k", T0 + 1), 1);

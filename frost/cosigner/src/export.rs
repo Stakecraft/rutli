@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Portable export/import of cluster-hosted keys.
@@ -110,7 +110,13 @@ pub fn export_encrypted(key_id: &str, key: &HostedKey, passphrase: &str) -> Resu
     // key id or spec and imported as something it is not.
     let aad = aad(key_id, key.spec.as_str());
     let ct = cipher
-        .encrypt(&nonce, Payload { msg: &plain, aad: &aad })
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: &plain,
+                aad: &aad,
+            },
+        )
         .map_err(|_| DaemonError::Config("export encryption failed".into()))?;
 
     Ok(ExportEnvelope {
@@ -165,7 +171,10 @@ pub fn import(envelope: &ExportEnvelope, passphrase: Option<&str>) -> Result<Hos
     let plain: Zeroizing<Vec<u8>> = match (&envelope.kdf, passphrase) {
         (Some(kdf), Some(pass)) => {
             if kdf.algo != "argon2id" {
-                return Err(DaemonError::Config(format!("unsupported export KDF {:?}", kdf.algo)));
+                return Err(DaemonError::Config(format!(
+                    "unsupported export KDF {:?}",
+                    kdf.algo
+                )));
             }
             let salt = hex::decode(&kdf.salt)
                 .map_err(|e| DaemonError::Config(format!("corrupt export salt: {e}")))?;
@@ -176,7 +185,13 @@ pub fn import(envelope: &ExportEnvelope, passphrase: Option<&str>) -> Result<Hos
             let aad = aad(&envelope.key_id, &envelope.spec);
             Zeroizing::new(
                 cipher
-                    .decrypt(Nonce::from_slice(&nonce), Payload { msg: &bytes, aad: &aad })
+                    .decrypt(
+                        Nonce::from_slice(&nonce),
+                        Payload {
+                            msg: &bytes,
+                            aad: &aad,
+                        },
+                    )
                     // One opaque error: a wrong passphrase and a tampered artifact are the same
                     // answer to the caller.
                     .map_err(|_| {
@@ -227,10 +242,15 @@ pub const FROST_ROUTING_TAG: &str = "frost-";
 /// prefix is everything before the first `rutli-` — returned so the operator can check it is the
 /// participant's `frost.key-prefix`.
 pub fn hosted_import_key_id(key_id: &str, key_prefix: Option<&str>) -> Result<String> {
-    let alphabet = |s: &str| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    let alphabet = |s: &str| {
+        s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    };
     let refuse = |why: String| DaemonError::Config(format!("--key-id {key_id:?}: {why}"));
     if !alphabet(key_id) {
-        return Err(refuse("only [A-Za-z0-9_-] is allowed (the cosigner keystore alphabet)".into()));
+        return Err(refuse(
+            "only [A-Za-z0-9_-] is allowed (the cosigner keystore alphabet)".into(),
+        ));
     }
     if key_id.contains(FROST_ROUTING_TAG) {
         return Err(refuse(format!(
@@ -240,7 +260,9 @@ pub fn hosted_import_key_id(key_id: &str, key_prefix: Option<&str>) -> Result<St
     let prefix = match key_prefix {
         Some(p) => {
             if !alphabet(p) {
-                return Err(refuse(format!("--key-prefix {p:?} is outside [A-Za-z0-9_-]")));
+                return Err(refuse(format!(
+                    "--key-prefix {p:?} is outside [A-Za-z0-9_-]"
+                )));
             }
             if !key_id.starts_with(&format!("{p}{HOSTED_ROUTING_TAG}")) {
                 return Err(refuse(format!(
@@ -262,7 +284,9 @@ pub fn hosted_import_key_id(key_id: &str, key_prefix: Option<&str>) -> Result<St
         },
     };
     if key_id.len() == prefix.len() + HOSTED_ROUTING_TAG.len() {
-        return Err(refuse(format!("needs a name after `{prefix}{HOSTED_ROUTING_TAG}`")));
+        return Err(refuse(format!(
+            "needs a name after `{prefix}{HOSTED_ROUTING_TAG}`"
+        )));
     }
     Ok(prefix)
 }
@@ -324,13 +348,11 @@ pub fn import_canton(
         (KeySpec::EcP256, Some(KeyPurpose::Encryption), PrivateKeyMaterial::EcP256 { scalar }) => {
             HostedKey::ec_p256_from_scalar(scalar.as_ref(), now_secs)?
         }
-        (KeySpec::EcP256, _, _) => {
-            return Err(refuse(
-                "this is an EC P-256 signing key; only encryption keys are hosted (ec-p256-ecies), \
+        (KeySpec::EcP256, _, _) => return Err(refuse(
+            "this is an EC P-256 signing key; only encryption keys are hosted (ec-p256-ecies), \
                  and a signing key is never used for ECDH"
-                    .into(),
-            ))
-        }
+                .into(),
+        )),
         (KeySpec::Ed25519, _, _) => {
             return Err(refuse(
                 "this is an Ed25519 signing key; namespace and signing keys move into the cluster \
@@ -338,14 +360,12 @@ pub fn import_canton(
                     .into(),
             ))
         }
-        (KeySpec::Rsa2048, _, _) => {
-            return Err(refuse(
-                "RSA-2048 import is not supported (roadmap B3 was dropped: the encryption key need \
+        (KeySpec::Rsa2048, _, _) => return Err(refuse(
+            "RSA-2048 import is not supported (roadmap B3 was dropped: the encryption key need \
                  not be carried); give the new participant a fresh encryption key — only an EC \
                  P-256 encryption key can be imported"
-                    .into(),
-            ))
-        }
+                .into(),
+        )),
     };
     key.validate()?;
 
@@ -443,7 +463,13 @@ fn aad(key_id: &str, spec: &str) -> Vec<u8> {
 }
 
 fn derive_dek(passphrase: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
-    derive_dek_with(passphrase, salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST)
+    derive_dek_with(
+        passphrase,
+        salt,
+        ARGON2_M_COST,
+        ARGON2_T_COST,
+        ARGON2_P_COST,
+    )
 }
 
 fn derive_dek_with(
@@ -492,7 +518,10 @@ mod tests {
         let key = HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
         let env = export_encrypted("rutli-sym-1", &key, PASS).unwrap();
         assert!(import(&env, Some("not the passphrase")).is_err());
-        assert!(import(&env, None).is_err(), "an encrypted export needs a passphrase");
+        assert!(
+            import(&env, None).is_err(),
+            "an encrypted export needs a passphrase"
+        );
     }
 
     #[test]
@@ -530,10 +559,16 @@ mod tests {
         let key = HostedKey::generate(HostedSpec::Rsa2048, 5).unwrap();
         let ct = key.encrypt_oaep(b"plaintext path").unwrap();
         let env = export_plaintext("rutli-enc-2", &key).unwrap();
-        assert!(env.kdf.is_none(), "a plaintext export must be identifiable as such");
+        assert!(
+            env.kdf.is_none(),
+            "a plaintext export must be identifiable as such"
+        );
 
         let back = import(&env, None).unwrap();
-        assert_eq!(back.decrypt_oaep(&ct).unwrap().as_slice(), b"plaintext path");
+        assert_eq!(
+            back.decrypt_oaep(&ct).unwrap().as_slice(),
+            b"plaintext path"
+        );
     }
 
     /// Mirrors the driver's `FrostKeyIds(prefix)`: hosted iff `id.startsWith(prefix + "rutli-")`,
@@ -552,7 +587,11 @@ mod tests {
             ("rutli-a-rutli-b", ""), // the first `rutli-` is the tag
         ] {
             assert_eq!(hosted_import_key_id(id, None).unwrap(), prefix, "{id}");
-            assert_eq!(hosted_import_key_id(id, Some(prefix)).unwrap(), prefix, "{id}");
+            assert_eq!(
+                hosted_import_key_id(id, Some(prefix)).unwrap(),
+                prefix,
+                "{id}"
+            );
             assert!(driver_routes_to_hosted(id, prefix), "{id}");
         }
         // Refused: no tag, no name after it, outside the alphabet, any `frost-` (a FROST id under
@@ -570,12 +609,18 @@ mod tests {
             "frost-import-1220cb0e",
             "a-frost-b-rutli-c",
         ] {
-            assert!(hosted_import_key_id(id, None).is_err(), "{id:?} must be refused");
+            assert!(
+                hosted_import_key_id(id, None).is_err(),
+                "{id:?} must be refused"
+            );
         }
         // With --key-prefix the id must carry exactly that prefix.
         assert!(hosted_import_key_id("soak1-rutli-x", Some("soak2-")).is_err());
         assert!(hosted_import_key_id("rutli-x", Some("soak1-")).is_err());
-        assert!(hosted_import_key_id("soak1-rutli-x", Some("")).is_err(), "prefix \"\" means no prefix");
+        assert!(
+            hosted_import_key_id("soak1-rutli-x", Some("")).is_err(),
+            "prefix \"\" means no prefix"
+        );
         assert!(hosted_import_key_id("soak1-rutli-x", Some("so ak1-")).is_err());
     }
 
@@ -586,7 +631,10 @@ mod tests {
 
         let mut wrong_kind = export_plaintext("rutli-sym-1", &key).unwrap();
         wrong_kind.kind = "something-else".into();
-        assert!(import(&wrong_kind, None).is_err(), "a mis-pointed --in must say so");
+        assert!(
+            import(&wrong_kind, None).is_err(),
+            "a mis-pointed --in must say so"
+        );
 
         // A file written by a future build must be refused, not guessed at.
         env.v = ENVELOPE_VERSION + 1;

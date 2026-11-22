@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Poison-tolerant locking (audit L3).
@@ -29,7 +29,11 @@ pub fn recover<'a, T>(lock: &'a Mutex<T>, name: &'static str) -> MutexGuard<'a, 
 }
 
 /// Lock `lock`; if a holder panicked, run `reset` on the state first and clear the poison.
-pub fn recover_reset<'a, T>(lock: &'a Mutex<T>, name: &'static str, reset: impl FnOnce(&mut T)) -> MutexGuard<'a, T> {
+pub fn recover_reset<'a, T>(
+    lock: &'a Mutex<T>,
+    name: &'static str,
+    reset: impl FnOnce(&mut T),
+) -> MutexGuard<'a, T> {
     lock.lock().unwrap_or_else(|poisoned| {
         note(name, "reset");
         let mut guard = poisoned.into_inner();

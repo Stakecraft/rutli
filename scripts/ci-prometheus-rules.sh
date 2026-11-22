@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # CI gate for the alert rules: `promtool check rules` on deploy/monitoring/prometheus-rules.yml (the
 # source of truth the compose/soak stacks load) and on the rule groups of the rendered

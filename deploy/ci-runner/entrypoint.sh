@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Starts as root only to hand the mounted docker socket and the job work dir to the unprivileged
 # `runner` user, then registers once (the registration survives container restarts in the

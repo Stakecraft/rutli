@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # CI render: the chart's defaults plus placeholder TLS key pins, which every render needs
 # (tls.requirePeerPins unset = on). scripts/ci-deploy-policy.sh also layers it over the soak's

@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Property tests for the signing policy (issue #121): the sign journal's rate limit and charge
@@ -10,13 +10,15 @@ mod pki;
 
 use std::collections::HashMap;
 
-use prost::Message;
 use proptest::prelude::*;
+use prost::Message;
 
 use rutli_cosigner::config::{RateLimitRule, SigningPolicyConfig};
 use rutli_cosigner::epoch_check::{evaluate, Verdict};
 use rutli_cosigner::intent::{self, IntentVerifier, VerifiedIntent};
-use rutli_cosigner::journal::{read_key_dir, JournalEntry, Limits, Retention, SignJournal, PURPOSE_NO_INTENT, PURPOSE_SIGN};
+use rutli_cosigner::journal::{
+    read_key_dir, JournalEntry, Limits, Retention, SignJournal, PURPOSE_NO_INTENT, PURPOSE_SIGN,
+};
 use rutli_cosigner::node::CeremonyKind;
 use rutli_cosigner::pb::{self, KeyEpochReply};
 use rutli_cosigner::DaemonError;
@@ -34,7 +36,10 @@ fn config(cases: u32) -> ProptestConfig {
 const MINUTE: u64 = 60_000;
 const DAY: u64 = 24 * 60 * MINUTE;
 const T0: u64 = 1_800_000_000_000;
-const KEEP: Retention = Retention { days: 90, max_bytes: 64 << 20 };
+const KEEP: Retention = Retention {
+    days: 90,
+    max_bytes: 64 << 20,
+};
 
 // ── sign journal: rate limit and charge window ────────────────────────────────────────────────────
 
@@ -78,7 +83,13 @@ fn attempts() -> impl Strategy<Value = Vec<Attempt>> {
         1 => 0u64..(8 * 60 * MINUTE),
     ];
     prop::collection::vec(
-        (gap, 0..CHARGES, prop::bool::weighted(0.1)).prop_map(|(gap_ms, charge, restart)| Attempt { gap_ms, charge, restart }),
+        (gap, 0..CHARGES, prop::bool::weighted(0.1)).prop_map(|(gap_ms, charge, restart)| {
+            Attempt {
+                gap_ms,
+                charge,
+                restart,
+            }
+        }),
         1..50,
     )
 }
@@ -92,7 +103,11 @@ fn limits() -> impl Strategy<Value = Limits> {
 }
 
 /// Runs `attempts`, returning each one's verdict (`true` = released) and the journal's entries.
-fn run(attempts: &[Attempt], limits: Limits, honour_restarts: bool) -> (Vec<bool>, Vec<JournalEntry>) {
+fn run(
+    attempts: &[Attempt],
+    limits: Limits,
+    honour_restarts: bool,
+) -> (Vec<bool>, Vec<JournalEntry>) {
     let tmp = tempfile::tempdir().unwrap();
     let mut journal = SignJournal::open(tmp.path(), 1, KEEP).unwrap();
     let mut now = T0;
@@ -310,8 +325,12 @@ fn mine() -> impl Strategy<Value = KeyEpochReply> {
 }
 
 fn answers() -> impl Strategy<Value = Vec<(u16, KeyEpochReply)>> {
-    prop::collection::vec(sharing().prop_map(view), 0..4)
-        .prop_map(|v| v.into_iter().enumerate().map(|(i, r)| (i as u16 + 2, r)).collect())
+    prop::collection::vec(sharing().prop_map(view), 0..4).prop_map(|v| {
+        v.into_iter()
+            .enumerate()
+            .map(|(i, r)| (i as u16 + 2, r))
+            .collect()
+    })
 }
 
 proptest! {
@@ -400,8 +419,14 @@ fn fixture() -> &'static Fixture {
     F.get_or_init(|| {
         let pki = pki::TestPki::new();
         let policy = SigningPolicyConfig::default();
-        let verifier =
-            IntentVerifier::new(pki.ca_pem.as_bytes().to_vec(), false, CLUSTER.into(), ["driver".to_string()], &policy).unwrap();
+        let verifier = IntentVerifier::new(
+            pki.ca_pem.as_bytes().to_vec(),
+            false,
+            CLUSTER.into(),
+            ["driver".to_string()],
+            &policy,
+        )
+        .unwrap();
         Fixture {
             driver: pki.signer("driver"),
             skew_ms: policy.clock_skew_secs * 1000,
@@ -411,7 +436,12 @@ fn fixture() -> &'static Fixture {
     })
 }
 
-fn sign_intent(digest: &[u8], request_id: [u8; 16], issued: u64, not_after: u64) -> pb::SignedIntent {
+fn sign_intent(
+    digest: &[u8],
+    request_id: [u8; 16],
+    issued: u64,
+    not_after: u64,
+) -> pb::SignedIntent {
     let intent = pb::SignIntent {
         version: intent::INTENT_VERSION,
         cluster_id: CLUSTER.into(),

@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! frost-ed25519 2.2.0 ("v2", a dev-dependency alias) against the version this crate builds with

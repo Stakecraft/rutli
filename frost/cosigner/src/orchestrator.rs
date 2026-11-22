@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Leader-side coordination of DKG and signing across the peer set. Transport-agnostic: it drives
@@ -7,15 +7,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use frost_ed25519 as frost;
 use frost::round1::SigningCommitments;
 use frost::round2::SignatureShare;
 use frost::Identifier;
+use frost_ed25519 as frost;
 
 use crate::ceremony_record::Phase;
 use crate::node::{CeremonyKind, Node};
-use crate::peer::PeerApi;
 use crate::pb;
+use crate::peer::PeerApi;
 use crate::{DaemonError, Result};
 
 pub type Peers = Vec<Arc<dyn PeerApi>>;
@@ -46,7 +46,11 @@ pub async fn run_dkg(peers: &Peers, key_id: &str) -> Result<[u8; 32]> {
 /// the fence and part 1 to every node, which verifies it itself before it takes the guard. Without
 /// an intent (an older client) the id is random and every node decides whether it accepts that
 /// (`signing_policy.require_ceremony_intent`).
-pub async fn run_dkg_with_intent(peers: &Peers, key_id: &str, intent: Option<pb::SignedIntent>) -> Result<[u8; 32]> {
+pub async fn run_dkg_with_intent(
+    peers: &Peers,
+    key_id: &str,
+    intent: Option<pb::SignedIntent>,
+) -> Result<[u8; 32]> {
     Ok(run_dkg_outcome(peers, key_id, intent).await?.group_key)
 }
 
@@ -62,9 +66,14 @@ pub struct DkgOutcome {
 }
 
 /// [`run_dkg_with_intent`], saying whether the key already existed (`DkgReply.existing`).
-pub async fn run_dkg_outcome(peers: &Peers, key_id: &str, intent: Option<pb::SignedIntent>) -> Result<DkgOutcome> {
+pub async fn run_dkg_outcome(
+    peers: &Peers,
+    key_id: &str,
+    intent: Option<pb::SignedIntent>,
+) -> Result<DkgOutcome> {
     let (peers, key_id) = (peers.clone(), key_id.to_owned());
-    crate::ceremony::detach(async move { run_dkg_attached(&peers, &key_id, intent.as_ref()).await }).await
+    crate::ceremony::detach(async move { run_dkg_attached(&peers, &key_id, intent.as_ref()).await })
+        .await
 }
 
 /// The ceremony id for a ceremony of `kind` led for `intent` (its own id), or a random one.
@@ -75,7 +84,11 @@ fn ceremony_id(kind: CeremonyKind, intent: Option<&pb::SignedIntent>) -> Result<
     }
 }
 
-async fn run_dkg_attached(peers: &Peers, key_id: &str, intent: Option<&pb::SignedIntent>) -> Result<DkgOutcome> {
+async fn run_dkg_attached(
+    peers: &Peers,
+    key_id: &str,
+    intent: Option<&pb::SignedIntent>,
+) -> Result<DkgOutcome> {
     // Every peer refuses too (fence and part 1); this just answers before touching the mesh.
     if crate::share_delivery::is_reserved_for_import(key_id) {
         return Err(DaemonError::ReservedKeyId(key_id.to_string()));
@@ -83,13 +96,21 @@ async fn run_dkg_attached(peers: &Peers, key_id: &str, intent: Option<&pb::Signe
     require_ceremony_protocol(peers).await?;
     let views = key_views(peers, key_id).await?;
     if let Some(existing) = dkg_preflight(peers, key_id, &views).await? {
-        return Ok(DkgOutcome { group_key: existing, existing: true, ceremony_id: None });
+        return Ok(DkgOutcome {
+            group_key: existing,
+            existing: true,
+            ceremony_id: None,
+        });
     }
     let dkg_id = ceremony_id(CeremonyKind::Dkg, intent)?;
     fence_all(peers, &dkg_id, key_id, CeremonyKind::Dkg, None, intent).await?;
     let staged = ceremony_stage(peers, &dkg_id, key_id, CeremonyKind::Dkg, intent).await;
     let group_key = finish_ceremony(peers, &dkg_id, key_id, staged).await?;
-    Ok(DkgOutcome { group_key, existing: false, ceremony_id: Some(dkg_id) })
+    Ok(DkgOutcome {
+        group_key,
+        existing: false,
+        ceremony_id: Some(dkg_id),
+    })
 }
 
 /// Parts 1–3 of a DKG or refresh (ceremony protocol 2): every node ends with a staged share and a
@@ -102,13 +123,19 @@ async fn ceremony_stage(
     kind: CeremonyKind,
     intent: Option<&pb::SignedIntent>,
 ) -> Result<[u8; 32]> {
-    let mut roster =
-        peers.iter().map(|p| crate::hosted::identifier_index(p.identifier())).collect::<Result<Vec<_>>>()?;
+    let mut roster = peers
+        .iter()
+        .map(|p| crate::hosted::identifier_index(p.identifier()))
+        .collect::<Result<Vec<_>>>()?;
     roster.sort_unstable();
     // Part 1: every node commits; the leader collects the (public) round-1 packages.
     let mut round1_map = BTreeMap::new();
     for p in peers {
-        round1_map.insert(p.identifier(), p.ceremony_part1(ceremony_id, key_id, kind, &roster, intent).await?);
+        round1_map.insert(
+            p.identifier(),
+            p.ceremony_part1(ceremony_id, key_id, kind, &roster, intent)
+                .await?,
+        );
     }
     // Part 2: every node checks the map, then delivers its round-2 packages to their recipients
     // itself. The leader learns only each node's digest of the map. Equal digests are checked here
@@ -124,9 +151,14 @@ async fn ceremony_stage(
                 out.delivered
             )));
         }
-        agree(&mut digest, out.round1_digest, "nodes computed different round-1 digests")?;
+        agree(
+            &mut digest,
+            out.round1_digest,
+            "nodes computed different round-1 digests",
+        )?;
     }
-    let digest = digest.ok_or_else(|| DaemonError::Config("no peers configured for the ceremony".into()))?;
+    let digest =
+        digest.ok_or_else(|| DaemonError::Config("no peers configured for the ceremony".into()))?;
     // Part 3: each node checks every delivery against its own digest, stages and votes yes.
     let mut outcome: Option<crate::node::StagedOutcome> = None;
     for p in peers {
@@ -142,7 +174,9 @@ async fn ceremony_stage(
             _ => {}
         }
     }
-    outcome.map(|o| o.group_key).ok_or_else(|| DaemonError::Config("no peers configured for the ceremony".into()))
+    outcome
+        .map(|o| o.group_key)
+        .ok_or_else(|| DaemonError::Config("no peers configured for the ceremony".into()))
 }
 
 /// Refuse to start a ceremony unless every roster node speaks ceremony protocol 2 — so a cluster in
@@ -186,15 +220,30 @@ pub async fn run_refresh_with_intent(
     intent: Option<pb::SignedIntent>,
 ) -> Result<[u8; 32]> {
     let (peers, key_id) = (peers.clone(), key_id.to_owned());
-    crate::ceremony::detach(async move { run_refresh_attached(&peers, &key_id, intent.as_ref()).await }).await
+    crate::ceremony::detach(
+        async move { run_refresh_attached(&peers, &key_id, intent.as_ref()).await },
+    )
+    .await
 }
 
-async fn run_refresh_attached(peers: &Peers, key_id: &str, intent: Option<&pb::SignedIntent>) -> Result<[u8; 32]> {
+async fn run_refresh_attached(
+    peers: &Peers,
+    key_id: &str,
+    intent: Option<&pb::SignedIntent>,
+) -> Result<[u8; 32]> {
     require_ceremony_protocol(peers).await?;
     let views = key_views(peers, key_id).await?;
     let expect = refresh_preflight(peers, key_id, &views).await?;
     let refresh_id = ceremony_id(CeremonyKind::Refresh, intent)?;
-    fence_all(peers, &refresh_id, key_id, CeremonyKind::Refresh, Some(expect), intent).await?;
+    fence_all(
+        peers,
+        &refresh_id,
+        key_id,
+        CeremonyKind::Refresh,
+        Some(expect),
+        intent,
+    )
+    .await?;
     let staged = ceremony_stage(peers, &refresh_id, key_id, CeremonyKind::Refresh, intent).await;
     finish_ceremony(peers, &refresh_id, key_id, staged).await
 }
@@ -218,9 +267,9 @@ async fn key_views(peers: &Peers, key_id: &str) -> Result<Vec<(u16, crate::pb::K
             Ok(v) => views.push((id, v)),
             Err(e) => {
                 return Err(DaemonError::NotServing(format!(
-                    "cosigner {id} cannot report its state for {key_id} ({e}) — a DKG/refresh needs \
+                "cosigner {id} cannot report its state for {key_id} ({e}) — a DKG/refresh needs \
                      every node"
-                )))
+            )))
             }
         }
     }
@@ -229,9 +278,16 @@ async fn key_views(peers: &Peers, key_id: &str) -> Result<Vec<(u16, crate::pb::K
 
 /// Ask every node holding a STAGED ceremony for `key_id` to resolve it now, then answer
 /// UNAVAILABLE: the caller retries once it has settled.
-async fn resolving(peers: &Peers, key_id: &str, views: &[(u16, crate::pb::KeyEpochReply)]) -> DaemonError {
-    let ids: std::collections::BTreeSet<&str> =
-        views.iter().filter(|(_, v)| v.staged).map(|(_, v)| v.staged_ceremony_id.as_str()).collect();
+async fn resolving(
+    peers: &Peers,
+    key_id: &str,
+    views: &[(u16, crate::pb::KeyEpochReply)],
+) -> DaemonError {
+    let ids: std::collections::BTreeSet<&str> = views
+        .iter()
+        .filter(|(_, v)| v.staged)
+        .map(|(_, v)| v.staged_ceremony_id.as_str())
+        .collect();
     for id in &ids {
         for p in peers {
             let _ = p.ceremony_commit(id).await;
@@ -252,7 +308,11 @@ async fn dkg_preflight(
     if views.iter().any(|(_, v)| v.staged) {
         return Err(resolving(peers, key_id, views).await);
     }
-    let holders: Vec<u16> = views.iter().filter(|(_, v)| v.present).map(|(id, _)| *id).collect();
+    let holders: Vec<u16> = views
+        .iter()
+        .filter(|(_, v)| v.present)
+        .map(|(id, _)| *id)
+        .collect();
     if holders.is_empty() {
         return Ok(None);
     }
@@ -271,10 +331,14 @@ async fn dkg_preflight(
     }
     // `holders` is not empty, so neither is `views`; checked anyway, no panic in a preflight.
     let Some((_, first)) = views.first() else {
-        return Err(DaemonError::CeremonyRefused(format!("no cosigner answered for {key_id}")));
+        return Err(DaemonError::CeremonyRefused(format!(
+            "no cosigner answered for {key_id}"
+        )));
     };
     let same = views.iter().all(|(_, v)| {
-        v.epoch == first.epoch && v.pkp_digest == first.pkp_digest && v.group_verifying_key == first.group_verifying_key
+        v.epoch == first.epoch
+            && v.pkp_digest == first.pkp_digest
+            && v.group_verifying_key == first.group_verifying_key
     });
     if !same {
         return Err(DaemonError::CeremonyRefused(format!(
@@ -287,7 +351,11 @@ async fn dkg_preflight(
         .as_slice()
         .try_into()
         .map_err(|_| DaemonError::Disagreement("group key not 32 bytes".into()))?;
-    tracing::info!(key_id, epoch = first.epoch, "DKG retry for a committed key: returning it");
+    tracing::info!(
+        key_id,
+        epoch = first.epoch,
+        "DKG retry for a committed key: returning it"
+    );
     Ok(Some(gk))
 }
 
@@ -302,7 +370,9 @@ async fn refresh_preflight(
         return Err(resolving(peers, key_id, views).await);
     }
     if let Some((id, _)) = views.iter().find(|(_, v)| !v.present) {
-        return Err(DaemonError::UnknownKey(format!("{key_id} (absent on cosigner {id})")));
+        return Err(DaemonError::UnknownKey(format!(
+            "{key_id} (absent on cosigner {id})"
+        )));
     }
     if let Some((id, v)) = views.iter().find(|(_, v)| v.origin == "hosted") {
         return Err(DaemonError::CeremonyRefused(format!(
@@ -311,9 +381,14 @@ async fn refresh_preflight(
         )));
     }
     let Some((first_id, first)) = views.first() else {
-        return Err(DaemonError::CeremonyRefused(format!("no cosigner answered for {key_id}")));
+        return Err(DaemonError::CeremonyRefused(format!(
+            "no cosigner answered for {key_id}"
+        )));
     };
-    if let Some((id, v)) = views.iter().find(|(_, v)| v.epoch != first.epoch || v.pkp_digest != first.pkp_digest) {
+    if let Some((id, v)) = views
+        .iter()
+        .find(|(_, v)| v.epoch != first.epoch || v.pkp_digest != first.pkp_digest)
+    {
         return Err(DaemonError::CeremonyRefused(format!(
             "refusing to refresh {key_id}: cosigner {id} is on epoch {} but cosigner {} is on epoch {} \
              (or their sharings differ) — the nodes must hold one sharing (verify-key shows which)",
@@ -331,7 +406,12 @@ async fn refresh_preflight(
 /// After the staging phase: on success, drive the commit; on failure, abort every in-memory
 /// session (a STAGED vote is untouched by that), let every STAGED node resolve on its peers'
 /// evidence, release the fences, and return the error.
-async fn finish_ceremony(peers: &Peers, ceremony_id: &str, key_id: &str, staged: Result<[u8; 32]>) -> Result<[u8; 32]> {
+async fn finish_ceremony(
+    peers: &Peers,
+    ceremony_id: &str,
+    key_id: &str,
+    staged: Result<[u8; 32]>,
+) -> Result<[u8; 32]> {
     match staged {
         Ok(group_key) => {
             commit_everywhere(peers, ceremony_id, key_id).await?;
@@ -444,7 +524,12 @@ pub const SIGN_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 /// Every step that may read this node's key store runs on the blocking pool ([`Node::blocking`];
 /// the [`PeerApi`] calls do the same on their side), so a stalled volume parks a blocking thread,
 /// never an async worker.
-pub async fn sign(node: &Arc<Node>, peers: &Peers, key_id: &str, message: &[u8]) -> Result<[u8; 64]> {
+pub async fn sign(
+    node: &Arc<Node>,
+    peers: &Peers,
+    key_id: &str,
+    message: &[u8],
+) -> Result<[u8; 64]> {
     sign_with_intent(node, peers, key_id, message, None).await
 }
 
@@ -544,8 +629,14 @@ pub async fn sign_within(
                 // The trial's front copy, already tried or skipped: the subset keeps its own place.
                 continue;
             }
-            let members: Vec<&Arc<dyn PeerApi>> = subset.iter().filter_map(|&i| ordered.get(i).copied()).collect();
-            if members.iter().any(|p| excluded.contains_key(&p.identifier()) || busy.contains(&p.identifier())) {
+            let members: Vec<&Arc<dyn PeerApi>> = subset
+                .iter()
+                .filter_map(|&i| ordered.get(i).copied())
+                .collect();
+            if members
+                .iter()
+                .any(|p| excluded.contains_key(&p.identifier()) || busy.contains(&p.identifier()))
+            {
                 continue;
             }
             if attempts >= max_attempts {
@@ -570,13 +661,23 @@ pub async fn sign_within(
             if attempts > 1 {
                 metrics::counter!(crate::metrics::SIGN_RETRIES).increment(1);
             }
-            let ctx =
-                crate::node::Round1Ctx { leader_view: Some(me.view), intent: intent.cloned(), ..Default::default() };
+            let ctx = crate::node::Round1Ctx {
+                leader_view: Some(me.view),
+                intent: intent.cloned(),
+                ..Default::default()
+            };
             // The last attempt keeps no reserve for a further subset.
             let reserve = attempts < max_attempts;
-            let result =
-                attempt(node, &members, key_id, message, &ctx, &clock.for_attempt(reserve), &mut taken.reached)
-                    .await;
+            let result = attempt(
+                node,
+                &members,
+                key_id,
+                message,
+                &ctx,
+                &clock.for_attempt(reserve),
+                &mut taken.reached,
+            )
+            .await;
             taken.settle();
             match result {
                 Ok(signature) => return Ok(signature),
@@ -629,7 +730,14 @@ pub async fn sign_within(
         break;
     }
     let usable = ordered.len().saturating_sub(excluded.len());
-    tracing::warn!(key_id, attempts, ?excluded, ?busy, out_of_time, "sign gave up: no t-subset of cosigners could sign");
+    tracing::warn!(
+        key_id,
+        attempts,
+        ?excluded,
+        ?busy,
+        out_of_time,
+        "sign gave up: no t-subset of cosigners could sign"
+    );
     if let Some(refusal) = policy_refusal {
         return Err(refusal);
     }
@@ -650,7 +758,10 @@ pub async fn sign_within(
         usable,
         attempts,
         // A member whose roster number cannot be computed is left out, never reported as peer 0.
-        excluded: excluded.keys().filter_map(|id| crate::hosted::identifier_index(*id).ok()).collect(),
+        excluded: excluded
+            .keys()
+            .filter_map(|id| crate::hosted::identifier_index(*id).ok())
+            .collect(),
         out_of_time,
     })
 }
@@ -679,7 +790,10 @@ impl SignClock {
     fn start(timing: &crate::peer::Liveness, client: Option<std::time::Duration>) -> Result<Self> {
         if let Some(left) = client {
             if left < timing.round_reserve {
-                return Err(DaemonError::ClientDeadline { left, needed: timing.round_reserve });
+                return Err(DaemonError::ClientDeadline {
+                    left,
+                    needed: timing.round_reserve,
+                });
             }
         }
         Ok(Self {
@@ -695,7 +809,10 @@ impl SignClock {
 
     /// This clock for one attempt: its rounds keep the reserve only if another attempt may follow.
     fn for_attempt(&self, reserve: bool) -> Self {
-        Self { keep_reserve: reserve, ..*self }
+        Self {
+            keep_reserve: reserve,
+            ..*self
+        }
     }
 
     fn elapsed(&self) -> std::time::Duration {
@@ -714,7 +831,11 @@ impl SignClock {
     /// The deadline of a round whose own bound is `cap`: min(cap, time left − reserve), the reserve
     /// kept for a further subset only when one may follow; `None` when no time is left.
     fn round(&self, cap: std::time::Duration) -> Option<std::time::Duration> {
-        let keep = if self.keep_reserve { self.reserve } else { std::time::Duration::ZERO };
+        let keep = if self.keep_reserve {
+            self.reserve
+        } else {
+            std::time::Duration::ZERO
+        };
         let d = cap.min(self.left().saturating_sub(keep));
         (!d.is_zero()).then_some(d)
     }
@@ -725,11 +846,21 @@ impl SignClock {
 /// refuses here. Each unreachable peer is asked once more (its probe joined or started, a probe
 /// younger than [`crate::peer::PROBE_FRESH`] reused), all together within
 /// [`crate::peer::QUORUM_PROBE_WAIT`].
-async fn visible_quorum(peers: &Peers, threshold: usize, timing: &crate::peer::Liveness, key_id: &str) -> Result<()> {
+async fn visible_quorum(
+    peers: &Peers,
+    threshold: usize,
+    timing: &crate::peer::Liveness,
+    key_id: &str,
+) -> Result<()> {
     // Unreachable peers, and peers whose round deadline is being judged right now (their probe is
     // joined, not doubled).
-    let unreachable: Vec<&Arc<dyn PeerApi>> =
-        peers.iter().filter(|p| p.health().is_some_and(|h| h.is_unreachable() || h.is_suspect())).collect();
+    let unreachable: Vec<&Arc<dyn PeerApi>> = peers
+        .iter()
+        .filter(|p| {
+            p.health()
+                .is_some_and(|h| h.is_unreachable() || h.is_suspect())
+        })
+        .collect();
     // Nothing known unreachable: whatever is missing is not a reachability question (a roster
     // smaller than `t` gives up after trying, as before).
     if unreachable.is_empty() || peers.len() - unreachable.len() >= threshold {
@@ -754,8 +885,18 @@ async fn visible_quorum(peers: &Peers, threshold: usize, timing: &crate::peer::L
         return Ok(());
     }
     fast_refusal("no-quorum");
-    tracing::warn!(key_id, visible, needed = threshold, ?missing, "sign refused: too few cosigners reachable from this leader");
-    Err(DaemonError::NoQuorum { needed: threshold, visible, missing })
+    tracing::warn!(
+        key_id,
+        visible,
+        needed = threshold,
+        ?missing,
+        "sign refused: too few cosigners reachable from this leader"
+    );
+    Err(DaemonError::NoQuorum {
+        needed: threshold,
+        visible,
+        missing,
+    })
 }
 
 /// The tier of one candidate member: this node and peers that keep no health are always up.
@@ -781,7 +922,11 @@ fn take_trial(p: &Arc<dyn PeerApi>) -> Option<HeldTrial> {
 }
 
 /// A trial taken for one attempt: its peer, the peer's health, the taking.
-type HeldTrial = (Identifier, Arc<crate::liveness::PeerHealth>, crate::liveness::TrialTaken);
+type HeldTrial = (
+    Identifier,
+    Arc<crate::liveness::PeerHealth>,
+    crate::liveness::TrialTaken,
+);
 
 /// The trial one signature took, given back ([`crate::liveness::PeerHealth::release_trial`]) when
 /// the attempt it was taken for ends, or the signature is dropped, without having sent its peer a
@@ -815,7 +960,9 @@ impl Drop for TakenTrial {
 /// driver call), or `None`.
 fn request_id_of(intent: &crate::pb::SignedIntent) -> Option<Vec<u8>> {
     use prost::Message;
-    crate::pb::SignIntent::decode(intent.intent.as_slice()).ok().map(|i| i.request_id)
+    crate::pb::SignIntent::decode(intent.intent.as_slice())
+        .ok()
+        .map(|i| i.request_id)
 }
 
 /// The order subsets are formed over, before the liveness sort: this leader first, then the other
@@ -857,7 +1004,10 @@ pub fn partner_offset(request_id: &[u8], others: usize) -> usize {
     if request_id.is_empty() || others == 0 {
         return 0;
     }
-    let digest = Sha256::new().chain_update(b"rutli/sign-partners/v1").chain_update(request_id).finalize();
+    let digest = Sha256::new()
+        .chain_update(b"rutli/sign-partners/v1")
+        .chain_update(request_id)
+        .finalize();
     let mut head = [0u8; 8];
     head.copy_from_slice(digest.get(..8).unwrap_or(&[0u8; 8]));
     // `others` is a roster size (at most u16::MAX), so it fits a u64 and the remainder fits a usize.
@@ -881,7 +1031,11 @@ pub fn order_subsets(
     subsets.sort_by_key(|s| s.iter().map(|&i| tier(i)).max());
     if let Some(t) = trial {
         let others = |s: &[usize]| s.iter().filter(|&&i| i != t).map(|&i| tier(i)).max();
-        let front = subsets.iter().enumerate().filter(|(_, s)| s.contains(&t)).min_by_key(|(pos, s)| (others(s), *pos));
+        let front = subsets
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.contains(&t))
+            .min_by_key(|(pos, s)| (others(s), *pos));
         if let Some(s) = front.map(|(_, s)| s.clone()) {
             subsets.insert(0, s);
         }
@@ -904,7 +1058,10 @@ fn is_sessions_full(e: &DaemonError) -> bool {
 
 /// A member refused for the signing policy (audit C2) rather than for being unable to sign.
 fn is_policy_refusal(e: &DaemonError) -> bool {
-    matches!(e, DaemonError::PolicyRefused(_) | DaemonError::RateLimited(_))
+    matches!(
+        e,
+        DaemonError::PolicyRefused(_) | DaemonError::RateLimited(_)
+    )
 }
 
 fn clone_policy_refusal(e: &DaemonError) -> DaemonError {
@@ -964,12 +1121,20 @@ async fn attempt(
         members = ?members.iter().map(|p| p.identifier()).collect::<Vec<_>>(),
         "sign attempt: one session id per member"
     );
-    let mut open = OpenSessions { key_id: key_id.to_owned(), opened: Vec::new(), abort_deadline: clock.abort };
+    let mut open = OpenSessions {
+        key_id: key_id.to_owned(),
+        opened: Vec::new(),
+        abort_deadline: clock.abort,
+    };
     let mut signers = Vec::with_capacity(members.len());
     for p in members {
         signers.push(crate::hosted::identifier_index(p.identifier()).map_err(Attempt::Fatal)?);
     }
-    let ctx = &crate::node::Round1Ctx { message: Some(message.to_vec()), signers: Some(signers), ..base.clone() };
+    let ctx = &crate::node::Round1Ctx {
+        message: Some(message.to_vec()),
+        signers: Some(signers),
+        ..base.clone()
+    };
     let mut commitments: BTreeMap<Identifier, SigningCommitments> = BTreeMap::new();
     // `sessions` has one id per member (built from `members` above), so the zip drops nothing.
     for (p, session) in members.iter().zip(&sessions) {
@@ -1006,7 +1171,16 @@ async fn attempt(
             return Err(Attempt::OutOfTime);
         };
         let started = tokio::time::Instant::now();
-        let answer = p.sign_round2_within(key_id, session, message, &commitments, intent_digest.as_ref(), deadline).await;
+        let answer = p
+            .sign_round2_within(
+                key_id,
+                session,
+                message,
+                &commitments,
+                intent_digest.as_ref(),
+                deadline,
+            )
+            .await;
         if p.is_local() {
             metrics::histogram!(crate::metrics::PEER_CALL_DURATION, "call" => "local_share")
                 .record(started.elapsed().as_secs_f64());
@@ -1032,14 +1206,18 @@ async fn attempt(
     // Every member answered round 2: every session is burned, nothing is left to abort.
     open.opened.clear();
     let (k, m) = (key_id.to_owned(), message.to_vec());
-    match node.blocking(move |n| n.aggregate(&k, &m, &commitments, &shares)).await {
+    match node
+        .blocking(move |n| n.aggregate(&k, &m, &commitments, &shares))
+        .await
+    {
         Ok(signature) => Ok(signature),
         Err(e) => {
             let blamed = culprits(&e);
             if blamed.is_empty() {
                 return Err(Attempt::Fatal(e));
             }
-            metrics::counter!(crate::metrics::INVALID_SIGNATURE_SHARES).increment(blamed.len() as u64);
+            metrics::counter!(crate::metrics::INVALID_SIGNATURE_SHARES)
+                .increment(blamed.len() as u64);
             tracing::error!(key_id, peers = ?blamed, error = %e, "cosigner(s) returned an invalid signature share");
             // One error per blamed member (DaemonError is not Clone): each names only that member.
             Err(Attempt::Members(
@@ -1058,7 +1236,9 @@ async fn attempt(
 /// The cosigners frost's cheater detection blames for a failed aggregation (empty if none).
 fn culprits(e: &DaemonError) -> Vec<Identifier> {
     match e {
-        DaemonError::Core(rutli_frost_core::CoreError::Frost(f)) | DaemonError::Frost(f) => f.culprits(),
+        DaemonError::Core(rutli_frost_core::CoreError::Frost(f)) | DaemonError::Frost(f) => {
+            f.culprits()
+        }
         _ => Vec::new(),
     }
 }
@@ -1079,7 +1259,11 @@ fn quorum_elsewhere(
 /// Best-effort: if this node has a ceremony for `key_id` staged (it may be the one node that has
 /// not committed yet), ask its resolver to settle it now instead of at the next pass.
 fn nudge_resolver(node: &Arc<Node>, key_id: &str) {
-    for rec in node.staged_records().into_iter().filter(|r| r.key_id == key_id) {
+    for rec in node
+        .staged_records()
+        .into_iter()
+        .filter(|r| r.key_id == key_id)
+    {
         let node = node.clone();
         tokio::spawn(async move {
             let _ = crate::ceremony::resolve(&node, &rec.ceremony_id).await;
@@ -1139,21 +1323,43 @@ pub async fn ceremony_sign_test(
             "a sign-test quorum is exactly {threshold} distinct cosigners, got {signers:?}"
         )));
     }
-    let quorum: Vec<&Arc<dyn PeerApi>> =
-        peers.iter().filter(|p| wanted.contains(&p.identifier())).collect();
+    let quorum: Vec<&Arc<dyn PeerApi>> = peers
+        .iter()
+        .filter(|p| wanted.contains(&p.identifier()))
+        .collect();
     if quorum.len() != wanted.len() {
-        return Err(DaemonError::Ceremony(format!("{signers:?} are not all in this node's roster")));
+        return Err(DaemonError::Ceremony(format!(
+            "{signers:?} are not all in this node's roster"
+        )));
     }
 
     // One attempt over exactly this quorum, with the leader's sharing like any sign. No intent: each
     // member accepts a sign-test round only for its own test digest of the key.
-    let ctx = crate::node::Round1Ctx { leader_view: Some(view.view), sign_test: true, ..Default::default() };
+    let ctx = crate::node::Round1Ctx {
+        leader_view: Some(view.view),
+        sign_test: true,
+        ..Default::default()
+    };
     let clock = SignClock::start(node.liveness(), None)?;
-    match attempt(node, &quorum, key_id, &message, &ctx, &clock.for_attempt(false), &mut BTreeSet::new()).await {
+    match attempt(
+        node,
+        &quorum,
+        key_id,
+        &message,
+        &ctx,
+        &clock.for_attempt(false),
+        &mut BTreeSet::new(),
+    )
+    .await
+    {
         Ok(signature) => Ok((message, signature)),
         Err(Attempt::Fatal(e) | Attempt::Leader(e)) => Err(e),
-        Err(Attempt::OutOfTime) => Err(DaemonError::NotServing(format!("sign test for {key_id} ran out of time"))),
-        Err(Attempt::Members(mut failed)) => Err(failed.pop().map(|(_, e)| e).expect("one member error")),
+        Err(Attempt::OutOfTime) => Err(DaemonError::NotServing(format!(
+            "sign test for {key_id} ran out of time"
+        ))),
+        Err(Attempt::Members(mut failed)) => {
+            Err(failed.pop().map(|(_, e)| e).expect("one member error"))
+        }
     }
 }
 
@@ -1178,17 +1384,22 @@ impl OpenSessions {
         if self.opened.is_empty() {
             return;
         }
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
         metrics::counter!(crate::metrics::SIGN_ABORTS).increment(1);
-        let (gone, rest): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut self.opened).into_iter().partition(|(p, _)| Some(p.identifier()) == failed);
+        let (gone, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.opened)
+            .into_iter()
+            .partition(|(p, _)| Some(p.identifier()) == failed);
         let (key_id, deadline) = (self.key_id.clone(), self.abort_deadline);
         if !gone.is_empty() {
             let key_id = key_id.clone();
             runtime.spawn(async move { abort_sign(gone, &key_id, deadline).await });
         }
         if !rest.is_empty() {
-            let _ = runtime.spawn(async move { abort_sign(rest, &key_id, deadline).await }).await;
+            let _ = runtime
+                .spawn(async move { abort_sign(rest, &key_id, deadline).await })
+                .await;
         }
     }
 }
@@ -1201,7 +1412,11 @@ impl Drop for OpenSessions {
         tracing::debug!(key_id = %self.key_id, sessions = self.opened.len(), "sign attempt dropped before it finished; aborting its sessions");
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             metrics::counter!(crate::metrics::SIGN_ABORTS).increment(1);
-            let (opened, key_id, deadline) = (std::mem::take(&mut self.opened), self.key_id.clone(), self.abort_deadline);
+            let (opened, key_id, deadline) = (
+                std::mem::take(&mut self.opened),
+                self.key_id.clone(),
+                self.abort_deadline,
+            );
             runtime.spawn(async move { abort_sign(opened, &key_id, deadline).await });
         }
     }
@@ -1211,7 +1426,11 @@ impl Drop for OpenSessions {
 /// instead of at the pending-TTL sweep — all members at once, each within `deadline`. Errors are
 /// swallowed — abort is a courtesy, and the per-session TTL is the correctness backstop. Aborting a
 /// session a peer already completed (round-2 done) is a harmless no-op.
-async fn abort_sign(opened: Vec<(Arc<dyn PeerApi>, String)>, key_id: &str, deadline: std::time::Duration) {
+async fn abort_sign(
+    opened: Vec<(Arc<dyn PeerApi>, String)>,
+    key_id: &str,
+    deadline: std::time::Duration,
+) {
     let mut asked = tokio::task::JoinSet::new();
     for (p, session_id) in opened {
         let key_id = key_id.to_owned();
@@ -1249,9 +1468,15 @@ async fn fence_all(
     intent: Option<&pb::SignedIntent>,
 ) -> Result<()> {
     let mut fenced: Vec<&Arc<dyn PeerApi>> = Vec::new();
-    let own_node_first = peers.iter().filter(|p| p.is_local()).chain(peers.iter().filter(|p| !p.is_local()));
+    let own_node_first = peers
+        .iter()
+        .filter(|p| p.is_local())
+        .chain(peers.iter().filter(|p| !p.is_local()));
     for p in own_node_first {
-        match p.ceremony_begin(ceremony_id, key_id, kind, expect, intent).await {
+        match p
+            .ceremony_begin(ceremony_id, key_id, kind, expect, intent)
+            .await
+        {
             Ok(()) => fenced.push(p),
             Err(e) => {
                 for q in &fenced {
@@ -1400,7 +1625,10 @@ pub async fn generate_hosted_key_with_intent(
         .chain(peers.iter().filter(|p| p.identifier() != node.identifier));
     for p in own_first {
         let own = p.identifier() == node.identifier;
-        match p.genkey_fence(&ceremony_id, key_id, spec.as_str(), intent).await {
+        match p
+            .genkey_fence(&ceremony_id, key_id, spec.as_str(), intent)
+            .await
+        {
             Ok(()) => {
                 fenced.push(p);
                 reachable.push(p);
@@ -1416,12 +1644,23 @@ pub async fn generate_hosted_key_with_intent(
     }
     if reachable.len() < write_quorum {
         release_fences(&fenced, &ceremony_id, key_id).await;
-        return Err(DaemonError::ThresholdNotMet { needed: write_quorum, got: reachable.len() });
+        return Err(DaemonError::ThresholdNotMet {
+            needed: write_quorum,
+            got: reachable.len(),
+        });
     }
 
     let fenced_ids: Vec<Identifier> = fenced.iter().map(|p| p.identifier()).collect();
-    let outcome =
-        generate_hosted_fenced(node, peers, key_id, spec, write_quorum, &ceremony_id, &fenced_ids).await;
+    let outcome = generate_hosted_fenced(
+        node,
+        peers,
+        key_id,
+        spec,
+        write_quorum,
+        &ceremony_id,
+        &fenced_ids,
+    )
+    .await;
     release_fences(&fenced, &ceremony_id, key_id).await;
     outcome
 }
@@ -1477,7 +1716,8 @@ async fn ensure_every_peer_supports(
         if p.identifier() == node.identifier {
             continue;
         }
-        let who = crate::hosted::identifier_index(p.identifier()).map(|i| format!("cosigner {i}"))?;
+        let who =
+            crate::hosted::identifier_index(p.identifier()).map(|i| format!("cosigner {i}"))?;
         let problem = match p.hosted_specs().await {
             Ok(specs) if specs.iter().any(|s| s == spec.as_str()) => continue,
             Ok(_) => format!("{who} does not support it"),
@@ -1509,7 +1749,8 @@ async fn generate_hosted_fenced(
     // (cheap, needs the keystore) and the keygen off-runtime.
     let existing = {
         let key_id = key_id.to_owned();
-        node.blocking(move |n| n.hosted_existing(&key_id, spec)).await?
+        node.blocking(move |n| n.hosted_existing(&key_id, spec))
+            .await?
     };
     let (key, created) = match existing {
         Some(existing) => (existing, false),
@@ -1530,7 +1771,11 @@ async fn generate_hosted_fenced(
             }
         },
     };
-    let public_der = if spec.is_asymmetric() { key.public_key_der()? } else { Vec::new() };
+    let public_der = if spec.is_asymmetric() {
+        key.public_key_der()?
+    } else {
+        Vec::new()
+    };
 
     // Replicate to every other peer, wrapping per recipient. The leader counts itself: it holds
     // the key already, or writes it once the peers' replicas make the quorum.
@@ -1570,13 +1815,17 @@ async fn generate_hosted_fenced(
         );
         return Err(DaemonError::HostedConflict {
             key_id: key_id.to_string(),
-            detail: format!("{who} holds different material ({e}); the generation was aborted and rolled back"),
+            detail: format!(
+                "{who} holds different material ({e}); the generation was aborted and rolled back"
+            ),
         });
     }
 
     // A peer holding a tombstone for the id (audit M2) means the id was deleted: generating it
     // again needs the tombstone cleared on EVERY node first, so one refusal stops the generation.
-    let tombstoned_somewhere = failures.iter().any(|e| e.to_string().contains("is tombstoned"));
+    let tombstoned_somewhere = failures
+        .iter()
+        .any(|e| e.to_string().contains("is tombstoned"));
     if replicas < write_quorum || tombstoned_somewhere {
         // Below quorum the key is not durable enough to hand out: a single node holding the only
         // copy is exactly the failure this feature exists to prevent. Roll back so the id stays
@@ -1585,11 +1834,17 @@ async fn generate_hosted_fenced(
         if tombstoned_somewhere {
             return Err(crate::node::tombstoned(key_id));
         }
-        return Err(DaemonError::ThresholdNotMet { needed: write_quorum, got: replicas });
+        return Err(DaemonError::ThresholdNotMet {
+            needed: write_quorum,
+            got: replicas,
+        });
     }
     if created {
         let (id, stored, ceremony) = (key_id.to_owned(), key.clone(), ceremony_id.to_owned());
-        if let Err(e) = node.blocking(move |n| n.hosted_store_for(&id, &stored, Some(&ceremony))).await {
+        if let Err(e) = node
+            .blocking(move |n| n.hosted_store_for(&id, &stored, Some(&ceremony)))
+            .await
+        {
             rollback_generation(peers, fenced, ceremony_id, key_id).await;
             return Err(e);
         }
@@ -1608,7 +1863,12 @@ async fn generate_hosted_fenced(
 /// Roll an aborted generation back on every node it fenced: each removes only a key it created in
 /// this generation, while the fence is still held. A node the purge does not reach may keep that
 /// copy: logged with the node and the key, and counted (`rutli_hosted_rollback_incomplete_total`).
-async fn rollback_generation(peers: &Peers, fenced: &[Identifier], ceremony_id: &str, key_id: &str) {
+async fn rollback_generation(
+    peers: &Peers,
+    fenced: &[Identifier],
+    ceremony_id: &str,
+    key_id: &str,
+) {
     for p in peers.iter().filter(|p| fenced.contains(&p.identifier())) {
         if let Err(e) = p.purge_key(ceremony_id, key_id).await {
             metrics::counter!(crate::metrics::HOSTED_ROLLBACK_INCOMPLETE).increment(1);
@@ -1659,7 +1919,10 @@ async fn replicate_to(
     if commitment != node.hosted_commitment(key)? {
         return Err(DaemonError::HostedConflict {
             key_id: key_id.to_string(),
-            detail: format!("{} answered with a commitment to different material", peer_label(peer.identifier())),
+            detail: format!(
+                "{} answered with a commitment to different material",
+                peer_label(peer.identifier())
+            ),
         });
     }
     Ok(())
@@ -1773,15 +2036,26 @@ pub async fn delete_hosted_key(
             }
             return Ok((deleted_anywhere, tombstones));
         }
-        return Err(refusal.unwrap_or(DaemonError::ThresholdNotMet { needed: peers.len(), got: tombstones + nothing_here }));
+        return Err(refusal.unwrap_or(DaemonError::ThresholdNotMet {
+            needed: peers.len(),
+            got: tombstones + nothing_here,
+        }));
     }
     if tombstones < write_quorum {
         // A node's refusal (an invalid intent, a role it does not grant) is the answer, not "too
         // few nodes"; tombstones already written stay and propagate.
-        return Err(refusal.unwrap_or(DaemonError::ThresholdNotMet { needed: write_quorum, got: tombstones }));
+        return Err(refusal.unwrap_or(DaemonError::ThresholdNotMet {
+            needed: write_quorum,
+            got: tombstones,
+        }));
     }
     if tombstones < peers.len() {
-        tracing::warn!(key_id, tombstones, expected = peers.len(), "hosted key delete reached only some nodes — anti-entropy propagates the tombstone");
+        tracing::warn!(
+            key_id,
+            tombstones,
+            expected = peers.len(),
+            "hosted key delete reached only some nodes — anti-entropy propagates the tombstone"
+        );
     }
     Ok((deleted_anywhere, tombstones))
 }
@@ -1790,7 +2064,10 @@ pub async fn delete_hosted_key(
 fn is_not_hosted_id(e: &DaemonError) -> bool {
     match e {
         DaemonError::NotHostedKeyId(_) => true,
-        DaemonError::Status(s) => s.code() == tonic::Code::InvalidArgument && s.message().contains("is not a hosted-key id"),
+        DaemonError::Status(s) => {
+            s.code() == tonic::Code::InvalidArgument
+                && s.message().contains("is not a hosted-key id")
+        }
         _ => false,
     }
 }
@@ -1827,7 +2104,10 @@ pub const PEER_COPY_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// intent does not verify) holds something unknown, never nothing and never agreement.
 enum PeerCopy {
     /// A copy that opened and validated here, with this node's commitment to it.
-    Holds { commitment: Vec<u8>, key: crate::hosted::HostedKey },
+    Holds {
+        commitment: Vec<u8>,
+        key: crate::hosted::HostedKey,
+    },
     /// NOT_FOUND: the peer holds nothing under the id.
     Absent,
     /// The peer holds a tombstone for the id (its delete intent not yet checked here).
@@ -1853,13 +2133,20 @@ async fn peer_copies(
         if p.identifier() == node.identifier {
             continue;
         }
-        let Ok(id) = crate::hosted::identifier_index(p.identifier()) else { continue };
+        let Ok(id) = crate::hosted::identifier_index(p.identifier()) else {
+            continue;
+        };
         // A roster entry listed twice is one node: it counts once.
         if Some(id) == exclude || !seen.insert(id) {
             continue;
         }
         let (p, id_owned) = (p.clone(), key_id.to_owned());
-        asked.spawn(async move { (id, tokio::time::timeout(PEER_COPY_TIMEOUT, p.fetch_key_state(&id_owned)).await) });
+        asked.spawn(async move {
+            (
+                id,
+                tokio::time::timeout(PEER_COPY_TIMEOUT, p.fetch_key_state(&id_owned)).await,
+            )
+        });
     }
     let mut out = Vec::new();
     while let Some(joined) = asked.join_next().await {
@@ -1922,7 +2209,9 @@ impl Tally {
         let mut t = Tally::default();
         for (peer, copy) in copies {
             match copy {
-                PeerCopy::Holds { commitment, key } => t.holders.entry(commitment).or_default().push((peer, key)),
+                PeerCopy::Holds { commitment, key } => {
+                    t.holders.entry(commitment).or_default().push((peer, key))
+                }
                 PeerCopy::Absent => t.absent.push(peer),
                 PeerCopy::Tombstone(m) => t.tombstones.push((peer, m)),
                 PeerCopy::Unusable => t.unusable.push(peer),
@@ -1937,7 +2226,11 @@ impl Tally {
         (self.holders.len() > 1).then(|| {
             self.holders
                 .iter()
-                .flat_map(|(c, holders)| holders.iter().map(move |(p, _)| (*p, hex::encode(c.get(..6).unwrap_or(c.as_slice())))))
+                .flat_map(|(c, holders)| {
+                    holders
+                        .iter()
+                        .map(move |(p, _)| (*p, hex::encode(c.get(..6).unwrap_or(c.as_slice()))))
+                })
                 .collect()
         })
     }
@@ -1954,7 +2247,11 @@ impl Tally {
     /// real creation or undelete apply. Every supporter's times are already bounded by now plus
     /// the clock skew.
     fn confirmed(&self) -> Option<(crate::hosted::HostedKey, Vec<u16>)> {
-        if self.holders.len() != 1 || !self.silent.is_empty() || !self.unusable.is_empty() || !self.tombstones.is_empty() {
+        if self.holders.len() != 1
+            || !self.silent.is_empty()
+            || !self.unusable.is_empty()
+            || !self.tombstones.is_empty()
+        {
             return None;
         }
         let holders = self.holders.values().next()?;
@@ -1962,7 +2259,11 @@ impl Tally {
             return None;
         }
         let mut key = holders.first()?.1.clone();
-        key.created_at = holders.iter().map(|(_, k)| k.created_at).max().unwrap_or(key.created_at);
+        key.created_at = holders
+            .iter()
+            .map(|(_, k)| k.created_at)
+            .max()
+            .unwrap_or(key.created_at);
         key.undeleted_at_ms = holders.iter().filter_map(|(_, k)| k.undeleted_at_ms).max();
         Some((key, holders.iter().map(|(p, _)| *p).collect()))
     }
@@ -1975,7 +2276,8 @@ impl Tally {
 
 /// How many distinct roster nodes `peers` and this node make.
 fn roster_size(node: &Node, peers: &[Arc<dyn PeerApi>]) -> usize {
-    let mut ids: std::collections::HashSet<Identifier> = peers.iter().map(|p| p.identifier()).collect();
+    let mut ids: std::collections::HashSet<Identifier> =
+        peers.iter().map(|p| p.identifier()).collect();
     ids.insert(node.identifier);
     ids.len()
 }
@@ -2000,7 +2302,12 @@ async fn apply_peer_tombstones(node: &Arc<Node>, key_id: &str, t: &mut Tally) ->
             Ok(outcome) => {
                 verified = true;
                 if outcome != crate::node::TombstoneOutcome::Already {
-                    tracing::warn!(key_id, from = peer, ?outcome, "applied a peer's tombstone before pulling: the key is deleted");
+                    tracing::warn!(
+                        key_id,
+                        from = peer,
+                        ?outcome,
+                        "applied a peer's tombstone before pulling: the key is deleted"
+                    );
                 }
             }
             Err(e) => {
@@ -2015,7 +2322,10 @@ async fn apply_peer_tombstones(node: &Arc<Node>, key_id: &str, t: &mut Tally) ->
 
 /// Apply one peer tombstone (a `KeyManifest` with `tombstone` set) on this node, verifying its
 /// delete intent here. Shared by the sweep, read-repair, a leader's look and a push check.
-async fn apply_peer_tombstone(node: &Arc<Node>, t: &pb::KeyManifest) -> Result<crate::node::TombstoneOutcome> {
+async fn apply_peer_tombstone(
+    node: &Arc<Node>,
+    t: &pb::KeyManifest,
+) -> Result<crate::node::TombstoneOutcome> {
     // A deletion time in the future is refused like a key's: now plus the clock skew allowance.
     let limit = crate::intent::now_ms().saturating_add(node.hosted_skew_ms());
     if t.deleted_at_ms > limit {
@@ -2025,13 +2335,26 @@ async fn apply_peer_tombstone(node: &Arc<Node>, t: &pb::KeyManifest) -> Result<c
             t.key_id, t.deleted_at_ms
         )));
     }
-    let intent = <pb::SignedIntent as prost::Message>::decode(t.delete_intent.as_slice()).map_err(|e| {
-        crate::intent::refused_delete("malformed", format!("peer tombstone for {}: {e}", t.key_id))
-    })?;
-    let info = crate::node::DeletedKeyInfo { spec: t.spec.clone(), created_at: t.created_at, commitment: t.commitment.clone() };
+    let intent =
+        <pb::SignedIntent as prost::Message>::decode(t.delete_intent.as_slice()).map_err(|e| {
+            crate::intent::refused_delete(
+                "malformed",
+                format!("peer tombstone for {}: {e}", t.key_id),
+            )
+        })?;
+    let info = crate::node::DeletedKeyInfo {
+        spec: t.spec.clone(),
+        created_at: t.created_at,
+        commitment: t.commitment.clone(),
+    };
     let (deleted_at_ms, id) = (t.deleted_at_ms, t.key_id.clone());
     node.blocking(move |n| {
-        n.hosted_apply_tombstone(&id, &intent, crate::intent::Expiry::Propagated { deleted_at_ms }, Some(&info))
+        n.hosted_apply_tombstone(
+            &id,
+            &intent,
+            crate::intent::Expiry::Propagated { deleted_at_ms },
+            Some(&info),
+        )
     })
     .await
 }
@@ -2064,10 +2387,14 @@ pub async fn read_repair(node: &Arc<Node>, peers: &Peers, key_id: &str) -> Resul
     }
     if !node.take_repair_token() {
         hosted_refusal("throttled");
-        tracing::debug!(key_id, "read-repair ceiling reached: answering UNAVAILABLE without asking the peers");
+        tracing::debug!(
+            key_id,
+            "read-repair ceiling reached: answering UNAVAILABLE without asking the peers"
+        );
         return Err(DaemonError::HostedUnconfirmed {
             key_id: key_id.to_string(),
-            detail: "this node's read-repair ceiling is reached; retry, or ask another cosigner".into(),
+            detail: "this node's read-repair ceiling is reached; retry, or ask another cosigner"
+                .into(),
         });
     }
     pull_missing(node, peers, key_id).await
@@ -2288,7 +2615,8 @@ pub async fn accept_replica(
         }
         Err(e) => return Err(e),
     }
-    if let Some((reason, e)) = node.genkey_push_refusal(key_id, ceremony_id, leader, spec.as_str()) {
+    if let Some((reason, e)) = node.genkey_push_refusal(key_id, ceremony_id, leader, spec.as_str())
+    {
         match reason {
             "spec" => hosted_refusal("spec"),
             "intent" => hosted_refusal("intent"),
@@ -2336,7 +2664,12 @@ pub async fn accept_replica(
         tracing::warn!(key_id, peer = %from, "refused a pushed hosted key: a peer holds a valid tombstone for the id");
         return Err(crate::node::tombstoned(key_id));
     }
-    if let Some(other) = t.holders.iter().find(|(c, _)| **c != mine).and_then(|(_, h)| h.first().map(|(p, _)| *p)) {
+    if let Some(other) = t
+        .holders
+        .iter()
+        .find(|(c, _)| **c != mine)
+        .and_then(|(_, h)| h.first().map(|(p, _)| *p))
+    {
         metrics::counter!(crate::metrics::ANTI_ENTROPY_CONFLICTS).increment(1);
         hosted_refusal("conflict");
         tracing::error!(
@@ -2347,7 +2680,9 @@ pub async fn accept_replica(
         );
         return Err(DaemonError::HostedConflict {
             key_id: key_id.to_string(),
-            detail: format!("cosigner {other} holds different material; the push from {from} is refused"),
+            detail: format!(
+                "cosigner {other} holds different material; the push from {from} is refused"
+            ),
         });
     }
     if !t.unusable.is_empty() {
@@ -2363,8 +2698,13 @@ pub async fn accept_replica(
             detail: format!("cosigner(s) {:?} answered with a copy this node cannot check; the push from {from} is refused", t.unusable),
         });
     }
-    let (id, cid, cn) = (key_id.to_owned(), ceremony_id.to_owned(), leader.map(str::to_owned));
-    node.blocking(move |n| n.hosted_store_pushed(&id, &key, &cid, cn.as_deref())).await
+    let (id, cid, cn) = (
+        key_id.to_owned(),
+        ceremony_id.to_owned(),
+        leader.map(str::to_owned),
+    );
+    node.blocking(move |n| n.hosted_store_pushed(&id, &key, &cid, cn.as_deref()))
+        .await
 }
 
 /// Log and publish (`rutli_hosted_keys_future_timestamp`) the hosted keys held here whose creation
@@ -2415,7 +2755,9 @@ fn sweep_pull_order(missing: BTreeMap<String, Vec<Identifier>>) -> Vec<String> {
     let mut budget: std::collections::HashMap<Identifier, usize> = std::collections::HashMap::new();
     let (mut chosen, mut left) = (Vec::new(), 0usize);
     for (id, listers) in ids {
-        let has_budget = listers.iter().any(|l| budget.get(l).copied().unwrap_or(0) < SWEEP_MAX_PULLS_PER_PEER);
+        let has_budget = listers
+            .iter()
+            .any(|l| budget.get(l).copied().unwrap_or(0) < SWEEP_MAX_PULLS_PER_PEER);
         if chosen.len() >= SWEEP_MAX_PULLS || !has_budget {
             left += 1;
             continue;
@@ -2464,7 +2806,12 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<usize
             continue;
         }
         let p = p.clone();
-        asked.spawn(async move { (i, tokio::time::timeout(SWEEP_LIST_TIMEOUT, p.list_inventory()).await) });
+        asked.spawn(async move {
+            (
+                i,
+                tokio::time::timeout(SWEEP_LIST_TIMEOUT, p.list_inventory()).await,
+            )
+        });
     }
     let mut answers = Vec::new();
     while let Some(joined) = asked.join_next().await {
@@ -2483,7 +2830,9 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<usize
         // every directed mesh link.
         match answer {
             Ok(Ok(inv)) => inventories.push((p, inv)),
-            Ok(Err(e)) => tracing::warn!(peer = ?p.identifier(), error = %e, "anti-entropy: cannot list keys on peer"),
+            Ok(Err(e)) => {
+                tracing::warn!(peer = ?p.identifier(), error = %e, "anti-entropy: cannot list keys on peer")
+            }
             Err(_) => tracing::warn!(
                 peer = ?p.identifier(),
                 timeout_secs = SWEEP_LIST_TIMEOUT.as_secs(),
@@ -2511,8 +2860,11 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<usize
         }
     }
 
-    let mine: std::collections::HashSet<String> =
-        node.blocking(|n| n.hosted_list()).await?.into_iter().collect();
+    let mine: std::collections::HashSet<String> = node
+        .blocking(|n| n.hosted_list())
+        .await?
+        .into_iter()
+        .collect();
     // key_id -> how many cosigners hold it. Seeded with this node's own inventory; each reachable
     // peer adds its own. Published as the min at the end — the signal that a below-`n` write
     // quorum has not healed.
@@ -2544,7 +2896,10 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<usize
                     );
                 }
             } else if !mine.contains(&m.key_id) {
-                missing.entry(m.key_id.clone()).or_default().push(p.identifier());
+                missing
+                    .entry(m.key_id.clone())
+                    .or_default()
+                    .push(p.identifier());
             }
         }
     }
@@ -2566,7 +2921,10 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<usize
         metrics::counter!(crate::metrics::ANTI_ENTROPY_REPAIRS).increment(pulled as u64);
     }
     // The grace period of every tombstone: drop retained material past it.
-    if let Err(e) = node.blocking(|n| n.hosted_purge_expired(crate::intent::now_ms())).await {
+    if let Err(e) = node
+        .blocking(|n| n.hosted_purge_expired(crate::intent::now_ms()))
+        .await
+    {
         tracing::warn!(error = %e, "could not drop expired tombstone material");
     }
     if tombstoned > 0 {
@@ -2574,8 +2932,11 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<usize
     }
     report_future_timestamps(node).await;
     // Recount after repair so the gauge reflects the healed state, not the state that triggered it.
-    let healed: std::collections::HashSet<String> =
-        node.blocking(|n| n.hosted_list()).await?.into_iter().collect();
+    let healed: std::collections::HashSet<String> = node
+        .blocking(|n| n.hosted_list())
+        .await?
+        .into_iter()
+        .collect();
     for id in &healed {
         replicas.entry(id.clone()).or_insert(1);
     }
@@ -2588,12 +2949,20 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<usize
     // Ids deleted since the sweep began are no longer replicas of anything.
     replicas.retain(|id, _| healed.contains(id) || !mine.contains(id));
     metrics::gauge!(crate::metrics::HOSTED_KEYS).set(healed.len() as f64);
-    metrics::gauge!(crate::metrics::KEY_REPLICAS)
-        .set(replicas.values().copied().min().map(|m| m as f64).unwrap_or(f64::NAN));
+    metrics::gauge!(crate::metrics::KEY_REPLICAS).set(
+        replicas
+            .values()
+            .copied()
+            .min()
+            .map(|m| m as f64)
+            .unwrap_or(f64::NAN),
+    );
     if let Ok(ts) = node.blocking(|n| n.hosted_tombstones()).await {
         let retained = ts.iter().filter(|t| t.retained.is_some()).count();
-        metrics::gauge!(crate::metrics::HOSTED_TOMBSTONES, "retained" => "true").set(retained as f64);
-        metrics::gauge!(crate::metrics::HOSTED_TOMBSTONES, "retained" => "false").set((ts.len() - retained) as f64);
+        metrics::gauge!(crate::metrics::HOSTED_TOMBSTONES, "retained" => "true")
+            .set(retained as f64);
+        metrics::gauge!(crate::metrics::HOSTED_TOMBSTONES, "retained" => "false")
+            .set((ts.len() - retained) as f64);
     }
     Ok(pulled)
 }
@@ -2618,7 +2987,10 @@ mod tests {
     async fn a_preflight_with_no_answers_is_refused_not_a_panic() {
         // refresh_preflight used to index views[0]; no answers is an error, never a panic.
         let peers: Peers = Vec::new();
-        assert!(matches!(refresh_preflight(&peers, "k", &[]).await, Err(DaemonError::CeremonyRefused(_))));
+        assert!(matches!(
+            refresh_preflight(&peers, "k", &[]).await,
+            Err(DaemonError::CeremonyRefused(_))
+        ));
     }
 
     #[test]
@@ -2628,17 +3000,30 @@ mod tests {
         let timed_out = DaemonError::Status(tonic::Status::cancelled("Timeout expired"));
         assert!(is_unreachable(&timed_out));
         // A sick node's refusal (UNAVAILABLE) is skipped too; a genuine conflict is not.
-        assert!(is_unreachable(&DaemonError::Status(tonic::Status::unavailable("not serving"))));
-        assert!(!is_unreachable(&DaemonError::Status(tonic::Status::cancelled("client went away"))));
-        assert!(!is_unreachable(&DaemonError::Status(tonic::Status::aborted("ceremony in progress"))));
+        assert!(is_unreachable(&DaemonError::Status(
+            tonic::Status::unavailable("not serving")
+        )));
+        assert!(!is_unreachable(&DaemonError::Status(
+            tonic::Status::cancelled("client went away")
+        )));
+        assert!(!is_unreachable(&DaemonError::Status(
+            tonic::Status::aborted("ceremony in progress")
+        )));
         // Our own per-call deadline (peer::CallClass) and a node whose key store is down: absent,
         // never a conflict (T10).
-        let late = DaemonError::PeerDeadline { peer: 2, call: "a ceremony or hosted-key call", after: std::time::Duration::from_secs(10) };
+        let late = DaemonError::PeerDeadline {
+            peer: 2,
+            call: "a ceremony or hosted-key call",
+            after: std::time::Duration::from_secs(10),
+        };
         assert!(is_unreachable(&late));
         assert!(is_unreachable(&DaemonError::KeystoreDown("x".into())));
         assert!(!is_material_conflict(&late));
         // A refusal with a trailer is an answer, not an absence.
-        let conflict = tonic::Status::from(DaemonError::HostedConflict { key_id: "k".into(), detail: "x".into() });
+        let conflict = tonic::Status::from(DaemonError::HostedConflict {
+            key_id: "k".into(),
+            detail: "x".into(),
+        });
         assert!(!is_unreachable(&DaemonError::Status(conflict)));
     }
 
@@ -2647,10 +3032,18 @@ mod tests {
     }
 
     /// The first subset a leader tries, as identifiers (all members up).
-    fn first_subset(leader: u16, request_id: Option<&[u8]>, roster: &[Identifier], t: usize) -> Vec<Identifier> {
+    fn first_subset(
+        leader: u16,
+        request_id: Option<&[u8]>,
+        roster: &[Identifier],
+        t: usize,
+    ) -> Vec<Identifier> {
         let leader = Identifier::try_from(leader).unwrap();
         let ordered = order_around(leader, request_id, roster, |i| *i);
-        order_subsets(ordered.len(), t, &[], None)[0].iter().map(|&i| *ordered[i]).collect()
+        order_subsets(ordered.len(), t, &[], None)[0]
+            .iter()
+            .map(|&i| *ordered[i])
+            .collect()
     }
 
     /// Without a request id the order is the roster's, leader first: what every leader did before
@@ -2659,12 +3052,27 @@ mod tests {
     fn the_base_order_is_the_leader_then_the_others_rotated_by_the_request_id() {
         let roster = ids(5);
         let leader = roster[2];
-        let plain: Vec<_> = order_around(leader, None, &roster, |i| *i).into_iter().copied().collect();
-        assert_eq!(plain, vec![roster[2], roster[0], roster[1], roster[3], roster[4]]);
-        assert_eq!(order_around(leader, Some(&[]), &roster, |i| *i).into_iter().copied().collect::<Vec<_>>(), plain);
+        let plain: Vec<_> = order_around(leader, None, &roster, |i| *i)
+            .into_iter()
+            .copied()
+            .collect();
+        assert_eq!(
+            plain,
+            vec![roster[2], roster[0], roster[1], roster[3], roster[4]]
+        );
+        assert_eq!(
+            order_around(leader, Some(&[]), &roster, |i| *i)
+                .into_iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            plain
+        );
         for r in 0u8..32 {
             let rid = [r; 16];
-            let got: Vec<_> = order_around(leader, Some(&rid), &roster, |i| *i).into_iter().copied().collect();
+            let got: Vec<_> = order_around(leader, Some(&rid), &roster, |i| *i)
+                .into_iter()
+                .copied()
+                .collect();
             let mut others = plain[1..].to_vec();
             others.rotate_left(partner_offset(&rid, 4));
             assert_eq!(got[0], leader);
@@ -2696,11 +3104,13 @@ mod tests {
     /// 100, 60, 20, 20).
     #[test]
     fn hashed_partners_spread_the_signatures_evenly() {
-        let requests: Vec<[u8; 16]> = (0u32..6000).map(|i| {
-            let mut r = [0u8; 16];
-            r[..4].copy_from_slice(&i.to_be_bytes());
-            r
-        }).collect();
+        let requests: Vec<[u8; 16]> = (0u32..6000)
+            .map(|i| {
+                let mut r = [0u8; 16];
+                r[..4].copy_from_slice(&i.to_be_bytes());
+                r
+            })
+            .collect();
         let share = |roster: &[Identifier], t: usize, leaders: &[u16]| -> Vec<f64> {
             let mut count = vec![0usize; roster.len()];
             let mut signs = 0usize;
@@ -2713,7 +3123,8 @@ mod tests {
             }
             count.iter().map(|&c| c as f64 / signs as f64).collect()
         };
-        let near = |got: &[f64], want: &[f64]| got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.03);
+        let near =
+            |got: &[f64], want: &[f64]| got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.03);
 
         let three = ids(3);
         let sticky = share(&three, 2, &[1]);
@@ -2735,7 +3146,10 @@ mod tests {
     fn subsets_stable_sort_by_their_worst_member_over_any_base_order() {
         use crate::liveness::Tier::{Down, Trial, Up};
         // 2-of-3, member at base index 1 down: {0,2} first, then the two with it, in base order.
-        assert_eq!(order_subsets(3, 2, &[Up, Down, Up], None), vec![vec![0, 2], vec![0, 1], vec![1, 2]]);
+        assert_eq!(
+            order_subsets(3, 2, &[Up, Down, Up], None),
+            vec![vec![0, 2], vec![0, 1], vec![1, 2]]
+        );
         // All up: exactly the base order.
         assert_eq!(order_subsets(3, 2, &[Up, Up, Up], None), combinations(3, 2));
         // 3-of-5 with one trial and one down member: every subset kept, tiers ascending, and the
@@ -2743,10 +3157,18 @@ mod tests {
         let tiers = [Up, Up, Trial, Down, Up];
         let ordered = order_subsets(5, 3, &tiers, None);
         assert_eq!(ordered.len(), 10);
-        let worst: Vec<_> = ordered.iter().map(|s| s.iter().map(|&i| tiers[i]).max().unwrap()).collect();
+        let worst: Vec<_> = ordered
+            .iter()
+            .map(|s| s.iter().map(|&i| tiers[i]).max().unwrap())
+            .collect();
         assert!(worst.windows(2).all(|w| w[0] <= w[1]), "{worst:?}");
         for tier in [Up, Trial, Down] {
-            let within: Vec<_> = ordered.iter().zip(&worst).filter(|(_, w)| **w == tier).map(|(s, _)| s.clone()).collect();
+            let within: Vec<_> = ordered
+                .iter()
+                .zip(&worst)
+                .filter(|(_, w)| **w == tier)
+                .map(|(s, _)| s.clone())
+                .collect();
             let mut sorted = within.clone();
             sorted.sort();
             assert_eq!(within, sorted, "base order kept within {tier:?}");
@@ -2771,7 +3193,11 @@ mod tests {
         let ordered = order_subsets(5, 3, &tiers, Some(3));
         assert_eq!(ordered[0], vec![0, 2, 3]);
         assert_eq!(ordered[1], vec![0, 2, 4], "then the all-up subset");
-        assert_eq!(ordered[1..], order_subsets(5, 3, &tiers, None)[..], "then exactly the tier order");
+        assert_eq!(
+            ordered[1..],
+            order_subsets(5, 3, &tiers, None)[..],
+            "then exactly the tier order"
+        );
     }
 
     #[test]

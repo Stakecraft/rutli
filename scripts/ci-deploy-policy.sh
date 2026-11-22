@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # CI gate for the deployment manifests (audit C3/M3): lint and render the Helm chart in both
 # topologies, check that it refuses to render without TLS key pins, check deploy/k8s is the current render, run scripts/check-deploy-policy.sh on every

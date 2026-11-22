@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! `residue-scan`: one fixture per finding class, tars (mixed epochs, unreadable), the legacy
@@ -18,14 +18,21 @@ use rutli_cosigner::node::Node;
 use rutli_cosigner::orchestrator::{run_dkg, run_refresh, sign, Peers};
 use rutli_cosigner::peer::{LocalPeer, PeerApi};
 use rutli_cosigner::residue::{scan, Class, Report, ScanInput, NOT_CHECKED};
-use rutli_cosigner::seal::{derive_share_dek, KeyFileBinding, NodeSealBundle, RecordKind, RecordMeta, Sealer};
+use rutli_cosigner::seal::{
+    derive_share_dek, KeyFileBinding, NodeSealBundle, RecordKind, RecordMeta, Sealer,
+};
 
 const UUID: &str = "6f1c2a8e-3b4d-4e5f-9a0b-1c2d3e4f5a6b";
 /// Put inside every plaintext fixture: it must never reach the output.
 const MARKER: &str = "PLAINTEXT-SHARE-MARKER-7f3a";
 
 fn binding(node: u16) -> KeyFileBinding {
-    KeyFileBinding { node, cluster_uuid: Some(UUID.into()), write_version: 2, accept_v1: true }
+    KeyFileBinding {
+        node,
+        cluster_uuid: Some(UUID.into()),
+        write_version: 2,
+        accept_v1: true,
+    }
 }
 
 fn sealer_of(bundle: &NodeSealBundle) -> Sealer {
@@ -34,15 +41,32 @@ fn sealer_of(bundle: &NodeSealBundle) -> Sealer {
 
 fn v2(s: &Sealer, kind: RecordKind, key_id: &str, epoch: u64) -> Vec<u8> {
     let plain = serde_json::json!({ "opaque": MARKER }).to_string();
-    s.seal_record_as(2, &RecordMeta { kind, key_id, epoch, digest: &[] }, plain.as_bytes()).unwrap()
+    s.seal_record_as(
+        2,
+        &RecordMeta {
+            kind,
+            key_id,
+            epoch,
+            digest: &[],
+        },
+        plain.as_bytes(),
+    )
+    .unwrap()
 }
 
 fn v1(s: &Sealer, epoch: u64) -> Vec<u8> {
-    s.seal(serde_json::json!({ "key_package": { "x": MARKER }, "epoch": epoch }).to_string().as_bytes()).unwrap()
+    s.seal(
+        serde_json::json!({ "key_package": { "x": MARKER }, "epoch": epoch })
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap()
 }
 
 fn plaintext_share(epoch: u64) -> Vec<u8> {
-    serde_json::json!({ "key_package": { "x": MARKER }, "epoch": epoch }).to_string().into_bytes()
+    serde_json::json!({ "key_package": { "x": MARKER }, "epoch": epoch })
+        .to_string()
+        .into_bytes()
 }
 
 fn put(path: &Path, bytes: &[u8]) {
@@ -50,7 +74,12 @@ fn put(path: &Path, bytes: &[u8]) {
     std::fs::write(path, bytes).unwrap();
 }
 
-fn run(dd: &Path, sealer: Option<&Sealer>, backups: &[PathBuf], legacy: Option<Zeroizing<[u8; 32]>>) -> Report {
+fn run(
+    dd: &Path,
+    sealer: Option<&Sealer>,
+    backups: &[PathBuf],
+    legacy: Option<Zeroizing<[u8; 32]>>,
+) -> Report {
     scan(&ScanInput {
         data_dir: dd,
         node: 1,
@@ -67,7 +96,16 @@ fn found(r: &Report, root: &Path) -> BTreeSet<(Class, String)> {
     let root = root.to_string_lossy().into_owned();
     r.findings
         .iter()
-        .map(|f| (f.class, f.path.strip_prefix(&root).unwrap_or(&f.path).trim_start_matches('/').to_string()))
+        .map(|f| {
+            (
+                f.class,
+                f.path
+                    .strip_prefix(&root)
+                    .unwrap_or(&f.path)
+                    .trim_start_matches('/')
+                    .to_string(),
+            )
+        })
         .collect()
 }
 
@@ -120,30 +158,49 @@ fn a_clean_store_finds_nothing_and_still_lists_what_was_not_checked() {
     let tmp = tempfile::tempdir().unwrap();
     let dd = tmp.path();
     let s = sealer_of(&NodeSealBundle::random(1));
-    put(&dd.join("keys/frost-a.json"), &v2(&s, RecordKind::FrostShare, "frost-a", 3));
-    put(&dd.join("keys/rutli-h.json"), &v2(&s, RecordKind::HostedKey, "rutli-h", 0));
+    put(
+        &dd.join("keys/frost-a.json"),
+        &v2(&s, RecordKind::FrostShare, "frost-a", 3),
+    );
+    put(
+        &dd.join("keys/rutli-h.json"),
+        &v2(&s, RecordKind::HostedKey, "rutli-h", 0),
+    );
     put(&dd.join("keys/frost-b.json"), &v1(&s, 1));
     std::fs::create_dir_all(dd.join("keys/.ceremonies")).unwrap();
     std::fs::create_dir_all(dd.join("keys/.cleared")).unwrap();
     std::fs::create_dir_all(dd.join("keys/frost-a.nonces")).unwrap();
-    put(&dd.join("keys/.proven/frost-a.3.json"), br#"{"key_id":"frost-a","epoch":3}"#);
+    put(
+        &dd.join("keys/.proven/frost-a.3.json"),
+        br#"{"key_id":"frost-a","epoch":3}"#,
+    );
     put(&dd.join("journal/seg-0001.jsonl"), b"{}\n");
     put(&dd.join("cluster-id"), b"abc");
     put(&dd.join(".rutli-cosigner.lock"), b"");
     // A current backup: same epoch, current DEK. Expected, not residue.
     let backup = tempfile::tempdir().unwrap();
-    put(&backup.path().join("frost-a.json"), &v2(&s, RecordKind::FrostShare, "frost-a", 3));
+    put(
+        &backup.path().join("frost-a.json"),
+        &v2(&s, RecordKind::FrostShare, "frost-a", 3),
+    );
     put(&backup.path().join("frost-b.json"), &v1(&s, 1));
 
     let r = run(dd, Some(&s), &[backup.path().to_path_buf()], None);
-    assert!(r.findings.is_empty() && r.unclassified.is_empty() && r.errors.is_empty(), "{}", r.text());
+    assert!(
+        r.findings.is_empty() && r.unclassified.is_empty() && r.errors.is_empty(),
+        "{}",
+        r.text()
+    );
     assert_eq!(r.exit_code(), 0);
     assert_eq!((r.live.frost, r.live.hosted, r.live.tombstones), (2, 1, 0));
     for n in NOT_CHECKED {
         assert!(r.not_checked.iter().any(|x| x == n), "{n}");
     }
     let text = r.text();
-    assert!(text.contains("nothing found on the paths given") && text.contains("NOT CHECKED"), "{text}");
+    assert!(
+        text.contains("nothing found on the paths given") && text.contains("NOT CHECKED"),
+        "{text}"
+    );
     assert!(!text.contains("destroyed"), "{text}");
 }
 
@@ -156,31 +213,69 @@ fn every_class_on_the_volume_and_in_a_backup() {
     let (s_old, s) = (sealer_of(&old), sealer_of(&now));
 
     // Live store.
-    put(&dd.join("keys/frost-a.json"), &v2(&s, RecordKind::FrostShare, "frost-a", 3));
+    put(
+        &dd.join("keys/frost-a.json"),
+        &v2(&s, RecordKind::FrostShare, "frost-a", 3),
+    );
     put(&dd.join("keys/frost-b.json"), &v1(&s, 1));
     put(&dd.join("keys/frost-plain.json"), &plaintext_share(1));
-    put(&dd.join("keys/frost-olddek.json"), &v2(&s_old, RecordKind::FrostShare, "frost-olddek", 2));
-    put(&dd.join("keys/rutli-h.json"), &v2(&s, RecordKind::HostedKey, "rutli-h", 0));
-    put(&dd.join("keys/rutli-t.json"), &v2(&s, RecordKind::Tombstone, "rutli-t", 0));
-    put(&dd.join("keys/frost-a.json.tmp"), &v2(&s, RecordKind::FrostShare, "frost-a", 3));
+    put(
+        &dd.join("keys/frost-olddek.json"),
+        &v2(&s_old, RecordKind::FrostShare, "frost-olddek", 2),
+    );
+    put(
+        &dd.join("keys/rutli-h.json"),
+        &v2(&s, RecordKind::HostedKey, "rutli-h", 0),
+    );
+    put(
+        &dd.join("keys/rutli-t.json"),
+        &v2(&s, RecordKind::Tombstone, "rutli-t", 0),
+    );
+    put(
+        &dd.join("keys/frost-a.json.tmp"),
+        &v2(&s, RecordKind::FrostShare, "frost-a", 3),
+    );
     put(&dd.join("keys/.create-frost-c-1.tmp"), b"partial");
     // Staged: cer1 has no record (orphan), cer2 is in progress.
-    put(&dd.join("keys/.staged/frost-a.cer1.json"), &v2(&s, RecordKind::FrostShare, "frost-a", 4));
-    put(&dd.join("keys/.staged/frost-a.cer2.json"), &v2(&s, RecordKind::FrostShare, "frost-a", 4));
+    put(
+        &dd.join("keys/.staged/frost-a.cer1.json"),
+        &v2(&s, RecordKind::FrostShare, "frost-a", 4),
+    );
+    put(
+        &dd.join("keys/.staged/frost-a.cer2.json"),
+        &v2(&s, RecordKind::FrostShare, "frost-a", 4),
+    );
     put(
         &dd.join("keys/.ceremonies/cer2.json"),
-        serde_json::json!({ "ceremony_id": "cer2", "state": "staged", "key_id": "frost-a" }).to_string().as_bytes(),
+        serde_json::json!({ "ceremony_id": "cer2", "state": "staged", "key_id": "frost-a" })
+            .to_string()
+            .as_bytes(),
     );
     // Split-ceremony material, leftovers, lost+found.
-    put(&dd.join("ceremony/frost-z.recipient"), &v2(&s, RecordKind::Recipient, "frost-z", 0));
-    put(&dd.join("backup-1/frost-a.json"), &v2(&s, RecordKind::FrostShare, "frost-a", 2));
-    put(&dd.join("retired-2026-07/frost-gone.json"), &v2(&s, RecordKind::FrostShare, "frost-gone", 5));
+    put(
+        &dd.join("ceremony/frost-z.recipient"),
+        &v2(&s, RecordKind::Recipient, "frost-z", 0),
+    );
+    put(
+        &dd.join("backup-1/frost-a.json"),
+        &v2(&s, RecordKind::FrostShare, "frost-a", 2),
+    );
+    put(
+        &dd.join("retired-2026-07/frost-gone.json"),
+        &v2(&s, RecordKind::FrostShare, "frost-gone", 5),
+    );
     put(&dd.join("lost+found/#1234"), b"orphaned inode");
 
     // A backup directory.
     let bk = tmp.path().join("bk");
-    put(&bk.join("frost-a.json"), &v2(&s, RecordKind::FrostShare, "frost-a", 3)); // current: nothing
-    put(&bk.join("rutli-h.json"), &v2(&s, RecordKind::HostedKey, "rutli-h", 0));
+    put(
+        &bk.join("frost-a.json"),
+        &v2(&s, RecordKind::FrostShare, "frost-a", 3),
+    ); // current: nothing
+    put(
+        &bk.join("rutli-h.json"),
+        &v2(&s, RecordKind::HostedKey, "rutli-h", 0),
+    );
     put(&bk.join("old/frost-b.json"), &v1(&s_old, 1)); // v1 the current DEK does not open
     put(&bk.join("journal/seg-0001.jsonl"), b"{}\n"); // not a candidate: ignored
 
@@ -207,14 +302,41 @@ fn every_class_on_the_volume_and_in_a_backup() {
     assert_eq!(r.exit_code(), 1);
     // The plaintext finding comes first (most severe), and hosted copies say what a copy means.
     assert_eq!(r.findings[0].class, Class::Plaintext);
-    let hosted = r.findings.iter().find(|f| f.class == Class::HostedCopy).unwrap();
-    assert!(hosted.note.unwrap().contains("no threshold at rest") && hosted.key_id.as_deref() == Some("rutli-h"));
-    let tomb = r.findings.iter().find(|f| f.class == Class::Tombstone).unwrap();
-    assert!(tomb.note.unwrap().contains("no threshold at rest") && tomb.key_id.as_deref() == Some("rutli-t"));
-    let older = r.findings.iter().find(|f| f.class == Class::OlderEpoch).unwrap();
-    assert_eq!((older.key_id.as_deref(), older.epoch, older.dek.clone()), (Some("frost-a"), Some(2), Some(s.current_dek_id())));
+    let hosted = r
+        .findings
+        .iter()
+        .find(|f| f.class == Class::HostedCopy)
+        .unwrap();
+    assert!(
+        hosted.note.unwrap().contains("no threshold at rest")
+            && hosted.key_id.as_deref() == Some("rutli-h")
+    );
+    let tomb = r
+        .findings
+        .iter()
+        .find(|f| f.class == Class::Tombstone)
+        .unwrap();
+    assert!(
+        tomb.note.unwrap().contains("no threshold at rest")
+            && tomb.key_id.as_deref() == Some("rutli-t")
+    );
+    let older = r
+        .findings
+        .iter()
+        .find(|f| f.class == Class::OlderEpoch)
+        .unwrap();
+    assert_eq!(
+        (older.key_id.as_deref(), older.epoch, older.dek.clone()),
+        (Some("frost-a"), Some(2), Some(s.current_dek_id()))
+    );
     let text = r.text();
-    assert!(text.contains(&format!("[finding] older-epoch: {}", dd.join("backup-1/frost-a.json").display())), "{text}");
+    assert!(
+        text.contains(&format!(
+            "[finding] older-epoch: {}",
+            dd.join("backup-1/frost-a.json").display()
+        )),
+        "{text}"
+    );
 }
 
 #[test]
@@ -222,15 +344,33 @@ fn a_mixed_epoch_tar_is_read_in_place_and_its_names_never_touch_the_filesystem()
     let tmp = tempfile::tempdir().unwrap();
     let dd = tmp.path().join("data");
     let s = sealer_of(&NodeSealBundle::random(1));
-    put(&dd.join("keys/frost-a.json"), &v2(&s, RecordKind::FrostShare, "frost-a", 5));
+    put(
+        &dd.join("keys/frost-a.json"),
+        &v2(&s, RecordKind::FrostShare, "frost-a", 5),
+    );
 
     let mut t = Vec::new();
-    tar_add(&mut t, "./frost-a.json", &v2(&s, RecordKind::FrostShare, "frost-a", 5), b'0');
-    tar_add(&mut t, "old/frost-a.json", &v2(&s, RecordKind::FrostShare, "frost-a", 4), b'0');
+    tar_add(
+        &mut t,
+        "./frost-a.json",
+        &v2(&s, RecordKind::FrostShare, "frost-a", 5),
+        b'0',
+    );
+    tar_add(
+        &mut t,
+        "old/frost-a.json",
+        &v2(&s, RecordKind::FrostShare, "frost-a", 4),
+        b'0',
+    );
     // A pax name that climbs out of the archive: reported as text, never opened or written.
     let escape = "../../../../etc/frost-a.json";
     tar_add(&mut t, "PaxHeaders/x", &pax(escape), b'x');
-    tar_add(&mut t, "ignored-name", &v2(&s, RecordKind::FrostShare, "frost-a", 3), b'0');
+    tar_add(
+        &mut t,
+        "ignored-name",
+        &v2(&s, RecordKind::FrostShare, "frost-a", 3),
+        b'0',
+    );
     tar_add(&mut t, "journal/seg-0001.jsonl", b"{}\n", b'0');
     tar_add(&mut t, "dir/", b"", b'5');
     tar_end(&mut t);
@@ -240,10 +380,18 @@ fn a_mixed_epoch_tar_is_read_in_place_and_its_names_never_touch_the_filesystem()
     let r = run(&dd, Some(&s), std::slice::from_ref(&tar), None);
     assert!(r.errors.is_empty(), "{}", r.text());
     let shown = tar.to_string_lossy();
-    let older: Vec<_> = r.findings.iter().filter(|f| f.class == Class::OlderEpoch).map(|f| (f.path.clone(), f.epoch)).collect();
+    let older: Vec<_> = r
+        .findings
+        .iter()
+        .filter(|f| f.class == Class::OlderEpoch)
+        .map(|f| (f.path.clone(), f.epoch))
+        .collect();
     assert_eq!(
         older,
-        vec![(format!("{shown}!{escape}"), Some(3)), (format!("{shown}!old/frost-a.json"), Some(4))],
+        vec![
+            (format!("{shown}!{escape}"), Some(3)),
+            (format!("{shown}!old/frost-a.json"), Some(4))
+        ],
         "{}",
         r.text()
     );
@@ -256,7 +404,12 @@ fn the_shared_tar_reader_gives_entry_names_as_stored_and_their_headers() {
     let tmp = tempfile::tempdir().unwrap();
     let s = sealer_of(&NodeSealBundle::random(1));
     let mut t = Vec::new();
-    tar_add(&mut t, "./frost-a.json", &v2(&s, RecordKind::FrostShare, "frost-a", 7), b'0');
+    tar_add(
+        &mut t,
+        "./frost-a.json",
+        &v2(&s, RecordKind::FrostShare, "frost-a", 7),
+        b'0',
+    );
     tar_add(&mut t, "./.cleared/frost-a.00ff", b"", b'0');
     tar_add(&mut t, "./journal/frost-a/0001.jsonl", b"{}\n", b'0');
     tar_end(&mut t);
@@ -268,7 +421,10 @@ fn the_shared_tar_reader_gives_entry_names_as_stored_and_their_headers() {
         seen.push((name.to_string(), h.key_id, h.epoch));
     })
     .unwrap();
-    assert_eq!(seen, vec![("./frost-a.json".to_string(), "frost-a".to_string(), 7)]);
+    assert_eq!(
+        seen,
+        vec![("./frost-a.json".to_string(), "frost-a".to_string(), 7)]
+    );
 }
 
 #[test]
@@ -279,7 +435,12 @@ fn an_unreadable_tar_is_a_read_error() {
     let s = sealer_of(&NodeSealBundle::random(1));
 
     let mut good = Vec::new();
-    tar_add(&mut good, "frost-a.json", &v2(&s, RecordKind::FrostShare, "frost-a", 1), b'0');
+    tar_add(
+        &mut good,
+        "frost-a.json",
+        &v2(&s, RecordKind::FrostShare, "frost-a", 1),
+        b'0',
+    );
     tar_end(&mut good);
 
     // A flipped header byte: the checksum no longer matches.
@@ -293,7 +454,11 @@ fn an_unreadable_tar_is_a_read_error() {
         let r = run(&dd, Some(&s), std::slice::from_ref(&p), None);
         assert_eq!(r.exit_code(), 2, "{name}: {}", r.text());
         assert_eq!(r.errors.len(), 1, "{name}");
-        assert!(r.errors[0].error.contains("not a readable tar"), "{name}: {}", r.errors[0].error);
+        assert!(
+            r.errors[0].error.contains("not a readable tar"),
+            "{name}: {}",
+            r.errors[0].error
+        );
         assert!(r.text().contains("the scan is incomplete"), "{name}");
     }
 }
@@ -313,7 +478,11 @@ fn a_symlink_is_reported_and_never_followed() {
     let r = run(&dd, Some(&s), std::slice::from_ref(&bk), None);
     assert!(r.findings.is_empty(), "{}", r.text());
     assert_eq!(r.unclassified.len(), 1);
-    assert!(r.unclassified[0].reason.contains("symbolic link"), "{:?}", r.unclassified);
+    assert!(
+        r.unclassified[0].reason.contains("symbolic link"),
+        "{:?}",
+        r.unclassified
+    );
 }
 
 #[test]
@@ -324,22 +493,54 @@ fn the_legacy_master_derivation_is_found_in_constant_time_and_never_printed() {
     // A node split from the legacy master and never rotated: its DEK is the derivation.
     let bundle = NodeSealBundle::from_legacy_master(master.as_bytes(), 1);
     let s = sealer_of(&bundle);
-    put(&dd.join("keys/frost-a.json"), &v2(&s, RecordKind::FrostShare, "frost-a", 1));
+    put(
+        &dd.join("keys/frost-a.json"),
+        &v2(&s, RecordKind::FrostShare, "frost-a", 1),
+    );
 
-    let r = run(&dd, Some(&s), &[], Some(derive_share_dek(master.as_bytes(), 1)));
-    let f: Vec<_> = r.findings.iter().filter(|f| f.class == Class::LegacyMasterDek).collect();
+    let r = run(
+        &dd,
+        Some(&s),
+        &[],
+        Some(derive_share_dek(master.as_bytes(), 1)),
+    );
+    let f: Vec<_> = r
+        .findings
+        .iter()
+        .filter(|f| f.class == Class::LegacyMasterDek)
+        .collect();
     assert_eq!(f.len(), 1, "{}", r.text());
     assert_eq!(f[0].path, "share_seal: the current DEK");
     assert_eq!(f[0].dek.as_deref(), Some(s.current_dek_id().as_str()));
 
     // Rotated once: the derivation is now a previous DEK, still reported.
     let rotated = sealer_of(&bundle.rotated());
-    let r = run(&dd, Some(&rotated), &[], Some(derive_share_dek(master.as_bytes(), 1)));
-    assert!(r.findings.iter().any(|f| f.class == Class::LegacyMasterDek && f.path == "share_seal: previous DEK 0"), "{}", r.text());
+    let r = run(
+        &dd,
+        Some(&rotated),
+        &[],
+        Some(derive_share_dek(master.as_bytes(), 1)),
+    );
+    assert!(
+        r.findings
+            .iter()
+            .any(|f| f.class == Class::LegacyMasterDek && f.path == "share_seal: previous DEK 0"),
+        "{}",
+        r.text()
+    );
 
     // Another master: nothing.
-    let r = run(&dd, Some(&s), &[], Some(derive_share_dek(b"some-other-master-0123456789abcdef", 1)));
-    assert!(!r.findings.iter().any(|f| f.class == Class::LegacyMasterDek), "{}", r.text());
+    let r = run(
+        &dd,
+        Some(&s),
+        &[],
+        Some(derive_share_dek(b"some-other-master-0123456789abcdef", 1)),
+    );
+    assert!(
+        !r.findings.iter().any(|f| f.class == Class::LegacyMasterDek),
+        "{}",
+        r.text()
+    );
 
     // A config on secret_env scanned without the flag says so in NOT CHECKED.
     let r = scan(&ScanInput {
@@ -351,7 +552,13 @@ fn the_legacy_master_derivation_is_found_in_constant_time_and_never_printed() {
         legacy_dek: None,
         config_names_secret_env: true,
     });
-    assert!(r.not_checked.iter().any(|n| n.starts_with("legacy-master check not done")), "{:?}", r.not_checked);
+    assert!(
+        r.not_checked
+            .iter()
+            .any(|n| n.starts_with("legacy-master check not done")),
+        "{:?}",
+        r.not_checked
+    );
     assert!(r.text().contains("legacy-master check not done"));
 }
 
@@ -362,25 +569,63 @@ fn the_output_carries_only_the_allowed_fields_and_no_key_material() {
     let master = "legacy-master-for-the-output-test-0123456789";
     let bundle = NodeSealBundle::from_legacy_master(master.as_bytes(), 1);
     let s = sealer_of(&bundle);
-    put(&dd.join("keys/frost-a.json"), &v2(&s, RecordKind::FrostShare, "frost-a", 2));
+    put(
+        &dd.join("keys/frost-a.json"),
+        &v2(&s, RecordKind::FrostShare, "frost-a", 2),
+    );
     put(&dd.join("keys/frost-plain.json"), &plaintext_share(1));
     put(&dd.join("keys/frost-b.json"), &v1(&s, 1));
-    put(&dd.join("backup-1/frost-a.json"), &v2(&s, RecordKind::FrostShare, "frost-a", 1));
-    put(&dd.join("backup-1/rutli-h.json"), &v2(&s, RecordKind::HostedKey, "rutli-h", 0));
+    put(
+        &dd.join("backup-1/frost-a.json"),
+        &v2(&s, RecordKind::FrostShare, "frost-a", 1),
+    );
+    put(
+        &dd.join("backup-1/rutli-h.json"),
+        &v2(&s, RecordKind::HostedKey, "rutli-h", 0),
+    );
     put(&dd.join("keys/stray"), b"x");
 
-    let r = run(&dd, Some(&s), &[tmp.path().join("missing-backup")], Some(derive_share_dek(master.as_bytes(), 1)));
+    let r = run(
+        &dd,
+        Some(&s),
+        &[tmp.path().join("missing-backup")],
+        Some(derive_share_dek(master.as_bytes(), 1)),
+    );
     let json = serde_json::to_value(&r).unwrap();
-    let keys = |v: &serde_json::Value| v.as_object().unwrap().keys().cloned().collect::<BTreeSet<_>>();
+    let keys = |v: &serde_json::Value| {
+        v.as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+    };
     let names = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
     assert_eq!(
         keys(&json),
-        names(&["schema", "node", "data_dir", "backups", "findings", "unclassified", "errors", "changed", "live", "not_checked", "exit"])
+        names(&[
+            "schema",
+            "node",
+            "data_dir",
+            "backups",
+            "findings",
+            "unclassified",
+            "errors",
+            "changed",
+            "live",
+            "not_checked",
+            "exit"
+        ])
     );
     assert_eq!(json["schema"], "rutli-residue-scan/1");
-    assert_eq!(keys(&json["live"]), names(&["frost", "hosted", "tombstones"]));
+    assert_eq!(
+        keys(&json["live"]),
+        names(&["frost", "hosted", "tombstones"])
+    );
     for f in json["findings"].as_array().unwrap() {
-        assert_eq!(keys(f), names(&["class", "path", "key_id", "epoch", "dek", "note"]));
+        assert_eq!(
+            keys(f),
+            names(&["class", "path", "key_id", "epoch", "dek", "note"])
+        );
     }
     for u in json["unclassified"].as_array().unwrap() {
         assert_eq!(keys(u), names(&["path", "reason"]));
@@ -391,9 +636,16 @@ fn the_output_carries_only_the_allowed_fields_and_no_key_material() {
     for e in json["errors"].as_array().unwrap() {
         assert_eq!(keys(e), names(&["path", "error"]));
     }
-    assert!(!json["findings"].as_array().unwrap().is_empty() && !json["unclassified"].as_array().unwrap().is_empty());
+    assert!(
+        !json["findings"].as_array().unwrap().is_empty()
+            && !json["unclassified"].as_array().unwrap().is_empty()
+    );
     // A --backup path that does not exist is a read error: a typo never reads as "nothing found".
-    assert!(json["errors"].as_array().unwrap().iter().any(|e| e["path"].as_str().unwrap().ends_with("missing-backup")));
+    assert!(json["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["path"].as_str().unwrap().ends_with("missing-backup")));
     assert_eq!(json["exit"], 2);
 
     // No secret in either form: not the DEK, not the master, not plaintext share content.
@@ -414,9 +666,15 @@ fn a_missing_data_dir_or_an_unknown_v1_record_is_never_nothing_found() {
 
     // A v1 file the current DEK opens but that holds no known record: unclassified.
     let dd = tmp.path().join("data");
-    put(&dd.join("keys/frost-a.json"), &v2(&s, RecordKind::FrostShare, "frost-a", 1));
+    put(
+        &dd.join("keys/frost-a.json"),
+        &v2(&s, RecordKind::FrostShare, "frost-a", 1),
+    );
     let bk = tmp.path().join("bk");
-    put(&bk.join("frost-a.json"), &s.seal(br#"{"something":"else"}"#).unwrap());
+    put(
+        &bk.join("frost-a.json"),
+        &s.seal(br#"{"something":"else"}"#).unwrap(),
+    );
     let r = run(&dd, Some(&s), std::slice::from_ref(&bk), None);
     assert_eq!(r.unclassified.len(), 1, "{}", r.text());
     assert!(r.unclassified[0].reason.contains("not a known record"));
@@ -428,11 +686,23 @@ fn an_unreadable_ceremony_record_is_reported_not_guessed() {
     let tmp = tempfile::tempdir().unwrap();
     let dd = tmp.path().join("data");
     let s = sealer_of(&NodeSealBundle::random(1));
-    put(&dd.join("keys/frost-a.json"), &v2(&s, RecordKind::FrostShare, "frost-a", 1));
-    put(&dd.join("keys/.staged/frost-a.cer9.json"), &v2(&s, RecordKind::FrostShare, "frost-a", 2));
+    put(
+        &dd.join("keys/frost-a.json"),
+        &v2(&s, RecordKind::FrostShare, "frost-a", 1),
+    );
+    put(
+        &dd.join("keys/.staged/frost-a.cer9.json"),
+        &v2(&s, RecordKind::FrostShare, "frost-a", 2),
+    );
     put(&dd.join("keys/.ceremonies/cer9.json"), b"{ not json");
     let r = run(&dd, Some(&s), &[], None);
-    assert!(r.unclassified.iter().any(|u| u.path.ends_with("cer9.json") && u.reason.contains("does not parse")), "{}", r.text());
+    assert!(
+        r.unclassified
+            .iter()
+            .any(|u| u.path.ends_with("cer9.json") && u.reason.contains("does not parse")),
+        "{}",
+        r.text()
+    );
 }
 
 // ── next to a running node ─────────────────────────────────────────────────────────────────────
@@ -447,12 +717,17 @@ async fn a_scan_during_signing_neither_blocks_nor_fails_a_signature() {
     let nodes: Vec<Arc<Node>> = (1..=3u16)
         .map(|i| {
             let sealer = Arc::new(bundles[i as usize - 1].sealer().with_binding(binding(i)));
-            let ks = KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}/keys")), Some(sealer)).unwrap();
+            let ks =
+                KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}/keys")), Some(sealer))
+                    .unwrap();
             Arc::new(Node::new(Identifier::try_from(i).unwrap(), 3, 2, ks))
         })
         .collect();
     rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
-    let peers: Peers = nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    let peers: Peers = nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect();
     run_dkg(&peers, KEY).await.unwrap();
 
     let dd = tmp.path().join("node-1");
@@ -476,7 +751,11 @@ async fn a_scan_during_signing_neither_blocks_nor_fails_a_signature() {
                     legacy_dek: None,
                     config_names_secret_env: false,
                 });
-                assert!(r.errors.is_empty(), "a scan next to the node hit a read error:\n{}", r.text());
+                assert!(
+                    r.errors.is_empty(),
+                    "a scan next to the node hit a read error:\n{}",
+                    r.text()
+                );
                 worst = worst.max(r.exit_code());
                 scans.fetch_add(1, Ordering::Relaxed);
             }
@@ -488,7 +767,10 @@ async fn a_scan_during_signing_neither_blocks_nor_fails_a_signature() {
     for round in 0..20u8 {
         if round == 10 {
             // A refresh renames staged files over live ones while the scan walks them.
-            tokio::time::timeout(deadline, run_refresh(&peers, KEY)).await.expect("refresh in time").unwrap();
+            tokio::time::timeout(deadline, run_refresh(&peers, KEY))
+                .await
+                .expect("refresh in time")
+                .unwrap();
         }
         let msg = [round; 34];
         tokio::time::timeout(deadline, sign(&nodes[0], &peers, KEY, &msg))
@@ -524,16 +806,29 @@ fn config(dd: &Path) -> serde_json::Value {
     })
 }
 
-fn cli(dir: &Path, cfg: &serde_json::Value, env: &[(&str, &str)], args: &[&str]) -> (i32, String, String) {
+fn cli(
+    dir: &Path,
+    cfg: &serde_json::Value,
+    env: &[(&str, &str)],
+    args: &[&str],
+) -> (i32, String, String) {
     let path = dir.join("cosigner.json");
     std::fs::write(&path, serde_json::to_string_pretty(cfg).unwrap()).unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rutli-cosigner"));
-    cmd.arg("--config").arg(&path).arg("residue-scan").args(args).env_remove("RUTLI_RS_TEST_MASTER");
+    cmd.arg("--config")
+        .arg(&path)
+        .arg("residue-scan")
+        .args(args)
+        .env_remove("RUTLI_RS_TEST_MASTER");
     for (k, v) in env {
         cmd.env(k, v);
     }
     let out = cmd.output().unwrap();
-    (out.status.code().unwrap(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+    (
+        out.status.code().unwrap(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
 }
 
 #[test]
@@ -542,7 +837,10 @@ fn the_command_exits_by_result_and_refuses_a_short_legacy_master() {
     let dd = tmp.path().join("data");
     let master = "legacy-master-for-the-cli-test-0123456789abcdef";
     let s = Sealer::from_master_secret(master.as_bytes(), 1).with_binding(binding(1));
-    put(&dd.join("keys/frost-a.json"), &v2(&s, RecordKind::FrostShare, "frost-a", 1));
+    put(
+        &dd.join("keys/frost-a.json"),
+        &v2(&s, RecordKind::FrostShare, "frost-a", 1),
+    );
     let cfg = config(&dd);
     let env = [("RUTLI_RS_TEST_MASTER", master)];
 
@@ -552,7 +850,12 @@ fn the_command_exits_by_result_and_refuses_a_short_legacy_master() {
     assert!(out.contains("legacy-master check not done"), "{out}");
 
     // With the flag: the current DEK is the derivation (exit 1). JSON parses and says so.
-    let (code, out, err) = cli(tmp.path(), &cfg, &env, &["--legacy-master-env", "RUTLI_RS_TEST_MASTER", "--json"]);
+    let (code, out, err) = cli(
+        tmp.path(),
+        &cfg,
+        &env,
+        &["--legacy-master-env", "RUTLI_RS_TEST_MASTER", "--json"],
+    );
     assert_eq!(code, 1, "{out}{err}");
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["exit"], 1);
@@ -561,16 +864,37 @@ fn the_command_exits_by_result_and_refuses_a_short_legacy_master() {
 
     // An empty or short value is refused, not reported as "no finding".
     for bad in ["", "short"] {
-        let (code, out, err) = cli(tmp.path(), &cfg, &[("RUTLI_RS_TEST_MASTER", master), ("RS_BAD", bad)], &["--legacy-master-env", "RS_BAD"]);
+        let (code, out, err) = cli(
+            tmp.path(),
+            &cfg,
+            &[("RUTLI_RS_TEST_MASTER", master), ("RS_BAD", bad)],
+            &["--legacy-master-env", "RS_BAD"],
+        );
         assert_eq!(code, 2, "{bad:?}: {out}{err}");
         assert!(err.contains("--legacy-master-env"), "{err}");
     }
     // Unset: refused too.
-    let (code, _, err) = cli(tmp.path(), &cfg, &env, &["--legacy-master-env", "RS_UNSET_VAR"]);
+    let (code, _, err) = cli(
+        tmp.path(),
+        &cfg,
+        &env,
+        &["--legacy-master-env", "RS_UNSET_VAR"],
+    );
     assert_eq!(code, 2, "{err}");
 
     // A --backup that is neither a directory, a tar nor a key file: unclassified, exit 1.
-    let (code, out, _) = cli(tmp.path(), &cfg, &env, &["--backup", tmp.path().join("cosigner.json").to_str().unwrap()]);
+    let (code, out, _) = cli(
+        tmp.path(),
+        &cfg,
+        &env,
+        &[
+            "--backup",
+            tmp.path().join("cosigner.json").to_str().unwrap(),
+        ],
+    );
     assert_eq!(code, 1, "{out}");
-    assert!(out.contains("[unclassified]") && out.contains("compressed archives are not read"), "{out}");
+    assert!(
+        out.contains("[unclassified]") && out.contains("compressed archives are not read"),
+        "{out}"
+    );
 }

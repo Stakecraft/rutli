@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Peer liveness over the daemon's own mesh path (mTLS gRPC, `PeerDial`, tonic channels with

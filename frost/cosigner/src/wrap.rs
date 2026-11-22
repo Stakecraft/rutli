@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Wrapping hosted key material for transport between cosigners.
@@ -106,7 +106,11 @@ impl DistKey {
         // StaticSecret::from clamps the scalar, so any 32 bytes are a valid secret key.
         let secret = StaticSecret::from(*seed);
         let public = PublicKey::from(&secret);
-        Self { secret, public, identifier: node_identifier }
+        Self {
+            secret,
+            public,
+            identifier: node_identifier,
+        }
     }
 
     pub fn public_bytes(&self) -> [u8; 32] {
@@ -118,7 +122,13 @@ impl DistKey {
     }
 
     /// Unwrap an envelope addressed to this node.
-    pub fn unwrap_key(&self, w: &Wrapped, cluster_id: &str, key_id: &str, spec: &str) -> Result<Zeroizing<Vec<u8>>> {
+    pub fn unwrap_key(
+        &self,
+        w: &Wrapped,
+        cluster_id: &str,
+        key_id: &str,
+        spec: &str,
+    ) -> Result<Zeroizing<Vec<u8>>> {
         if w.version != WRAP_VERSION {
             return Err(DaemonError::Config(format!(
                 "unsupported key-wrap version {} (this node speaks {WRAP_VERSION})",
@@ -150,7 +160,12 @@ pub fn wrap_for(
 ) -> Result<Wrapped> {
     let aad = aad(cluster_id, key_id, spec, recipient, &[]);
     let (encapsulated_key, ciphertext) = seal_to(recipient_pub, material, &aad)?;
-    Ok(Wrapped { recipient, encapsulated_key, ciphertext, version: WRAP_VERSION })
+    Ok(Wrapped {
+        recipient,
+        encapsulated_key,
+        ciphertext,
+        version: WRAP_VERSION,
+    })
 }
 
 /// The construction under [`wrap_for`], for any X25519 recipient key: ephemeral X25519 →
@@ -163,14 +178,20 @@ pub fn wrap_for(
 /// This is confidentiality to the holder of the recipient key, **not** sender authentication:
 /// anyone who knows `recipient_pub` can produce an envelope that opens. Callers that need to know
 /// where the material came from must check it against something they already trust.
-pub fn seal_to(recipient_pub: &[u8; 32], material: &[u8], aad: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+pub fn seal_to(
+    recipient_pub: &[u8; 32],
+    material: &[u8],
+    aad: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>)> {
     let ephemeral = StaticSecret::random_from_rng(OsRng);
     let epk = PublicKey::from(&ephemeral);
     let shared = ephemeral.diffie_hellman(&PublicKey::from(*recipient_pub));
     // A small-order recipient key gives an all-zero shared secret: refuse rather than encrypt under
     // a key anyone can compute.
     if !shared.was_contributory() {
-        return Err(DaemonError::Config("recipient public key is not a usable X25519 key".into()));
+        return Err(DaemonError::Config(
+            "recipient public key is not a usable X25519 key".into(),
+        ));
     }
     let cek = derive_cek(shared.as_bytes(), epk.as_bytes(), recipient_pub);
 
@@ -204,7 +225,9 @@ pub fn open_with(
     let shared = secret.diffie_hellman(&PublicKey::from(epk));
     if !shared.was_contributory() {
         // A small-order ephemeral key: the CEK would be public. Same opaque error as a bad tag.
-        return Err(DaemonError::Config("key envelope failed authentication".into()));
+        return Err(DaemonError::Config(
+            "key envelope failed authentication".into(),
+        ));
     }
     let cek = derive_cek(shared.as_bytes(), &epk, recipient_pub);
 
@@ -228,7 +251,13 @@ pub fn open_with(
 /// `--cluster-id` on the dealer) so that changing the CA file — e.g. adding a second CA during a
 /// CA rotation (docs/ca-rotation.md) — does not change what envelopes are bound to.
 pub fn cluster_id_from_ca(ca_pem: &[u8]) -> String {
-    hex::encode(Sha256::digest(ca_pem).iter().copied().take(8).collect::<Vec<u8>>())
+    hex::encode(
+        Sha256::digest(ca_pem)
+            .iter()
+            .copied()
+            .take(8)
+            .collect::<Vec<u8>>(),
+    )
 }
 
 /// Check that `s` has the shape [`cluster_id_from_ca`] produces: exactly 16 lowercase hex
@@ -256,7 +285,8 @@ fn derive_cek(shared: &[u8; 32], epk: &[u8; 32], recipient_pub: &[u8; 32]) -> Ze
     info.extend_from_slice(recipient_pub);
     let hk = Hkdf::<Sha256>::new(None, shared);
     let mut cek = Zeroizing::new([0u8; 32]);
-    hk.expand(&info, cek.as_mut()).expect("32 bytes is a valid HKDF-SHA256 output length");
+    hk.expand(&info, cek.as_mut())
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
     cek
 }
 
@@ -286,20 +316,30 @@ mod tests {
     const MASTER: &[u8] = b"cluster master secret for wrap tests";
     const CLUSTER: &str = "abcdef0123456789";
     const GOLDEN_SEED_2: &str = "b63a8a39e06763d2723bb5c602657ad14d2bd4361270e19d0d7fa5b78f885f1d";
-    const GOLDEN_COMMITMENT: &str = "b8c3f120e13f6e286a4012cf13df26d856984e20a6ef184d4796f8ea7dc6442a";
+    const GOLDEN_COMMITMENT: &str =
+        "b8c3f120e13f6e286a4012cf13df26d856984e20a6ef184d4796f8ea7dc6442a";
 
     #[test]
     fn wrap_round_trips_to_the_intended_node() {
         let node2 = DistKey::derive(MASTER, 2);
         let material = b"PKCS#8 private key bytes";
-        let w = wrap_for(2, &node2.public_bytes(), material, CLUSTER, "rutli-enc-1", "rsa-2048-oaep-sha256")
-            .unwrap();
+        let w = wrap_for(
+            2,
+            &node2.public_bytes(),
+            material,
+            CLUSTER,
+            "rutli-enc-1",
+            "rsa-2048-oaep-sha256",
+        )
+        .unwrap();
         assert_eq!(w.version, WRAP_VERSION);
         assert_eq!(w.encapsulated_key.len(), 32);
         // The material must not appear in the envelope.
         assert!(!w.ciphertext.windows(material.len()).any(|c| c == material));
 
-        let out = node2.unwrap_key(&w, CLUSTER, "rutli-enc-1", "rsa-2048-oaep-sha256").unwrap();
+        let out = node2
+            .unwrap_key(&w, CLUSTER, "rutli-enc-1", "rsa-2048-oaep-sha256")
+            .unwrap();
         assert_eq!(out.as_slice(), material);
     }
 
@@ -307,30 +347,69 @@ mod tests {
     fn another_node_cannot_open_it() {
         let node2 = DistKey::derive(MASTER, 2);
         let node3 = DistKey::derive(MASTER, 3);
-        let w = wrap_for(2, &node2.public_bytes(), b"secret", CLUSTER, "k", "aes-256-gcm").unwrap();
+        let w = wrap_for(
+            2,
+            &node2.public_bytes(),
+            b"secret",
+            CLUSTER,
+            "k",
+            "aes-256-gcm",
+        )
+        .unwrap();
 
         // Wrong recipient is refused up front...
         assert!(node3.unwrap_key(&w, CLUSTER, "k", "aes-256-gcm").is_err());
         // ...and even relabelled to node 3, the ciphertext will not open (different DH secret).
-        let forged = Wrapped { recipient: 3, ..clone_wrapped(&w) };
-        assert!(node3.unwrap_key(&forged, CLUSTER, "k", "aes-256-gcm").is_err());
+        let forged = Wrapped {
+            recipient: 3,
+            ..clone_wrapped(&w)
+        };
+        assert!(node3
+            .unwrap_key(&forged, CLUSTER, "k", "aes-256-gcm")
+            .is_err());
     }
 
     #[test]
     fn the_envelope_is_bound_to_cluster_key_and_spec() {
         let node2 = DistKey::derive(MASTER, 2);
-        let w = wrap_for(2, &node2.public_bytes(), b"secret", CLUSTER, "k1", "aes-256-gcm").unwrap();
+        let w = wrap_for(
+            2,
+            &node2.public_bytes(),
+            b"secret",
+            CLUSTER,
+            "k1",
+            "aes-256-gcm",
+        )
+        .unwrap();
 
-        assert!(node2.unwrap_key(&w, "other-cluster", "k1", "aes-256-gcm").is_err());
-        assert!(node2.unwrap_key(&w, CLUSTER, "k2", "aes-256-gcm").is_err(), "replay under another key id");
-        assert!(node2.unwrap_key(&w, CLUSTER, "k1", "rsa-2048-oaep-sha256").is_err(), "spec confusion");
+        assert!(node2
+            .unwrap_key(&w, "other-cluster", "k1", "aes-256-gcm")
+            .is_err());
+        assert!(
+            node2.unwrap_key(&w, CLUSTER, "k2", "aes-256-gcm").is_err(),
+            "replay under another key id"
+        );
+        assert!(
+            node2
+                .unwrap_key(&w, CLUSTER, "k1", "rsa-2048-oaep-sha256")
+                .is_err(),
+            "spec confusion"
+        );
         assert!(node2.unwrap_key(&w, CLUSTER, "k1", "aes-256-gcm").is_ok());
     }
 
     #[test]
     fn tampering_is_detected() {
         let node2 = DistKey::derive(MASTER, 2);
-        let mut w = wrap_for(2, &node2.public_bytes(), b"secret", CLUSTER, "k", "aes-256-gcm").unwrap();
+        let mut w = wrap_for(
+            2,
+            &node2.public_bytes(),
+            b"secret",
+            CLUSTER,
+            "k",
+            "aes-256-gcm",
+        )
+        .unwrap();
         let last = w.ciphertext.len() - 1;
         w.ciphertext[last] ^= 1;
         assert!(node2.unwrap_key(&w, CLUSTER, "k", "aes-256-gcm").is_err());
@@ -339,7 +418,15 @@ mod tests {
     #[test]
     fn a_future_wrap_version_is_refused_not_misparsed() {
         let node2 = DistKey::derive(MASTER, 2);
-        let mut w = wrap_for(2, &node2.public_bytes(), b"secret", CLUSTER, "k", "aes-256-gcm").unwrap();
+        let mut w = wrap_for(
+            2,
+            &node2.public_bytes(),
+            b"secret",
+            CLUSTER,
+            "k",
+            "aes-256-gcm",
+        )
+        .unwrap();
         w.version = WRAP_VERSION + 1;
         assert!(node2.unwrap_key(&w, CLUSTER, "k", "aes-256-gcm").is_err());
     }
@@ -348,8 +435,14 @@ mod tests {
     fn derivation_is_deterministic_and_node_specific() {
         // Deterministic: every node computes the same public key for a peer from the same master,
         // which is what lets the pinned config value be checked at startup.
-        assert_eq!(DistKey::derive(MASTER, 2).public_bytes(), DistKey::derive(MASTER, 2).public_bytes());
-        assert_ne!(DistKey::derive(MASTER, 2).public_bytes(), DistKey::derive(MASTER, 3).public_bytes());
+        assert_eq!(
+            DistKey::derive(MASTER, 2).public_bytes(),
+            DistKey::derive(MASTER, 2).public_bytes()
+        );
+        assert_ne!(
+            DistKey::derive(MASTER, 2).public_bytes(),
+            DistKey::derive(MASTER, 3).public_bytes()
+        );
         assert_ne!(
             DistKey::derive(MASTER, 2).public_bytes(),
             DistKey::derive(b"a different master", 2).public_bytes()
@@ -364,8 +457,22 @@ mod tests {
             let derived = DistKey::derive(MASTER, id);
             let from_seed = DistKey::from_seed(&derive_dist_seed(MASTER, id), id);
             assert_eq!(derived.public_bytes(), from_seed.public_bytes());
-            let w = wrap_for(id, &derived.public_bytes(), b"m", CLUSTER, "k", "aes-256-gcm").unwrap();
-            assert_eq!(from_seed.unwrap_key(&w, CLUSTER, "k", "aes-256-gcm").unwrap().as_slice(), b"m");
+            let w = wrap_for(
+                id,
+                &derived.public_bytes(),
+                b"m",
+                CLUSTER,
+                "k",
+                "aes-256-gcm",
+            )
+            .unwrap();
+            assert_eq!(
+                from_seed
+                    .unwrap_key(&w, CLUSTER, "k", "aes-256-gcm")
+                    .unwrap()
+                    .as_slice(),
+                b"m"
+            );
         }
     }
 
@@ -374,13 +481,19 @@ mod tests {
         // Pinned outputs of the derivations every running cluster's envelopes and commitments
         // depend on. A change here strands every hosted key on every legacy cluster.
         assert_eq!(hex::encode(*derive_dist_seed(MASTER, 2)), GOLDEN_SEED_2);
-        assert_eq!(hex::encode(legacy_commitment_key(MASTER)), GOLDEN_COMMITMENT);
+        assert_eq!(
+            hex::encode(legacy_commitment_key(MASTER)),
+            GOLDEN_COMMITMENT
+        );
     }
 
     #[test]
     fn cluster_id_tracks_the_trust_domain() {
         assert_eq!(cluster_id_from_ca(b"ca-pem").len(), 16);
-        assert_ne!(cluster_id_from_ca(b"ca-pem"), cluster_id_from_ca(b"other-ca-pem"));
+        assert_ne!(
+            cluster_id_from_ca(b"ca-pem"),
+            cluster_id_from_ca(b"other-ca-pem")
+        );
     }
 
     #[test]
@@ -391,16 +504,19 @@ mod tests {
         check_cluster_id(CLUSTER).unwrap();
         for bad in [
             "",
-            "453BB4AEA2088BB5",   // uppercase: a different string, so a different AAD
-            "453bb4aea2088bb",    // 15
-            "453bb4aea2088bb5a",  // 17
-            "453bb4aea2088bbg",   // not hex
-            " 453bb4aea2088bb5",  // padding
+            "453BB4AEA2088BB5", // uppercase: a different string, so a different AAD
+            "453bb4aea2088bb",  // 15
+            "453bb4aea2088bb5a", // 17
+            "453bb4aea2088bbg", // not hex
+            " 453bb4aea2088bb5", // padding
             "453bb4aea2088bb5\n", // a trailing newline from `echo`
             "plaintext-dev",
         ] {
             let e = check_cluster_id(bad).unwrap_err().to_string();
-            assert!(e.contains("shasum -a 256 ca.crt | cut -c1-16"), "{bad:?}: {e}");
+            assert!(
+                e.contains("shasum -a 256 ca.crt | cut -c1-16"),
+                "{bad:?}: {e}"
+            );
         }
     }
 
@@ -420,7 +536,10 @@ mod tests {
              7368617265000000017800000000"
         );
         // No field boundary can be shifted: ("ab","c") and ("a","bc") differ.
-        assert_ne!(aad("c", "k", "s", 1, &[b"ab", b"c"]), aad("c", "k", "s", 1, &[b"a", b"bc"]));
+        assert_ne!(
+            aad("c", "k", "s", 1, &[b"ab", b"c"]),
+            aad("c", "k", "s", 1, &[b"a", b"bc"])
+        );
     }
 
     #[test]
@@ -428,11 +547,27 @@ mod tests {
         let secret = StaticSecret::random_from_rng(OsRng);
         let public = PublicKey::from(&secret).to_bytes();
         let (epk, ct) = seal_to(&public, b"share", b"context-a").unwrap();
-        let w = Wrapped { recipient: 0, encapsulated_key: epk, ciphertext: ct, version: 0 };
-        assert_eq!(open_with(&secret, &public, &w, b"context-a").unwrap().as_slice(), b"share");
+        let w = Wrapped {
+            recipient: 0,
+            encapsulated_key: epk,
+            ciphertext: ct,
+            version: 0,
+        };
+        assert_eq!(
+            open_with(&secret, &public, &w, b"context-a")
+                .unwrap()
+                .as_slice(),
+            b"share"
+        );
         assert!(open_with(&secret, &public, &w, b"context-b").is_err());
         let other = StaticSecret::random_from_rng(OsRng);
-        assert!(open_with(&other, &PublicKey::from(&other).to_bytes(), &w, b"context-a").is_err());
+        assert!(open_with(
+            &other,
+            &PublicKey::from(&other).to_bytes(),
+            &w,
+            b"context-a"
+        )
+        .is_err());
     }
 
     #[test]
@@ -442,7 +577,12 @@ mod tests {
         let secret = StaticSecret::random_from_rng(OsRng);
         let public = PublicKey::from(&secret).to_bytes();
         let (_, ct) = seal_to(&public, b"share", b"aad").unwrap();
-        let w = Wrapped { recipient: 0, encapsulated_key: vec![0u8; 32], ciphertext: ct, version: 0 };
+        let w = Wrapped {
+            recipient: 0,
+            encapsulated_key: vec![0u8; 32],
+            ciphertext: ct,
+            version: 0,
+        };
         assert!(open_with(&secret, &public, &w, b"aad").is_err());
     }
 

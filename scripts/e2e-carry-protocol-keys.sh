@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # End-to-end: B6, carrying a participant's protocol signing, sequencer-authentication and
 # encryption keys into Rütli — possible, and discouraged (docs/migration.md, "Carrying the signing

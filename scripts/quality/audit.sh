@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # cargo audit on frost/Cargo.lock: vulnerabilities, and warnings (unmaintained, unsound, yanked).
 # The counts change when new advisories are published, not only when the code changes, so CI runs

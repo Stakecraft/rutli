@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 #
 # Every push to main runs the whole set of checks once, unfiltered: CI, E2E ceremonies, Load test,

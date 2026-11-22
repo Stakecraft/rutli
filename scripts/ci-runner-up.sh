@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Start the self-hosted CI runner (deploy/ci-runner) inside an ISOLATED Colima VM.
 #

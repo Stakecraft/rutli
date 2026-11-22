@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Prometheus config for the Rütli soak stack. Job name MUST stay "rutli-cosigner" — the shipped
 # alert rules (deploy/monitoring/prometheus-rules.yml) select on it.

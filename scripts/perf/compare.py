@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 """Compare a load run (scripts/perf/run.py) with a previous one.
 

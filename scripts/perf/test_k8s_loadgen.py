@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 """Tests of scripts/perf/k8s_loadgen.py against a fake kubectl that runs the pod's commands
 locally, drops some connections, and a fake rutli-loadgen. No cluster is contacted.

@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! End-to-end smoke test for the Prometheus /metrics endpoint: install the real exporter, emit
@@ -43,9 +43,18 @@ async fn metrics_endpoint_serves_all_daemon_metrics() {
     ] {
         assert!(body.contains(name), "scrape missing {name}:\n{body}");
     }
-    assert!(body.contains(r#"result="ok""#), "labels must survive to the exposition");
-    assert!(body.contains("rutli_pending_sign_sessions 2"), "gauge value must be exposed");
-    assert!(body.contains("rutli_keystore_unreadable 1"), "keystore gauge must be exposed");
+    assert!(
+        body.contains(r#"result="ok""#),
+        "labels must survive to the exposition"
+    );
+    assert!(
+        body.contains("rutli_pending_sign_sessions 2"),
+        "gauge value must be exposed"
+    );
+    assert!(
+        body.contains("rutli_keystore_unreadable 1"),
+        "keystore gauge must be exposed"
+    );
 
     assert_sign_duration_is_a_histogram(&body);
 
@@ -68,32 +77,76 @@ fn assert_sign_duration_is_a_histogram(exposition: &str) {
         !exposition.contains(&format!("# TYPE {NAME} summary")),
         "{NAME} must not be rendered as a summary:\n{exposition}"
     );
-    assert!(!exposition.contains("quantile="), "no summary quantiles anywhere:\n{exposition}");
+    assert!(
+        !exposition.contains("quantile="),
+        "no summary quantiles anywhere:\n{exposition}"
+    );
 
     // Exactly the configured bounds, plus +Inf, for each label set that was recorded.
     for result in ["ok", "error"] {
         for le in rutli_cosigner::metrics::SIGN_DURATION_BUCKETS {
             let line = format!(r#"{NAME}_bucket{{result="{result}",le="{le}"}} "#);
-            assert!(exposition.contains(&line), "missing bucket line {line:?}:\n{exposition}");
+            assert!(
+                exposition.contains(&line),
+                "missing bucket line {line:?}:\n{exposition}"
+            );
         }
         let inf = format!(r#"{NAME}_bucket{{result="{result}",le="+Inf"}} "#);
-        assert!(exposition.contains(&inf), "missing +Inf bucket {inf:?}:\n{exposition}");
+        assert!(
+            exposition.contains(&inf),
+            "missing +Inf bucket {inf:?}:\n{exposition}"
+        );
         for suffix in ["sum", "count"] {
             let line = format!(r#"{NAME}_{suffix}{{result="{result}"}} "#);
-            assert!(exposition.contains(&line), "missing {line:?}:\n{exposition}");
+            assert!(
+                exposition.contains(&line),
+                "missing {line:?}:\n{exposition}"
+            );
         }
     }
 
     // Cumulative counts for result="ok" (samples 0.05, 0.083, 0.7, 3.0): the 1 s bound — the
     // soak gate's threshold — must sit at exactly the right place in the distribution.
-    assert_eq!(bucket_count(exposition, "ok", "0.05"), 1, "le=0.05 holds the 50 ms sample");
-    assert_eq!(bucket_count(exposition, "ok", "0.1"), 2, "le=0.1 adds the 83 ms sample");
-    assert_eq!(bucket_count(exposition, "ok", "1"), 3, "le=1 adds the 700 ms sample");
-    assert_eq!(bucket_count(exposition, "ok", "5"), 4, "le=5 adds the 3 s sample");
-    assert_eq!(bucket_count(exposition, "ok", "10"), 4, "le=10 (headroom above the 5 s alert)");
-    assert_eq!(bucket_count(exposition, "ok", "+Inf"), 4, "+Inf holds every sample");
-    assert_eq!(bucket_count(exposition, "error", "0.25"), 1, "error sample lands in le=0.25");
-    assert_eq!(bucket_count(exposition, "error", "0.15"), 0, "error sample is above le=0.15");
+    assert_eq!(
+        bucket_count(exposition, "ok", "0.05"),
+        1,
+        "le=0.05 holds the 50 ms sample"
+    );
+    assert_eq!(
+        bucket_count(exposition, "ok", "0.1"),
+        2,
+        "le=0.1 adds the 83 ms sample"
+    );
+    assert_eq!(
+        bucket_count(exposition, "ok", "1"),
+        3,
+        "le=1 adds the 700 ms sample"
+    );
+    assert_eq!(
+        bucket_count(exposition, "ok", "5"),
+        4,
+        "le=5 adds the 3 s sample"
+    );
+    assert_eq!(
+        bucket_count(exposition, "ok", "10"),
+        4,
+        "le=10 (headroom above the 5 s alert)"
+    );
+    assert_eq!(
+        bucket_count(exposition, "ok", "+Inf"),
+        4,
+        "+Inf holds every sample"
+    );
+    assert_eq!(
+        bucket_count(exposition, "error", "0.25"),
+        1,
+        "error sample lands in le=0.25"
+    );
+    assert_eq!(
+        bucket_count(exposition, "error", "0.15"),
+        0,
+        "error sample is above le=0.15"
+    );
 }
 
 fn bucket_count(exposition: &str, result: &str, le: &str) -> u64 {

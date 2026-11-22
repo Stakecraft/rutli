@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! `rutli-loadgen`: a load generator for a Rütli cosigner cluster.
@@ -55,7 +55,10 @@ const INTENT_LIFETIME_MS: u64 = 120_000;
 const ECIES_SPEC: &str = "ec-p256-ecies";
 
 #[derive(Parser)]
-#[command(name = "rutli-loadgen", about = "Load generator for a Rütli cosigner cluster (a test tool)")]
+#[command(
+    name = "rutli-loadgen",
+    about = "Load generator for a Rütli cosigner cluster (a test tool)"
+)]
 struct Cli {
     /// A cosigner, as `NAME=URL`: the name its TLS certificate carries and its Signer endpoint,
     /// e.g. `cosigner1=https://cosigner1:9101`. Repeat for every cosigner, in roster order.
@@ -224,7 +227,9 @@ struct Load {
 
 fn name_value(s: &str) -> Result<(String, String), String> {
     match s.split_once('=') {
-        Some((name, value)) if !name.is_empty() && !value.is_empty() => Ok((name.to_string(), value.to_string())),
+        Some((name, value)) if !name.is_empty() && !value.is_empty() => {
+            Ok((name.to_string(), value.to_string()))
+        }
         _ => Err(format!("expected NAME=URL, got {s:?}")),
     }
 }
@@ -248,7 +253,8 @@ struct Ctx {
 
 impl Ctx {
     fn new(cli: &Cli) -> Result<Self, Fail> {
-        let read = |p: &PathBuf| std::fs::read(p).map_err(|e| format!("cannot read {}: {e}", p.display()));
+        let read =
+            |p: &PathBuf| std::fs::read(p).map_err(|e| format!("cannot read {}: {e}", p.display()));
         let attempt = positive_secs(cli.attempt_timeout_secs, "--attempt-timeout-secs")?
             .unwrap_or(Duration::from_secs(cli.timeout_secs.max(1)));
         let tls = ClientTlsConfig::new()
@@ -262,7 +268,11 @@ impl Ctx {
             metrics: cli.metrics.clone(),
             timeout: Duration::from_secs(cli.timeout_secs.max(1)),
             attempt,
-            sign_attempt: positive_secs(cli.sign_attempt_timeout_secs, "--sign-attempt-timeout-secs")?.unwrap_or(attempt),
+            sign_attempt: positive_secs(
+                cli.sign_attempt_timeout_secs,
+                "--sign-attempt-timeout-secs",
+            )?
+            .unwrap_or(attempt),
             budget: positive_secs(cli.request_timeout_secs, "--request-timeout-secs")?,
             rotate_signs: cli.sign_leader == SignLeader::Rotate,
         })
@@ -271,7 +281,10 @@ impl Ctx {
     /// A client for target `i`. The connection is made on first use and again after it breaks, so
     /// a cosigner that is down now is no error here.
     fn connect(&self, i: usize) -> Result<SignerClient<Channel>, Fail> {
-        let (name, url) = self.targets.get(i).ok_or_else(|| format!("no target {i}"))?;
+        let (name, url) = self
+            .targets
+            .get(i)
+            .ok_or_else(|| format!("no target {i}"))?;
         let endpoint = Endpoint::from_shared(url.clone())
             .map_err(|e| format!("bad endpoint {url}: {e}"))?
             .connect_timeout(Duration::from_secs(5))
@@ -288,13 +301,18 @@ impl Ctx {
         };
         let endpoint = match Endpoint::from_shared(url.clone())
             .map_err(|e| e.to_string())
-            .and_then(|e| e.connect_timeout(self.timeout).tls_config(self.tls.clone().domain_name(name.clone())).map_err(|e| e.to_string()))
-        {
+            .and_then(|e| {
+                e.connect_timeout(self.timeout)
+                    .tls_config(self.tls.clone().domain_name(name.clone()))
+                    .map_err(|e| e.to_string())
+            }) {
             Ok(e) => e,
             Err(e) => return (Err(e), begun.elapsed()),
         };
         let channel = endpoint.connect().await.map_err(|e| {
-            let source = std::error::Error::source(&e).map(|s| format!(": {s}")).unwrap_or_default();
+            let source = std::error::Error::source(&e)
+                .map(|s| format!(": {s}"))
+                .unwrap_or_default();
             format!("{e}{source}")
         });
         (channel.map(SignerClient::new), begun.elapsed())
@@ -319,7 +337,10 @@ async fn bounded<T>(
 ) -> Result<T, tonic::Status> {
     match tokio::time::timeout(limit, call).await {
         Ok(answer) => answer.map(tonic::Response::into_inner),
-        Err(_) => Err(tonic::Status::deadline_exceeded(format!("no answer within {} s", limit.as_secs()))),
+        Err(_) => Err(tonic::Status::deadline_exceeded(format!(
+            "no answer within {} s",
+            limit.as_secs()
+        ))),
     }
 }
 
@@ -370,7 +391,12 @@ const MIN_ATTEMPT: Duration = Duration::from_millis(50);
 /// The deadline of the next attempt: `limit`, cut to what is left of `budget` after `elapsed`;
 /// `None` when the budget is spent (less than [`MIN_ATTEMPT`] left) after at least one attempt.
 /// The first attempt always runs.
-fn attempt_deadline(limit: Duration, budget: Option<Duration>, elapsed: Duration, tried: usize) -> Option<Duration> {
+fn attempt_deadline(
+    limit: Duration,
+    budget: Option<Duration>,
+    elapsed: Duration,
+    tried: usize,
+) -> Option<Duration> {
     match budget.map(|b| b.saturating_sub(elapsed)) {
         None => Some(limit),
         Some(left) if tried > 0 && left < MIN_ATTEMPT => None,
@@ -397,11 +423,19 @@ fn backoff(attempt: u32) -> Duration {
 impl Client {
     fn new(conns: Vec<SignerClient<Channel>>, leader: usize) -> Self {
         let demoted = (0..conns.len()).map(|_| AtomicU64::new(0)).collect();
-        Client { conns, leader: AtomicUsize::new(leader), cursor: AtomicUsize::new(0), demoted, epoch: Instant::now() }
+        Client {
+            conns,
+            leader: AtomicUsize::new(leader),
+            cursor: AtomicUsize::new(0),
+            demoted,
+            epoch: Instant::now(),
+        }
     }
 
     fn now(&self) -> u64 {
-        u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX).saturating_add(1)
+        u64::try_from(self.epoch.elapsed().as_nanos())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1)
     }
 
     /// Not demoted within [`LEADER_RECOVERY`].
@@ -417,7 +451,9 @@ impl Client {
             d.store(self.now(), Ordering::Relaxed);
         }
         let next = (i + 1) % self.conns.len();
-        let _ = self.leader.compare_exchange(i, next, Ordering::Relaxed, Ordering::Relaxed);
+        let _ = self
+            .leader
+            .compare_exchange(i, next, Ordering::Relaxed, Ordering::Relaxed);
     }
 
     /// Where a rotated signature starts: the next cosigner in turn that is healthy, else the
@@ -425,7 +461,10 @@ impl Client {
     fn sign_start(&self) -> usize {
         let n = self.conns.len();
         let first = self.cursor.fetch_add(1, Ordering::Relaxed) % n;
-        (0..n).map(|k| (first + k) % n).find(|&i| self.healthy(i)).unwrap_or(self.leader.load(Ordering::Relaxed) % n)
+        (0..n)
+            .map(|k| (first + k) % n)
+            .find(|&i| self.healthy(i))
+            .unwrap_or(self.leader.load(Ordering::Relaxed) % n)
     }
 
     /// Run `call` against the leader; while the answer is [`not_serving`] and `failover` is on,
@@ -450,13 +489,20 @@ impl Client {
         let mut at = start.unwrap_or_else(|| self.leader.load(Ordering::Relaxed)) % n;
         let began = Instant::now();
         loop {
-            let Some(deadline) = attempt_deadline(limit, budget, began.elapsed(), moves.len()) else {
+            let Some(deadline) = attempt_deadline(limit, budget, began.elapsed(), moves.len())
+            else {
                 let spent = tonic::Status::deadline_exceeded(format!(
                     "request timeout {} s spent after {} cosigner(s)",
                     budget.unwrap_or_default().as_secs_f64(),
                     moves.len()
                 ));
-                return (Err(spent), Route { failovers: moves, leader: Some(at) });
+                return (
+                    Err(spent),
+                    Route {
+                        failovers: moves,
+                        leader: Some(at),
+                    },
+                );
             };
             // `at` is reduced modulo `n = conns.len()` (one connection per --target, which clap
             // requires), here and at every step below, so it is in range.
@@ -475,7 +521,13 @@ impl Client {
                     if failover && matches!(&answer, Err(status) if not_serving(status)) {
                         self.demote(at);
                     }
-                    return (answer, Route { failovers: moves, leader: Some(at) });
+                    return (
+                        answer,
+                        Route {
+                            failovers: moves,
+                            leader: Some(at),
+                        },
+                    );
                 }
             }
         }
@@ -484,12 +536,26 @@ impl Client {
 
 /// What a load run sends.
 enum Op {
-    Sign { keys: Vec<(String, ed25519_dalek::VerifyingKey)> },
-    Ecdh { key_id: String, peer_point: Vec<u8>, expected: Vec<u8> },
+    Sign {
+        keys: Vec<(String, ed25519_dalek::VerifyingKey)>,
+    },
+    Ecdh {
+        key_id: String,
+        peer_point: Vec<u8>,
+        expected: Vec<u8>,
+    },
     /// `first_key`: with `same_key`, the group key of the first OK answer. Every later OK must
     /// carry the same one, or two ceremonies each believe they generated the key.
-    Dkg { prefix: String, same_key: bool, first_key: Mutex<Option<Vec<u8>>>, retry_aborted: u32 },
-    Refresh { key_id: String, group_key: Vec<u8> },
+    Dkg {
+        prefix: String,
+        same_key: bool,
+        first_key: Mutex<Option<Vec<u8>>>,
+        retry_aborted: u32,
+    },
+    Refresh {
+        key_id: String,
+        group_key: Vec<u8>,
+    },
 }
 
 impl Op {
@@ -510,7 +576,11 @@ struct Run {
 }
 
 impl Run {
-    fn ceremony_intent(&self, kind: CeremonyKind, key_id: &str) -> Result<pb::SignedIntent, tonic::Status> {
+    fn ceremony_intent(
+        &self,
+        kind: CeremonyKind,
+        key_id: &str,
+    ) -> Result<pb::SignedIntent, tonic::Status> {
         let unsigned = intent::ceremony_intent(
             &self.cluster_id,
             kind,
@@ -519,7 +589,8 @@ impl Run {
             intent::now_ms(),
             INTENT_LIFETIME_MS,
         );
-        intent::sign_intent(&self.ctx.signer, &unsigned).map_err(|e| tonic::Status::internal(format!("client: {e}")))
+        intent::sign_intent(&self.ctx.signer, &unsigned)
+            .map_err(|e| tonic::Status::internal(format!("client: {e}")))
     }
 
     /// One request, number `seq` of the run, through `client`. Recorded when it returns.
@@ -558,12 +629,18 @@ impl Run {
                     ..Default::default()
                 };
                 match intent::sign_intent(&self.ctx.signer, &unsigned) {
-                    Err(e) => (Err(tonic::Status::internal(format!("client: {e}"))), Route::default()),
+                    Err(e) => (
+                        Err(tonic::Status::internal(format!("client: {e}"))),
+                        Route::default(),
+                    ),
                     Ok(signed) => {
                         // One intent for the call: a failover presents the same one, as the
                         // driver does, so the cosigners charge it once.
-                        let request =
-                            pb::SignRequest { key_id: key_id.clone(), message: message.clone(), intent: Some(signed) };
+                        let request = pb::SignRequest {
+                            key_id: key_id.clone(),
+                            message: message.clone(),
+                            intent: Some(signed),
+                        };
                         let start = self.ctx.rotate_signs.then(|| client.sign_start());
                         let (answer, moves) = client
                             .call(failover, limit, budget, start, |mut c| {
@@ -571,12 +648,22 @@ impl Run {
                                 async move { c.sign(request).await }
                             })
                             .await;
-                        (answer.map(|reply| check_signature(group, &message, &reply.signature)), moves)
+                        (
+                            answer.map(|reply| check_signature(group, &message, &reply.signature)),
+                            moves,
+                        )
                     }
                 }
             }
-            Op::Ecdh { key_id, peer_point, expected } => {
-                let request = pb::EcdhDeriveRequest { key_id: key_id.clone(), peer_point: peer_point.clone() };
+            Op::Ecdh {
+                key_id,
+                peer_point,
+                expected,
+            } => {
+                let request = pb::EcdhDeriveRequest {
+                    key_id: key_id.clone(),
+                    peer_point: peer_point.clone(),
+                };
                 let (answer, moves) = client
                     .call(failover, limit, budget, None, |mut c| {
                         let request = request.clone();
@@ -584,12 +671,23 @@ impl Run {
                     })
                     .await;
                 let check = |reply: pb::EcdhDeriveReply| {
-                    (reply.shared_secret != *expected).then(|| "the ECDH secret differs from the locally computed one".to_string())
+                    (reply.shared_secret != *expected).then(|| {
+                        "the ECDH secret differs from the locally computed one".to_string()
+                    })
                 };
                 (answer.map(check), moves)
             }
-            Op::Dkg { prefix, same_key, first_key, retry_aborted } => {
-                let key_id = if *same_key { prefix.clone() } else { format!("{prefix}-{seq}") };
+            Op::Dkg {
+                prefix,
+                same_key,
+                first_key,
+                retry_aborted,
+            } => {
+                let key_id = if *same_key {
+                    prefix.clone()
+                } else {
+                    format!("{prefix}-{seq}")
+                };
                 // The first group key any request learned for the contested key id: every later
                 // answer, and every key an ALREADY_EXISTS points at, must be the same one.
                 let same_as_first = |key: &[u8]| -> Option<String> {
@@ -599,7 +697,9 @@ impl Run {
                     if *same_key {
                         let mut first = first_key.lock().unwrap_or_else(|p| p.into_inner());
                         if first.get_or_insert_with(|| key.to_vec()).as_slice() != key {
-                            return Some("two DKGs of one key id answered different group keys".to_string());
+                            return Some(
+                                "two DKGs of one key id answered different group keys".to_string(),
+                            );
                         }
                     }
                     None
@@ -611,7 +711,10 @@ impl Run {
                         Ok(s) => s,
                         Err(status) => break (Err(status), Route::default()),
                     };
-                    let request = pb::DkgRequest { key_id: key_id.clone(), intent: Some(signed) };
+                    let request = pb::DkgRequest {
+                        key_id: key_id.clone(),
+                        intent: Some(signed),
+                    };
                     let (answer, moves) = client
                         .call(false, limit, budget, None, |mut c| {
                             let request = request.clone();
@@ -628,12 +731,20 @@ impl Run {
                             // the winners answered.
                             let at = moves.leader.unwrap_or(0);
                             let wrong = match client.conns.get(at).cloned() {
-                                None => Some(format!("GroupKey after ALREADY_EXISTS: no connection {at}")),
+                                None => Some(format!(
+                                    "GroupKey after ALREADY_EXISTS: no connection {at}"
+                                )),
                                 Some(mut c) => {
-                                    let req = pb::GroupKeyRequest { key_id: key_id.clone() };
+                                    let req = pb::GroupKeyRequest {
+                                        key_id: key_id.clone(),
+                                    };
                                     match bounded(limit, c.group_key(req)).await {
                                         Ok(reply) => same_as_first(&reply.group_verifying_key),
-                                        Err(e) => Some(format!("GroupKey after ALREADY_EXISTS: {}: {}", code_name(e.code()), e.message())),
+                                        Err(e) => Some(format!(
+                                            "GroupKey after ALREADY_EXISTS: {}: {}",
+                                            code_name(e.code()),
+                                            e.message()
+                                        )),
                                     }
                                 }
                             };
@@ -642,36 +753,64 @@ impl Run {
                                 Some(w) => break (Ok(Some(w)), moves),
                             }
                         }
-                        answer => break (answer.map(|reply| same_as_first(&reply.group_verifying_key)), moves),
+                        answer => {
+                            break (
+                                answer.map(|reply| same_as_first(&reply.group_verifying_key)),
+                                moves,
+                            )
+                        }
                     }
                 }
             }
-            Op::Refresh { key_id, group_key } => match self.ceremony_intent(CeremonyKind::Refresh, key_id) {
-                Err(status) => (Err(status), Route::default()),
-                Ok(signed) => {
-                    let request = pb::RefreshRequest { key_id: key_id.clone(), intent: Some(signed) };
-                    let (answer, moves) = client
-                        .call(false, limit, budget, None, |mut c| {
-                            let request = request.clone();
-                            async move { c.refresh(request).await }
-                        })
-                        .await;
-                    let check = |reply: pb::RefreshReply| {
-                        (reply.group_verifying_key != *group_key).then(|| "the refresh changed the group key".to_string())
-                    };
-                    (answer.map(check), moves)
+            Op::Refresh { key_id, group_key } => {
+                match self.ceremony_intent(CeremonyKind::Refresh, key_id) {
+                    Err(status) => (Err(status), Route::default()),
+                    Ok(signed) => {
+                        let request = pb::RefreshRequest {
+                            key_id: key_id.clone(),
+                            intent: Some(signed),
+                        };
+                        let (answer, moves) = client
+                            .call(false, limit, budget, None, |mut c| {
+                                let request = request.clone();
+                                async move { c.refresh(request).await }
+                            })
+                            .await;
+                        let check = |reply: pb::RefreshReply| {
+                            (reply.group_verifying_key != *group_key)
+                                .then(|| "the refresh changed the group key".to_string())
+                        };
+                        (answer.map(check), moves)
+                    }
                 }
-            },
+            }
         };
         let latency = begun.elapsed();
         let (code, bad_answer, message) = match answer {
             Ok(None) => ("OK", false, None),
             Ok(Some(wrong)) => ("OK", true, Some(wrong)),
-            Err(status) => (code_name(status.code()), false, Some(status.message().to_string())),
+            Err(status) => (
+                code_name(status.code()),
+                false,
+                Some(status.message().to_string()),
+            ),
         };
-        let leader = moves.leader.and_then(|i| self.ctx.targets.get(i)).map(|t| t.0.clone());
-        let outcome = Outcome { at, latency, code, failovers: moves.failovers, bad_answer, leader };
-        self.recorder.lock().unwrap_or_else(|p| p.into_inner()).record(outcome, message);
+        let leader = moves
+            .leader
+            .and_then(|i| self.ctx.targets.get(i))
+            .map(|t| t.0.clone());
+        let outcome = Outcome {
+            at,
+            latency,
+            code,
+            failovers: moves.failovers,
+            bad_answer,
+            leader,
+        };
+        self.recorder
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .record(outcome, message);
     }
 }
 
@@ -682,11 +821,18 @@ fn random<const N: usize>() -> [u8; N] {
 }
 
 /// `None` if `signature` is a valid Ed25519 signature of `message` under `group`, else why not.
-fn check_signature(group: &ed25519_dalek::VerifyingKey, message: &[u8], signature: &[u8]) -> Option<String> {
+fn check_signature(
+    group: &ed25519_dalek::VerifyingKey,
+    message: &[u8],
+    signature: &[u8],
+) -> Option<String> {
     let Ok(sig) = ed25519_dalek::Signature::from_slice(signature) else {
         return Some(format!("a signature of {} bytes", signature.len()));
     };
-    group.verify_strict(message, &sig).err().map(|e| format!("the signature does not verify: {e}"))
+    group
+        .verify_strict(message, &sig)
+        .err()
+        .map(|e| format!("the signature does not verify: {e}"))
 }
 
 /// Generate the load of `load` and return the client's side of the report.
@@ -698,10 +844,17 @@ async fn generate(run: Arc<Run>, load: &Load) -> Result<stats::ClientReport, Fai
         return Err("--clients must be at least 1".into());
     }
     let ctx = &run.ctx;
-    let prefer = load.prefer.as_deref().map(|name| ctx.index_of(name)).transpose()?;
+    let prefer = load
+        .prefer
+        .as_deref()
+        .map(|name| ctx.index_of(name))
+        .transpose()?;
     let mut clients = Vec::with_capacity(load.clients);
     for i in 0..load.clients {
-        clients.push(Arc::new(Client::new(ctx.connect_all()?, prefer.unwrap_or(i % ctx.targets.len()))));
+        clients.push(Arc::new(Client::new(
+            ctx.connect_all()?,
+            prefer.unwrap_or(i % ctx.targets.len()),
+        )));
     }
     let mut connect_report = None;
     if load.eager_connect {
@@ -724,19 +877,30 @@ async fn generate(run: Arc<Run>, load: &Load) -> Result<stats::ClientReport, Fai
                     connected.push((i, first, conn));
                 }
                 Err(e) => {
-                    let kind = if took >= run.ctx.timeout { "timeout" } else { "error" };
+                    let kind = if took >= run.ctx.timeout {
+                        "timeout"
+                    } else {
+                        "error"
+                    };
                     *errors.entry(kind.to_string()).or_default() += 1;
                     sample.get_or_insert(e);
                 }
             }
         }
         for (i, first, conn) in connected {
-            let client = clients.get_mut(i).and_then(Arc::get_mut).expect("one client per index, not shared yet");
+            let client = clients
+                .get_mut(i)
+                .and_then(Arc::get_mut)
+                .expect("one client per index, not shared yet");
             if let Some(slot) = client.conns.get_mut(first) {
                 *slot = conn;
             }
         }
-        connect_report = Some(stats::ConnectReport { latency: stats::latency_of(&mut micros), errors, error_sample: sample });
+        connect_report = Some(stats::ConnectReport {
+            latency: stats::latency_of(&mut micros),
+            errors,
+            error_sample: sample,
+        });
     }
     let deadline = (load.duration_secs > 0).then(|| Duration::from_secs(load.duration_secs));
     let count = load.count;
@@ -774,13 +938,20 @@ async fn generate(run: Arc<Run>, load: &Load) -> Result<stats::ClientReport, Fai
                 Ok(permit) => {
                     // `clients` has `--clients` >= 1 entries (checked above); the index is reduced modulo its length.
                     #[allow(clippy::indexing_slicing)]
-                    let (run, client) = (run.clone(), clients[(seq % clients.len() as u64) as usize].clone());
+                    let (run, client) = (
+                        run.clone(),
+                        clients[(seq % clients.len() as u64) as usize].clone(),
+                    );
                     tasks.spawn(async move {
                         run.request(&client, seq).await;
                         drop(permit);
                     });
                 }
-                Err(_) => run.recorder.lock().unwrap_or_else(|p| p.into_inner()).saturated(),
+                Err(_) => run
+                    .recorder
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .saturated(),
             }
             seq += 1;
             while tasks.try_join_next().is_some() {}
@@ -820,7 +991,9 @@ async fn generate(run: Arc<Run>, load: &Load) -> Result<stats::ClientReport, Fai
 
 /// How many file descriptors this process holds now (Linux; None elsewhere).
 fn open_fds() -> Option<u64> {
-    std::fs::read_dir("/proc/self/fd").ok().map(|d| d.count() as u64)
+    std::fs::read_dir("/proc/self/fd")
+        .ok()
+        .map(|d| d.count() as u64)
 }
 
 /// This process's soft limit on open files, from /proc/self/limits (Linux; None elsewhere).
@@ -851,7 +1024,9 @@ async fn health(ctx: &Ctx) -> BTreeMap<String, bool> {
     let mut out = BTreeMap::new();
     for (i, (name, _)) in ctx.targets.iter().enumerate() {
         let ok = match ctx.connect(i) {
-            Ok(mut c) => bounded(Duration::from_secs(5), c.health(pb::HealthRequest {})).await.is_ok_and(|h| h.ok),
+            Ok(mut c) => bounded(Duration::from_secs(5), c.health(pb::HealthRequest {}))
+                .await
+                .is_ok_and(|h| h.ok),
             Err(_) => false,
         };
         out.insert(name.clone(), ok);
@@ -868,7 +1043,11 @@ async fn wait_healthy(ctx: &Ctx, within: Duration) -> Result<Duration, Fail> {
             return Ok(started.elapsed());
         }
         if started.elapsed() >= within {
-            let down: Vec<&String> = state.iter().filter(|(_, ok)| !**ok).map(|(n, _)| n).collect();
+            let down: Vec<&String> = state
+                .iter()
+                .filter(|(_, ok)| !**ok)
+                .map(|(n, _)| n)
+                .collect();
             return Err(format!("not healthy after {} s: {down:?}", within.as_secs()).into());
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -880,12 +1059,18 @@ async fn wait_healthy(ctx: &Ctx, within: Duration) -> Result<Duration, Fail> {
 async fn cluster_id(ctx: &Ctx) -> Result<String, Fail> {
     let mut answers = Vec::new();
     for i in 0..ctx.targets.len() {
-        if let Ok(reply) = bounded(ctx.timeout, ctx.connect(i)?.capabilities(pb::CapabilitiesRequest {})).await {
+        if let Ok(reply) = bounded(
+            ctx.timeout,
+            ctx.connect(i)?.capabilities(pb::CapabilitiesRequest {}),
+        )
+        .await
+        {
             answers.push(reply.cluster_id);
         }
     }
-    intent::agree_on_cluster_id(&answers, ctx.targets.len())
-        .ok_or_else(|| format!("the cosigners do not agree on a cluster id (answers: {answers:?})").into())
+    intent::agree_on_cluster_id(&answers, ctx.targets.len()).ok_or_else(|| {
+        format!("the cosigners do not agree on a cluster id (answers: {answers:?})").into()
+    })
 }
 
 /// The group key of FROST key `key_id`, as the first cosigner that answers reports it.
@@ -893,7 +1078,14 @@ async fn group_key(ctx: &Ctx, key_id: &str) -> Result<Vec<u8>, tonic::Status> {
     let mut last = tonic::Status::unavailable("no cosigner configured");
     for i in 0..ctx.targets.len() {
         let Ok(mut c) = ctx.connect(i) else { continue };
-        match bounded(ctx.timeout, c.group_key(pb::GroupKeyRequest { key_id: key_id.to_string() })).await {
+        match bounded(
+            ctx.timeout,
+            c.group_key(pb::GroupKeyRequest {
+                key_id: key_id.to_string(),
+            }),
+        )
+        .await
+        {
             Ok(reply) => return Ok(reply.group_verifying_key),
             Err(status) if not_serving(&status) => last = status,
             Err(status) => return Err(status),
@@ -907,7 +1099,14 @@ async fn status_group_key(ctx: &Ctx, key_id: &str) -> Result<Vec<u8>, tonic::Sta
     let mut last = tonic::Status::unavailable("no cosigner configured");
     for i in 0..ctx.targets.len() {
         let Ok(mut c) = ctx.connect(i) else { continue };
-        match bounded(ctx.timeout, c.key_status(pb::KeyStatusRequest { key_id: key_id.to_string() })).await {
+        match bounded(
+            ctx.timeout,
+            c.key_status(pb::KeyStatusRequest {
+                key_id: key_id.to_string(),
+            }),
+        )
+        .await
+        {
             Ok(reply) => return Ok(reply.group_verifying_key),
             Err(status) if not_serving(&status) => last = status,
             Err(status) => return Err(status),
@@ -917,8 +1116,11 @@ async fn status_group_key(ctx: &Ctx, key_id: &str) -> Result<Vec<u8>, tonic::Sta
 }
 
 fn verifying_key(key_id: &str, bytes: &[u8]) -> Result<ed25519_dalek::VerifyingKey, Fail> {
-    let raw: [u8; 32] = bytes.try_into().map_err(|_| format!("{key_id}: a group key of {} bytes", bytes.len()))?;
-    Ok(ed25519_dalek::VerifyingKey::from_bytes(&raw).map_err(|e| format!("{key_id}: not an Ed25519 key: {e}"))?)
+    let raw: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| format!("{key_id}: a group key of {} bytes", bytes.len()))?;
+    Ok(ed25519_dalek::VerifyingKey::from_bytes(&raw)
+        .map_err(|e| format!("{key_id}: not an Ed25519 key: {e}"))?)
 }
 
 #[derive(Serialize)]
@@ -944,7 +1146,13 @@ struct LoadReport {
 }
 
 /// Scrape, generate, scrape, probe: one load command from start to report.
-async fn load_command(ctx: Arc<Ctx>, command: &'static str, op: Op, cluster: String, load: Load) -> Result<LoadReport, Fail> {
+async fn load_command(
+    ctx: Arc<Ctx>,
+    command: &'static str,
+    op: Op,
+    cluster: String,
+    load: Load,
+) -> Result<LoadReport, Fail> {
     for name in &load.restarted {
         if !ctx.metrics.iter().any(|(n, _)| n == name) {
             return Err(format!("--restarted {name:?} is not a --metrics name").into());
@@ -964,7 +1172,12 @@ async fn load_command(ctx: Arc<Ctx>, command: &'static str, op: Op, cluster: Str
     let client = generate(run, &load).await?;
     eprintln!(
         "{command} {}: {} requests, {} ok, errors {:?}, p50 {} ms, p99 {} ms",
-        load.name, client.requests, client.ok, client.errors, client.latency.p50_ms, client.latency.p99_ms
+        load.name,
+        client.requests,
+        client.ok,
+        client.errors,
+        client.latency.p50_ms,
+        client.latency.p99_ms
     );
     let (after, after_errors) = scrape(&ctx).await;
     scrape_errors.extend(after_errors);
@@ -1005,11 +1218,19 @@ struct SetupKey {
     created: bool,
 }
 
-async fn setup(ctx: &Ctx, frost_keys: &[String], ecies_keys: &[String]) -> Result<SetupReport, Fail> {
+async fn setup(
+    ctx: &Ctx,
+    frost_keys: &[String],
+    ecies_keys: &[String],
+) -> Result<SetupReport, Fail> {
     let cluster = cluster_id(ctx).await?;
     let mut leader = ctx.connect(0)?;
-    let mut report =
-        SetupReport { command: "setup", cluster_id: cluster.clone(), frost_keys: BTreeMap::new(), ecies_keys: BTreeMap::new() };
+    let mut report = SetupReport {
+        command: "setup",
+        cluster_id: cluster.clone(),
+        frost_keys: BTreeMap::new(),
+        ecies_keys: BTreeMap::new(),
+    };
     for key_id in frost_keys {
         let (key, created) = match group_key(ctx, key_id).await {
             Ok(key) => (key, false),
@@ -1022,18 +1243,36 @@ async fn setup(ctx: &Ctx, frost_keys: &[String], ecies_keys: &[String]) -> Resul
                     intent::now_ms(),
                     INTENT_LIFETIME_MS,
                 );
-                let request =
-                    pb::DkgRequest { key_id: key_id.clone(), intent: Some(intent::sign_intent(&ctx.signer, &unsigned)?) };
+                let request = pb::DkgRequest {
+                    key_id: key_id.clone(),
+                    intent: Some(intent::sign_intent(&ctx.signer, &unsigned)?),
+                };
                 let reply = bounded(Duration::from_secs(120), leader.dkg(request))
                     .await
                     .map_err(|s| format!("DKG of {key_id}: {:?}: {}", s.code(), s.message()))?;
                 (reply.group_verifying_key, true)
             }
-            Err(status) => return Err(format!("GroupKey of {key_id}: {:?}: {}", status.code(), status.message()).into()),
+            Err(status) => {
+                return Err(format!(
+                    "GroupKey of {key_id}: {:?}: {}",
+                    status.code(),
+                    status.message()
+                )
+                .into())
+            }
         };
         verifying_key(key_id, &key)?;
-        eprintln!("setup: FROST key {key_id} {}", if created { "generated" } else { "exists" });
-        report.frost_keys.insert(key_id.clone(), SetupKey { public_key: hex::encode(key), created });
+        eprintln!(
+            "setup: FROST key {key_id} {}",
+            if created { "generated" } else { "exists" }
+        );
+        report.frost_keys.insert(
+            key_id.clone(),
+            SetupKey {
+                public_key: hex::encode(key),
+                created,
+            },
+        );
     }
     // A hosted key is created under a generate intent naming the cosigner asked to lead (by its
     // roster identifier, from Capabilities) and the spec. A cosigner of a release before generate
@@ -1059,8 +1298,9 @@ async fn setup(ctx: &Ctx, frost_keys: &[String], ecies_keys: &[String]) -> Resul
             let intent = match leader_id {
                 0 => None,
                 id => {
-                    let id = u16::try_from(id)
-                        .map_err(|_| format!("GenerateKey of {key_id}: roster identifier {id} out of range"))?;
+                    let id = u16::try_from(id).map_err(|_| {
+                        format!("GenerateKey of {key_id}: roster identifier {id} out of range")
+                    })?;
                     let unsigned = intent::generate_intent(
                         &cluster,
                         key_id,
@@ -1073,22 +1313,38 @@ async fn setup(ctx: &Ctx, frost_keys: &[String], ecies_keys: &[String]) -> Resul
                     Some(intent::sign_intent(&ctx.signer, &unsigned)?)
                 }
             };
-            let request = pb::GenerateKeyRequest { key_id: key_id.clone(), spec: ECIES_SPEC.into(), intent };
+            let request = pb::GenerateKeyRequest {
+                key_id: key_id.clone(),
+                spec: ECIES_SPEC.into(),
+                intent,
+            };
             tokio::time::sleep(Duration::from_secs_f64(1.0 / GENERATIONS_PER_SEC)).await;
             match bounded(ctx.timeout, leader.generate_key(request)).await {
                 Err(s) if s.code() == tonic::Code::Unavailable && attempt < 5 => {
                     attempt += 1;
-                    eprintln!("setup: hosted key {key_id}: UNAVAILABLE ({}), retrying in {} s", s.message(), 2 * attempt);
+                    eprintln!(
+                        "setup: hosted key {key_id}: UNAVAILABLE ({}), retrying in {} s",
+                        s.message(),
+                        2 * attempt
+                    );
                     tokio::time::sleep(Duration::from_secs(2 * attempt)).await;
                 }
                 answer => break answer,
             }
         }
         .map_err(|s| format!("GenerateKey of {key_id}: {:?}: {}", s.code(), s.message()))?;
-        eprintln!("setup: hosted key {key_id} {} ({} replicas)", if reply.created { "generated" } else { "exists" }, reply.replicas);
-        report
-            .ecies_keys
-            .insert(key_id.clone(), SetupKey { public_key: hex::encode(reply.public_key_der), created: reply.created });
+        eprintln!(
+            "setup: hosted key {key_id} {} ({} replicas)",
+            if reply.created { "generated" } else { "exists" },
+            reply.replicas
+        );
+        report.ecies_keys.insert(
+            key_id.clone(),
+            SetupKey {
+                public_key: hex::encode(reply.public_key_der),
+                created: reply.created,
+            },
+        );
     }
     Ok(report)
 }
@@ -1096,10 +1352,17 @@ async fn setup(ctx: &Ctx, frost_keys: &[String], ecies_keys: &[String]) -> Resul
 /// An ECDH request for hosted key `key_id` and the secret the cluster must answer: a fresh
 /// ephemeral key pair on our side, agreed locally with the hosted public key.
 async fn ecdh_op(ctx: &Ctx, key_id: &str) -> Result<Op, Fail> {
-    use aws_lc_rs::agreement::{agree_ephemeral, EphemeralPrivateKey, UnparsedPublicKey, ECDH_P256};
-    let reply = bounded(ctx.timeout, ctx.connect(0)?.public_key(pb::PublicKeyRequest { key_id: key_id.to_string() }))
-        .await
-        .map_err(|s| format!("PublicKey of {key_id}: {:?}: {}", s.code(), s.message()))?;
+    use aws_lc_rs::agreement::{
+        agree_ephemeral, EphemeralPrivateKey, UnparsedPublicKey, ECDH_P256,
+    };
+    let reply = bounded(
+        ctx.timeout,
+        ctx.connect(0)?.public_key(pb::PublicKeyRequest {
+            key_id: key_id.to_string(),
+        }),
+    )
+    .await
+    .map_err(|s| format!("PublicKey of {key_id}: {:?}: {}", s.code(), s.message()))?;
     if reply.spec != ECIES_SPEC {
         return Err(format!("{key_id} is a {:?} key, not {ECIES_SPEC}", reply.spec).into());
     }
@@ -1110,14 +1373,31 @@ async fn ecdh_op(ctx: &Ctx, key_id: &str) -> Result<Op, Fail> {
         .checked_sub(65)
         .and_then(|at| spki.get(at..))
         .filter(|point| point.first() == Some(&0x04))
-        .ok_or_else(|| format!("{key_id}: unexpected public key encoding ({} bytes)", spki.len()))?;
+        .ok_or_else(|| {
+            format!(
+                "{key_id}: unexpected public key encoding ({} bytes)",
+                spki.len()
+            )
+        })?;
     let rng = aws_lc_rs::rand::SystemRandom::new();
-    let ours = EphemeralPrivateKey::generate(&ECDH_P256, &rng).map_err(|_| "P-256 key generation failed")?;
-    let peer_point = ours.compute_public_key().map_err(|_| "P-256 public key failed")?.as_ref().to_vec();
-    let expected = agree_ephemeral(ours, UnparsedPublicKey::new(&ECDH_P256, hosted_point), "local ECDH failed", |z| {
-        Ok(z.to_vec())
-    })?;
-    Ok(Op::Ecdh { key_id: key_id.to_string(), peer_point, expected })
+    let ours = EphemeralPrivateKey::generate(&ECDH_P256, &rng)
+        .map_err(|_| "P-256 key generation failed")?;
+    let peer_point = ours
+        .compute_public_key()
+        .map_err(|_| "P-256 public key failed")?
+        .as_ref()
+        .to_vec();
+    let expected = agree_ephemeral(
+        ours,
+        UnparsedPublicKey::new(&ECDH_P256, hosted_point),
+        "local ECDH failed",
+        |z| Ok(z.to_vec()),
+    )?;
+    Ok(Op::Ecdh {
+        key_id: key_id.to_string(),
+        peer_point,
+        expected,
+    })
 }
 
 fn print_json(report: &impl Serialize) -> Result<(), Fail> {
@@ -1131,32 +1411,60 @@ async fn run(cli: Cli) -> Result<(), Fail> {
     match cli.command {
         Command::Wait { within_secs } => {
             let took = wait_healthy(&ctx, Duration::from_secs(within_secs)).await?;
-            print_json(&serde_json::json!({ "command": "wait", "healthy_after_secs": (took.as_secs_f64() * 10.0).round() / 10.0 }))
+            print_json(
+                &serde_json::json!({ "command": "wait", "healthy_after_secs": (took.as_secs_f64() * 10.0).round() / 10.0 }),
+            )
         }
-        Command::Setup { frost_keys, ecies_keys } => print_json(&setup(&ctx, &frost_keys, &ecies_keys).await?),
+        Command::Setup {
+            frost_keys,
+            ecies_keys,
+        } => print_json(&setup(&ctx, &frost_keys, &ecies_keys).await?),
         Command::Sign { keys, load } => {
             let cluster = cluster_id(&ctx).await?;
             let mut with_group = Vec::new();
             for key_id in keys {
-                let group = group_key(&ctx, &key_id)
-                    .await
-                    .map_err(|s| format!("GroupKey of {key_id}: {:?}: {}", s.code(), s.message()))?;
+                let group = group_key(&ctx, &key_id).await.map_err(|s| {
+                    format!("GroupKey of {key_id}: {:?}: {}", s.code(), s.message())
+                })?;
                 with_group.push((key_id.clone(), verifying_key(&key_id, &group)?));
             }
-            print_json(&load_command(ctx, "sign", Op::Sign { keys: with_group }, cluster, load).await?)
+            print_json(
+                &load_command(ctx, "sign", Op::Sign { keys: with_group }, cluster, load).await?,
+            )
         }
         Command::Ecdh { key, load } => {
             let cluster = cluster_id(&ctx).await?;
             let op = ecdh_op(&ctx, &key).await?;
             print_json(&load_command(ctx, "ecdh", op, cluster, load).await?)
         }
-        Command::Dkg { prefix, same_key, retry_aborted, load } => {
+        Command::Dkg {
+            prefix,
+            same_key,
+            retry_aborted,
+            load,
+        } => {
             let cluster = cluster_id(&ctx).await?;
-            print_json(&load_command(ctx, "dkg", Op::Dkg { prefix, same_key, first_key: Mutex::new(None), retry_aborted }, cluster, load).await?)
+            print_json(
+                &load_command(
+                    ctx,
+                    "dkg",
+                    Op::Dkg {
+                        prefix,
+                        same_key,
+                        first_key: Mutex::new(None),
+                        retry_aborted,
+                    },
+                    cluster,
+                    load,
+                )
+                .await?,
+            )
         }
-        Command::ListKeys { repeat, peer_cert, peer_key } => {
-            print_json(&list_keys(&ctx, &peer_cert, &peer_key, repeat, &ca).await?)
-        }
+        Command::ListKeys {
+            repeat,
+            peer_cert,
+            peer_key,
+        } => print_json(&list_keys(&ctx, &peer_cert, &peer_key, repeat, &ca).await?),
         Command::Refresh { key, load } => {
             let cluster = cluster_id(&ctx).await?;
             // KeyStatus, not GroupKey: a refresh runs with the refresher's certificate, as the
@@ -1164,7 +1472,19 @@ async fn run(cli: Cli) -> Result<(), Fail> {
             let group = status_group_key(&ctx, &key)
                 .await
                 .map_err(|s| format!("KeyStatus of {key}: {:?}: {}", s.code(), s.message()))?;
-            print_json(&load_command(ctx, "refresh", Op::Refresh { key_id: key, group_key: group }, cluster, load).await?)
+            print_json(
+                &load_command(
+                    ctx,
+                    "refresh",
+                    Op::Refresh {
+                        key_id: key,
+                        group_key: group,
+                    },
+                    cluster,
+                    load,
+                )
+                .await?,
+            )
         }
     }
 }
@@ -1189,13 +1509,23 @@ struct ListKeysTarget {
 }
 
 /// Peer.ListKeys on every cosigner, `repeat` times each, as a cosigner (`peer_cert`) would call it.
-async fn list_keys(ctx: &Ctx, cert: &PathBuf, key: &PathBuf, repeat: u32, ca: &PathBuf) -> Result<ListKeysReport, Fail> {
+async fn list_keys(
+    ctx: &Ctx,
+    cert: &PathBuf,
+    key: &PathBuf,
+    repeat: u32,
+    ca: &PathBuf,
+) -> Result<ListKeysReport, Fail> {
     use rutli_cosigner::pb::peer_client::PeerClient;
-    let read = |p: &PathBuf| std::fs::read(p).map_err(|e| format!("cannot read {}: {e}", p.display()));
+    let read =
+        |p: &PathBuf| std::fs::read(p).map_err(|e| format!("cannot read {}: {e}", p.display()));
     let tls = ClientTlsConfig::new()
         .ca_certificate(Certificate::from_pem(read(ca)?))
         .identity(Identity::from_pem(read(cert)?, read(key)?));
-    let mut out = ListKeysReport { command: "list-keys", targets: BTreeMap::new() };
+    let mut out = ListKeysReport {
+        command: "list-keys",
+        targets: BTreeMap::new(),
+    };
     for (name, url) in &ctx.targets {
         let endpoint = Endpoint::from_shared(url.clone())
             .map_err(|e| format!("bad endpoint {url}: {e}"))?
@@ -1216,7 +1546,9 @@ async fn list_keys(ctx: &Ctx, cert: &PathBuf, key: &PathBuf, repeat: u32, ca: &P
                 }
                 Err(status) => {
                     t.errors += 1;
-                    t.error_sample.get_or_insert_with(|| format!("{}: {}", code_name(status.code()), status.message()));
+                    t.error_sample.get_or_insert_with(|| {
+                        format!("{}: {}", code_name(status.code()), status.message())
+                    });
                 }
             }
         }
@@ -1247,7 +1579,10 @@ mod tests {
     fn name_value_pairs() {
         assert_eq!(
             name_value("cosigner1=https://cosigner1:9101").unwrap(),
-            ("cosigner1".to_string(), "https://cosigner1:9101".to_string())
+            (
+                "cosigner1".to_string(),
+                "https://cosigner1:9101".to_string()
+            )
         );
         // Only the first `=` separates: a URL may contain more.
         assert_eq!(name_value("a=http://h/m?x=1").unwrap().1, "http://h/m?x=1");
@@ -1265,13 +1600,22 @@ mod tests {
         assert_eq!(attempt_deadline(s(5), Some(s(30)), s(0), 0), Some(s(5)));
         assert_eq!(attempt_deadline(s(5), Some(s(30)), s(27), 2), Some(s(3)));
         // Spent (under 50 ms left) after an attempt: no further attempt.
-        assert_eq!(attempt_deadline(s(5), Some(s(30)), Duration::from_millis(29_960), 1), None);
+        assert_eq!(
+            attempt_deadline(s(5), Some(s(30)), Duration::from_millis(29_960), 1),
+            None
+        );
         assert_eq!(attempt_deadline(s(5), Some(s(30)), s(31), 1), None);
         // The first attempt always runs, even on a spent budget (with what is left: nothing).
-        assert_eq!(attempt_deadline(s(5), Some(s(30)), s(31), 0), Some(Duration::ZERO));
+        assert_eq!(
+            attempt_deadline(s(5), Some(s(30)), s(31), 0),
+            Some(Duration::ZERO)
+        );
         assert!(positive_secs(Some(0.0), "--x").is_err());
         assert!(positive_secs(Some(-1.0), "--x").is_err());
-        assert_eq!(positive_secs(Some(0.5), "--x").unwrap(), Some(Duration::from_millis(500)));
+        assert_eq!(
+            positive_secs(Some(0.5), "--x").unwrap(),
+            Some(Duration::from_millis(500))
+        );
         assert_eq!(positive_secs(None, "--x").unwrap(), None);
     }
 
@@ -1281,11 +1625,17 @@ mod tests {
             .map(|_| SignerClient::new(Endpoint::from_static("http://127.0.0.1:1").connect_lazy()))
             .collect();
         let c = Client::new(conns, 0);
-        assert_eq!((0..6).map(|_| c.sign_start()).collect::<Vec<_>>(), vec![0, 1, 2, 0, 1, 2]);
+        assert_eq!(
+            (0..6).map(|_| c.sign_start()).collect::<Vec<_>>(),
+            vec![0, 1, 2, 0, 1, 2]
+        );
         assert_eq!(c.leader.load(Ordering::Relaxed), 0);
         // Node 1 failed: skipped as a start, and the sticky leader (0) stays.
         c.demote(1);
-        assert_eq!((0..6).map(|_| c.sign_start()).collect::<Vec<_>>(), vec![0, 2, 2, 0, 2, 2]);
+        assert_eq!(
+            (0..6).map(|_| c.sign_start()).collect::<Vec<_>>(),
+            vec![0, 2, 2, 0, 2, 2]
+        );
         assert_eq!(c.leader.load(Ordering::Relaxed), 0);
         // The leader failed: the sticky leader moves on (compare-and-set: 0 -> 1); demoting 2,
         // not the leader, leaves it. With every node demoted a signature starts at the sticky leader.
@@ -1297,20 +1647,31 @@ mod tests {
 
     #[test]
     fn contended_ceremonies_are_retried_with_jittered_backoff() {
-        assert!(contended(&tonic::Status::aborted("a dkg ceremony (id dkg-x) is already in progress")));
-        assert!(contended(&tonic::Status::internal("rpc status: Aborted, message: \"a dkg ceremony … is already in progress\"")));
+        assert!(contended(&tonic::Status::aborted(
+            "a dkg ceremony (id dkg-x) is already in progress"
+        )));
+        assert!(contended(&tonic::Status::internal(
+            "rpc status: Aborted, message: \"a dkg ceremony … is already in progress\""
+        )));
         assert!(!contended(&tonic::Status::internal("something else")));
         assert!(!contended(&tonic::Status::already_exists("key exists")));
-        assert!(contended(&tonic::Status::unavailable("not serving: a ceremony for k (dkg-x) is staged and still resolving — retry shortly")));
+        assert!(contended(&tonic::Status::unavailable(
+            "not serving: a ceremony for k (dkg-x) is staged and still resolving — retry shortly"
+        )));
         for (attempt, full) in [(1, 0.5), (2, 1.0), (3, 2.0), (4, 4.0), (9, 4.0)] {
             let b = backoff(attempt).as_secs_f64();
-            assert!(b >= full / 2.0 - 1e-9 && b <= full + 1e-9, "attempt {attempt}: {b}");
+            assert!(
+                b >= full / 2.0 - 1e-9 && b <= full + 1e-9,
+                "attempt {attempt}: {b}"
+            );
         }
     }
 
     #[test]
     fn only_a_cosigner_that_does_not_serve_is_failed_over() {
-        assert!(not_serving(&tonic::Status::unavailable("could not reach signing threshold")));
+        assert!(not_serving(&tonic::Status::unavailable(
+            "could not reach signing threshold"
+        )));
         assert!(not_serving(&tonic::Status::deadline_exceeded("slow")));
         // Real answers of a live node: the next cosigner would say the same.
         for refusal in [

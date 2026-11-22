@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! The cosigner side of the split ceremony: `share-recipient`, `import-share`, `abort-import`.
@@ -14,9 +14,9 @@
 
 use std::path::{Path, PathBuf};
 
-use frost_ed25519 as frost;
 use frost::keys::KeyPackage;
 use frost::Identifier;
+use frost_ed25519 as frost;
 use serde::Serialize;
 
 use crate::config::Config;
@@ -178,10 +178,7 @@ pub fn import_share(
     let expect_fingerprint = share_delivery::canonical_fingerprint(expect_fingerprint)?;
     let expect_fingerprint = expect_fingerprint.as_str();
     // 1. Format.
-    if bundle.kind != BUNDLE_KIND
-        || bundle.v != BUNDLE_VERSION
-        || bundle.spec != SHARE_SPEC
-    {
+    if bundle.kind != BUNDLE_KIND || bundle.v != BUNDLE_VERSION || bundle.spec != SHARE_SPEC {
         return Err(ceremony(format!(
             "not a v{BUNDLE_VERSION} {BUNDLE_KIND} bundle (kind {:?}, v {}, spec {:?})",
             bundle.kind, bundle.v, bundle.spec
@@ -231,7 +228,13 @@ pub fn import_share(
         .map(|&i| Identifier::try_from(i).map_err(DaemonError::Frost))
         .collect::<Result<_>>()?;
     let pkp = &bundle.public_key_package;
-    if pkp.verifying_shares().keys().copied().collect::<std::collections::BTreeSet<_>>() != roster {
+    if pkp
+        .verifying_shares()
+        .keys()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        != roster
+    {
         return Err(ceremony(format!(
             "the public key package is not for this cluster's roster {:?}",
             ctx.roster
@@ -255,13 +258,14 @@ pub fn import_share(
     if *share.identifier() != ctx.me()? {
         return Err(ceremony("the sealed share is not for this node".into()));
     }
-    let key_package = KeyPackage::try_from(share).map_err(|_| {
-        ceremony("the share fails VSS verification against its commitment".into())
-    })?;
+    let key_package = KeyPackage::try_from(share)
+        .map_err(|_| ceremony("the share fails VSS verification against its commitment".into()))?;
     if key_package.verifying_key() != pkp.verifying_key()
         || key_package.verifying_key().serialize()?.as_slice() != group.as_slice()
     {
-        return Err(ceremony("the share's commitment is for a different group key".into()));
+        return Err(ceremony(
+            "the share's commitment is for a different group key".into(),
+        ));
     }
     if *key_package.min_signers() != ctx.threshold {
         return Err(ceremony(format!(
@@ -334,9 +338,15 @@ fn already_installed(
     dry_run: bool,
 ) -> Result<ImportReport> {
     let exists = || DaemonError::KeyExists(bundle.key_id.clone());
-    let Record::Frost(share) = keystore.load_record(&bundle.key_id)? else { return Err(exists()) };
-    let Some(origin) = &share.origin else { return Err(exists()) };
-    let digest = hex::encode(rutli_frost_core::dealer::pkp_digest(&share.public_key_package)?);
+    let Record::Frost(share) = keystore.load_record(&bundle.key_id)? else {
+        return Err(exists());
+    };
+    let Some(origin) = &share.origin else {
+        return Err(exists());
+    };
+    let digest = hex::encode(rutli_frost_core::dealer::pkp_digest(
+        &share.public_key_package,
+    )?);
     let group = rutli_frost_core::dkg::group_verifying_key_bytes(&share.public_key_package)?;
     let identical = origin.kind == ORIGIN_DEALER_SPLIT
         && origin.ceremony_id == bundle.ceremony_id
@@ -406,7 +416,9 @@ pub fn abort_import(
     // Decide everything before deleting anything.
     let installed = if key_present(keystore, key_id)? {
         let Record::Frost(share) = keystore.load_record(key_id)? else {
-            return Err(ceremony(format!("{key_id} is a hosted key, not an imported share")));
+            return Err(ceremony(format!(
+                "{key_id} is a hosted key, not an imported share"
+            )));
         };
         match &share.origin {
             Some(o) if o.kind == ORIGIN_DEALER_SPLIT && o.ceremony_id == ceremony_id => {
@@ -468,9 +480,8 @@ pub fn abort_import(
 
 /// Read a share bundle file.
 pub fn read_bundle(path: &Path) -> Result<ShareBundle> {
-    serde_json::from_slice(&std::fs::read(path)?).map_err(|e| {
-        ceremony(format!("{} is not a share bundle: {e}", path.display()))
-    })
+    serde_json::from_slice(&std::fs::read(path)?)
+        .map_err(|e| ceremony(format!("{} is not a share bundle: {e}", path.display())))
 }
 
 fn check_import_id(key_id: &str) -> Result<()> {
@@ -535,15 +546,37 @@ mod tests {
             )
             .unwrap();
             let signer = crate::test_pki::shared().signer(&format!("cosigner{identifier}"));
-            Self { _tmp: tmp, ctx, sealer, signer, keystore }
+            Self {
+                _tmp: tmp,
+                ctx,
+                sealer,
+                signer,
+                keystore,
+            }
         }
 
         fn recipient(&self) -> RecipientRequest {
-            share_recipient(&self.ctx, &self.keystore, &self.sealer, &self.signer, KEY, CEREMONY, false).unwrap()
+            share_recipient(
+                &self.ctx,
+                &self.keystore,
+                &self.sealer,
+                &self.signer,
+                KEY,
+                CEREMONY,
+                false,
+            )
+            .unwrap()
         }
 
         fn import(&self, b: &ShareBundle, dry_run: bool) -> Result<ImportReport> {
-            import_share(&self.ctx, &self.keystore, &self.sealer, b, &fingerprint(), dry_run)
+            import_share(
+                &self.ctx,
+                &self.keystore,
+                &self.sealer,
+                b,
+                &fingerprint(),
+                dry_run,
+            )
         }
     }
 
@@ -583,7 +616,10 @@ mod tests {
 
     fn assert_ceremony_err(r: Result<ImportReport>, needle: &str) {
         match r {
-            Err(e) => assert!(e.to_string().contains(needle), "expected {needle:?} in: {e}"),
+            Err(e) => assert!(
+                e.to_string().contains(needle),
+                "expected {needle:?} in: {e}"
+            ),
             Ok(rep) => panic!("expected an error containing {needle:?}, got {rep:?}"),
         }
     }
@@ -595,27 +631,46 @@ mod tests {
         let dry = n.import(&bundles[0], true).unwrap();
         assert_eq!(dry.outcome, "dry-run");
         assert!(!n.keystore.exists(KEY));
-        assert!(share_delivery::recipient_path(&n.ctx.data_dir, KEY).unwrap().exists());
+        assert!(share_delivery::recipient_path(&n.ctx.data_dir, KEY)
+            .unwrap()
+            .exists());
 
         // An upper-case (or padded) --expect-fingerprint is the same fingerprint (2026-10-15
         // review, L2); a malformed one is refused as such.
         let upper = format!(" {} ", fingerprint().to_uppercase());
         let dry = import_share(&n.ctx, &n.keystore, &n.sealer, &bundles[0], &upper, true).unwrap();
-        assert_eq!((dry.outcome, dry.canton_fingerprint.as_str()), ("dry-run", fingerprint().as_str()));
-        assert_ceremony_err(import_share(&n.ctx, &n.keystore, &n.sealer, &bundles[0], "1220ab", true), "not a 1220");
+        assert_eq!(
+            (dry.outcome, dry.canton_fingerprint.as_str()),
+            ("dry-run", fingerprint().as_str())
+        );
+        assert_ceremony_err(
+            import_share(&n.ctx, &n.keystore, &n.sealer, &bundles[0], "1220ab", true),
+            "not a 1220",
+        );
         let done = n.import(&bundles[0], false).unwrap();
         assert_eq!(done.outcome, "installed");
         assert_eq!(done.canton_fingerprint, fingerprint());
         assert_eq!(done.pkp_digest, bundles[0].pkp_digest);
         let installed = n.keystore.load(KEY).unwrap();
         let origin = installed.origin.clone().unwrap();
-        assert_eq!((origin.ceremony_id.as_str(), origin.refresh_count), (CEREMONY, 0));
-        assert_eq!((origin.carried_usage.as_ref(), done.carried_usage.as_ref()), (Some(&usage()), Some(&usage())));
-        assert!(!share_delivery::recipient_path(&n.ctx.data_dir, KEY).unwrap().exists());
+        assert_eq!(
+            (origin.ceremony_id.as_str(), origin.refresh_count),
+            (CEREMONY, 0)
+        );
+        assert_eq!(
+            (origin.carried_usage.as_ref(), done.carried_usage.as_ref()),
+            (Some(&usage()), Some(&usage()))
+        );
+        assert!(!share_delivery::recipient_path(&n.ctx.data_dir, KEY)
+            .unwrap()
+            .exists());
 
         // Identical re-import: no-op success (the bundle can no longer be opened, and need not be).
         let again = n.import(&bundles[0], false).unwrap();
-        assert_eq!((again.outcome, again.carried_usage), ("already-installed", Some(usage())));
+        assert_eq!(
+            (again.outcome, again.carried_usage),
+            ("already-installed", Some(usage()))
+        );
     }
 
     /// A bundle from a pre-B6 dealer (no usage, envelope version 2) is refused, dry run or not: such
@@ -624,7 +679,10 @@ mod tests {
     #[test]
     fn a_pre_b6_bundle_and_a_misclassified_usage_are_refused() {
         let (nodes, bundles) = three();
-        for (usage, version) in [(None, share_delivery::PRE_B6_SHARE_WRAP_VERSION), (None, share_delivery::SHARE_WRAP_VERSION)] {
+        for (usage, version) in [
+            (None, share_delivery::PRE_B6_SHARE_WRAP_VERSION),
+            (None, share_delivery::SHARE_WRAP_VERSION),
+        ] {
             let mut b2 = bundles[0].clone();
             (b2.usage, b2.wrapped.version) = (usage, version);
             for dry_run in [true, false] {
@@ -632,24 +690,43 @@ mod tests {
             }
         }
         assert!(!nodes[0].keystore.exists(KEY));
-        assert!(share_delivery::recipient_path(&nodes[0].ctx.data_dir, KEY).unwrap().exists(), "nothing consumed");
+        assert!(
+            share_delivery::recipient_path(&nodes[0].ctx.data_dir, KEY)
+                .unwrap()
+                .exists(),
+            "nothing consumed"
+        );
 
         let mut protocol = bundles[1].clone();
-        let carried = |expected: &str, recorded: &[&str], ns: Option<String>| crate::carry::CarriedUsage {
-            expected: expected.into(),
-            recorded: Some(recorded.iter().map(|s| s.to_string()).collect()),
-            namespace_fingerprint: ns,
-        };
-        protocol.usage = Some(carried("protocol", &["signing"], Some(format!("1220{}", "ab".repeat(32)))));
+        let carried =
+            |expected: &str, recorded: &[&str], ns: Option<String>| crate::carry::CarriedUsage {
+                expected: expected.into(),
+                recorded: Some(recorded.iter().map(|s| s.to_string()).collect()),
+                namespace_fingerprint: ns,
+            };
+        protocol.usage = Some(carried(
+            "protocol",
+            &["signing"],
+            Some(format!("1220{}", "ab".repeat(32))),
+        ));
         assert_ceremony_err(nodes[1].import(&protocol, true), "namespace-style id");
         // A modified dealer's bundle the real one would refuse: refused here too, before decryption.
         // All usage, no namespace acknowledgement (could be a Splice signing key, not the root):
-        let all = ["namespace", "proof-of-ownership", "sequencer-auth", "signing"];
+        let all = [
+            "namespace",
+            "proof-of-ownership",
+            "sequencer-auth",
+            "signing",
+        ];
         let mut b = bundles[1].clone();
         b.usage = Some(carried("namespace", &all, None));
         assert_ceremony_err(nodes[1].import(&b, true), "--namespace-fingerprint");
         // ... and an acknowledgement naming another key than this bundle's.
-        b.usage = Some(carried("namespace", &all, Some(format!("1220{}", "ab".repeat(32)))));
+        b.usage = Some(carried(
+            "namespace",
+            &all,
+            Some(format!("1220{}", "ab".repeat(32))),
+        ));
         assert_ceremony_err(nodes[1].import(&b, true), "is not the namespace");
         // A malformed acknowledgement.
         b.usage = Some(carried("namespace", &["namespace"], Some("1220AB".into())));
@@ -663,7 +740,13 @@ mod tests {
         let n = TestNode::new(2);
         let request = n.recipient();
         let line = recipient_sas(&n.ctx.data_dir, &n.sealer, KEY).unwrap();
-        assert!(line.starts_with(&format!("SAS node 2 {} ", crate::request_auth::sas(&request))), "{line}");
+        assert!(
+            line.starts_with(&format!(
+                "SAS node 2 {} ",
+                crate::request_auth::sas(&request)
+            )),
+            "{line}"
+        );
         assert!(line.contains(CEREMONY));
         // Not with another node's seal key, not for a non-import id.
         let other = Sealer::from_master_secret(b"share import test master", 3);
@@ -690,10 +773,16 @@ mod tests {
         assert_ceremony_err(r, "not the expected");
         assert!(recipient.exists());
         // A dry run reports, deletes nothing.
-        assert_eq!(n.import(&bundles[0], true).unwrap().outcome, "already-installed");
+        assert_eq!(
+            n.import(&bundles[0], true).unwrap().outcome,
+            "already-installed"
+        );
         assert!(recipient.exists());
         // The real re-run finishes the install: the recipient secret is gone.
-        assert_eq!(n.import(&bundles[0], false).unwrap().outcome, "already-installed");
+        assert_eq!(
+            n.import(&bundles[0], false).unwrap().outcome,
+            "already-installed"
+        );
         assert!(!recipient.exists());
     }
 
@@ -729,13 +818,27 @@ mod tests {
 
         // Operator expects a different key.
         let other_fp = format!("1220{}", "ab".repeat(32));
-        let r = import_share(&n.ctx, &n.keystore, &n.sealer, &bundles[0], &other_fp, false);
+        let r = import_share(
+            &n.ctx,
+            &n.keystore,
+            &n.sealer,
+            &bundles[0],
+            &other_fp,
+            false,
+        );
         assert_ceremony_err(r, "expected");
 
         // This node's config changed between share-recipient and import.
         let mut ctx = n.ctx.clone();
         ctx.threshold = 3;
-        let r = import_share(&ctx, &n.keystore, &n.sealer, &bundles[0], &fingerprint(), false);
+        let r = import_share(
+            &ctx,
+            &n.keystore,
+            &n.sealer,
+            &bundles[0],
+            &fingerprint(),
+            false,
+        );
         assert_ceremony_err(r, "configured");
 
         let mut b = bundles[0].clone();
@@ -759,29 +862,84 @@ mod tests {
         n.import(&bundles[1], false).unwrap();
         let mut from_another = bundles[1].clone();
         from_another.ceremony_id = "c-other".into();
-        assert!(matches!(n.import(&from_another, false), Err(DaemonError::KeyExists(_))));
+        assert!(matches!(
+            n.import(&from_another, false),
+            Err(DaemonError::KeyExists(_))
+        ));
         let mut other_package = bundles[1].clone();
         other_package.pkp_digest = hex::encode([0u8; 32]);
-        assert!(matches!(n.import(&other_package, false), Err(DaemonError::KeyExists(_))));
+        assert!(matches!(
+            n.import(&other_package, false),
+            Err(DaemonError::KeyExists(_))
+        ));
     }
 
     #[test]
     fn share_recipient_refuses_non_import_ids_existing_keys_and_needs_replace() {
         let n = TestNode::new(1);
-        let r = share_recipient(&n.ctx, &n.keystore, &n.sealer, &n.signer, "frost-namespace", CEREMONY, false);
+        let r = share_recipient(
+            &n.ctx,
+            &n.keystore,
+            &n.sealer,
+            &n.signer,
+            "frost-namespace",
+            CEREMONY,
+            false,
+        );
         assert!(r.is_err());
         // Import-shaped, but of no single class: the dealer and import-share would refuse it.
-        for unclassified in ["frost-import-frost-import-sig-x", "frost-import-sig-", "frost-import-seqauth-"] {
-            let r = share_recipient(&n.ctx, &n.keystore, &n.sealer, &n.signer, unclassified, CEREMONY, false);
-            assert!(r.unwrap_err().to_string().contains("one class"), "{unclassified}");
+        for unclassified in [
+            "frost-import-frost-import-sig-x",
+            "frost-import-sig-",
+            "frost-import-seqauth-",
+        ] {
+            let r = share_recipient(
+                &n.ctx,
+                &n.keystore,
+                &n.sealer,
+                &n.signer,
+                unclassified,
+                CEREMONY,
+                false,
+            );
+            assert!(
+                r.unwrap_err().to_string().contains("one class"),
+                "{unclassified}"
+            );
         }
         n.recipient();
-        assert!(share_recipient(&n.ctx, &n.keystore, &n.sealer, &n.signer, KEY, CEREMONY, false).is_err());
-        share_recipient(&n.ctx, &n.keystore, &n.sealer, &n.signer, KEY, CEREMONY, true).unwrap();
+        assert!(share_recipient(
+            &n.ctx,
+            &n.keystore,
+            &n.sealer,
+            &n.signer,
+            KEY,
+            CEREMONY,
+            false
+        )
+        .is_err());
+        share_recipient(
+            &n.ctx,
+            &n.keystore,
+            &n.sealer,
+            &n.signer,
+            KEY,
+            CEREMONY,
+            true,
+        )
+        .unwrap();
 
         let (nodes, bundles) = three();
         nodes[2].import(&bundles[2], false).unwrap();
-        let again = share_recipient(&nodes[2].ctx, &nodes[2].keystore, &nodes[2].sealer, &nodes[2].signer, KEY, "c-9", true);
+        let again = share_recipient(
+            &nodes[2].ctx,
+            &nodes[2].keystore,
+            &nodes[2].sealer,
+            &nodes[2].signer,
+            KEY,
+            "c-9",
+            true,
+        );
         assert!(matches!(again, Err(DaemonError::KeyExists(_))));
     }
 
@@ -799,7 +957,9 @@ mod tests {
         // Wrong ceremony id: refused, recipient kept.
         let n = &nodes[1];
         assert!(abort_import(&n.ctx, &n.keystore, &n.sealer, KEY, "c-other", true).is_err());
-        assert!(share_delivery::recipient_path(&n.ctx.data_dir, KEY).unwrap().exists());
+        assert!(share_delivery::recipient_path(&n.ctx.data_dir, KEY)
+            .unwrap()
+            .exists());
 
         // Installed, no flag: kept. With the flag: deleted.
         n.import(&bundles[1], false).unwrap();
@@ -829,6 +989,14 @@ mod tests {
         assert!(n.keystore.exists(KEY));
 
         // And never anything that is not an import id.
-        assert!(abort_import(&n.ctx, &n.keystore, &n.sealer, "frost-namespace", CEREMONY, true).is_err());
+        assert!(abort_import(
+            &n.ctx,
+            &n.keystore,
+            &n.sealer,
+            "frost-namespace",
+            CEREMONY,
+            true
+        )
+        .is_err());
     }
 }

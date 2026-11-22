@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Peer key pins (`peers[].tls_spki_sha256`) on the wire, both ways, over an in-memory network
@@ -55,11 +55,22 @@ fn leaf(dir: &Path, ca: &Ca, cn: &str, file: &str) -> TlsConfig {
     let mut params = CertificateParams::new(vec![cn.to_string()]).unwrap();
     params.distinguished_name.push(DnType::CommonName, cn);
     let cert = params.signed_by(&key, &ca.0, &ca.1).unwrap();
-    let (cert_path, key_path, ca_path) = (dir.join(format!("{file}.pem")), dir.join(format!("{file}.key")), dir.join("ca.pem"));
+    let (cert_path, key_path, ca_path) = (
+        dir.join(format!("{file}.pem")),
+        dir.join(format!("{file}.key")),
+        dir.join("ca.pem"),
+    );
     std::fs::write(&cert_path, cert.pem()).unwrap();
     std::fs::write(&key_path, key.serialize_pem()).unwrap();
     std::fs::write(&ca_path, ca.0.pem()).unwrap();
-    TlsConfig { ca_cert: ca_path, cert: cert_path, key: key_path, domain: None, allow_expired_ca: false, require_peer_pins: None }
+    TlsConfig {
+        ca_cert: ca_path,
+        cert: cert_path,
+        key: key_path,
+        domain: None,
+        allow_expired_ca: false,
+        require_peer_pins: None,
+    }
 }
 
 fn pin(cfg: &TlsConfig) -> [u8; 32] {
@@ -84,10 +95,16 @@ fn peer_pins(pins: &[(u16, Vec<[u8; 32]>)]) -> Arc<PeerPins> {
     let mut cfg_peers = Vec::new();
     for id in 1..=N {
         let mut p = PeerConfig::new(id, endpoint(id));
-        p.tls_spki_sha256 = pins.iter().find(|(i, _)| *i == id).map(|(_, list)| list.iter().map(hex::encode).collect());
+        p.tls_spki_sha256 = pins
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, list)| list.iter().map(hex::encode).collect());
         cfg_peers.push(p);
     }
-    let cfg = rutli_cosigner::config::Config { peers: cfg_peers, ..base_config() };
+    let cfg = rutli_cosigner::config::Config {
+        peers: cfg_peers,
+        ..base_config()
+    };
     Arc::new(PeerPins::from_config(&cfg).unwrap())
 }
 
@@ -98,7 +115,13 @@ fn base_config() -> rutli_cosigner::config::Config {
 
 /// Serve `node`'s Peer API at `authority` on `net` with TLS `server`, the cosigner CN allowlist and
 /// `pins`. Counts every request that reaches the service.
-fn serve(net: &MemNet, authority: &str, tls: &Tls, node: Arc<Node>, pins: Option<Arc<PeerPins>>) -> (Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+fn serve(
+    net: &MemNet,
+    authority: &str,
+    tls: &Tls,
+    node: Arc<Node>,
+    pins: Option<Arc<PeerPins>>,
+) -> (Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
     serve_with(net, authority, tls, node, pins, true)
 }
 
@@ -115,8 +138,16 @@ fn serve_with(
     let counter = seen.clone();
     let peer = PeerSvc {
         node,
-        allowed_cns: allowlist.then(|| Arc::new((1..=N).map(|i| format!("cosigner{i}")).collect::<HashSet<_>>())),
-        peer_ids: Some(Arc::new((1..=N).map(|i| (format!("cosigner{i}"), i)).collect())),
+        allowed_cns: allowlist.then(|| {
+            Arc::new(
+                (1..=N)
+                    .map(|i| format!("cosigner{i}"))
+                    .collect::<HashSet<_>>(),
+            )
+        }),
+        peer_ids: Some(Arc::new(
+            (1..=N).map(|i| (format!("cosigner{i}"), i)).collect(),
+        )),
         peer_pins: pins,
     };
     let svc = PeerServer::with_interceptor(peer, move |req| {
@@ -128,16 +159,24 @@ fn serve_with(
         .unwrap()
         .add_service(svc)
         .serve_with_incoming(net.listen(authority));
-    (seen, tokio::spawn(async move {
-        let _ = server.await;
-    }))
+    (
+        seen,
+        tokio::spawn(async move {
+            let _ = server.await;
+        }),
+    )
 }
 
 /// A client of peer `id` on `net`, dialled as the daemon dials: under `cosigner<id>`, with `pins`.
 fn dial(net: &MemNet, tls: &Tls, id: u16, pins: Option<Vec<[u8; 32]>>) -> GrpcPeer {
     let dial = tls.dial_as(&format!("cosigner{id}"), pins, id).unwrap();
-    GrpcPeer::connect_lazy_over(Identifier::try_from(id).unwrap(), &endpoint(id), &dial, dial.connector_over(net.dialer()))
-        .unwrap()
+    GrpcPeer::connect_lazy_over(
+        Identifier::try_from(id).unwrap(),
+        &endpoint(id),
+        &dial,
+        dial.connector_over(net.dialer()),
+    )
+    .unwrap()
 }
 
 /// The error and everything behind it (the pin refusal sits under tonic's transport error).
@@ -156,23 +195,41 @@ fn chain(e: &dyn std::error::Error) -> String {
 async fn outbound_a_wrong_pin_is_refused_and_the_right_pin_completes_an_rpc() {
     let tmp = tempfile::tempdir().unwrap();
     let ca = ca();
-    let (c1, c2) = (leaf(tmp.path(), &ca, "cosigner1", "c1"), leaf(tmp.path(), &ca, "cosigner2", "c2"));
-    let (t1, t2) = (rutli_cosigner::tls::load(&c1).unwrap(), rutli_cosigner::tls::load(&c2).unwrap());
+    let (c1, c2) = (
+        leaf(tmp.path(), &ca, "cosigner1", "c1"),
+        leaf(tmp.path(), &ca, "cosigner2", "c2"),
+    );
+    let (t1, t2) = (
+        rutli_cosigner::tls::load(&c1).unwrap(),
+        rutli_cosigner::tls::load(&c2).unwrap(),
+    );
     let net = MemNet::new();
     let (seen, server) = serve(&net, &authority(2), &t2, node(tmp.path(), 2), None);
 
     // The right pin: the RPC completes.
     let good = dial(&net, &t1, 2, Some(vec![pin(&c2)]));
-    good.hosted_specs().await.expect("the pinned key must get through");
+    good.hosted_specs()
+        .await
+        .expect("the pinned key must get through");
     assert_eq!(seen.load(Ordering::SeqCst), 1);
 
     // A wrong pin: refused before any request is written, naming the CN and the key it saw.
     let bad = dial(&net, &t1, 2, Some(vec![[7u8; 32]]));
     let e = bad.hosted_specs().await.unwrap_err();
     let text = chain(&e);
-    assert!(text.contains("not pinned in peers[id=2].tls_spki_sha256"), "{text}");
-    assert!(text.contains("'cosigner2'") && text.contains(&hex::encode(pin(&c2))), "{text}");
-    assert_eq!(seen.load(Ordering::SeqCst), 1, "a refused dial must send the peer nothing");
+    assert!(
+        text.contains("not pinned in peers[id=2].tls_spki_sha256"),
+        "{text}"
+    );
+    assert!(
+        text.contains("'cosigner2'") && text.contains(&hex::encode(pin(&c2))),
+        "{text}"
+    );
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        1,
+        "a refused dial must send the peer nothing"
+    );
 
     // Unpinned (tls.require_peer_pins: false): the name alone, as before.
     dial(&net, &t1, 2, None).hosted_specs().await.unwrap();
@@ -190,16 +247,34 @@ async fn the_dial_still_refuses_another_ca_and_another_name_with_the_rustls_reas
     let foreign = leaf(tmp.path(), &other, "cosigner2", "foreign");
     let pinned = Some(vec![pin(&foreign)]);
     let net = MemNet::new();
-    let (seen, server) = serve(&net, &authority(2), &rutli_cosigner::tls::load(&foreign).unwrap(), node(tmp.path(), 2), None);
-    let e = dial(&net, &t1, 2, pinned.clone()).hosted_specs().await.unwrap_err();
+    let (seen, server) = serve(
+        &net,
+        &authority(2),
+        &rutli_cosigner::tls::load(&foreign).unwrap(),
+        node(tmp.path(), 2),
+        None,
+    );
+    let e = dial(&net, &t1, 2, pinned.clone())
+        .hosted_specs()
+        .await
+        .unwrap_err();
     assert!(format!("{e:?}").contains("UnknownIssuer"), "{e:?}");
     assert_eq!(seen.load(Ordering::SeqCst), 0);
     server.abort();
     // The right CA, another node's name.
     let c3 = leaf(tmp.path(), &ca, "cosigner3", "c3");
     let net = MemNet::new();
-    let (seen, server) = serve(&net, &authority(2), &rutli_cosigner::tls::load(&c3).unwrap(), node(tmp.path(), 2), None);
-    let e = dial(&net, &t1, 2, Some(vec![pin(&c3)])).hosted_specs().await.unwrap_err();
+    let (seen, server) = serve(
+        &net,
+        &authority(2),
+        &rutli_cosigner::tls::load(&c3).unwrap(),
+        node(tmp.path(), 2),
+        None,
+    );
+    let e = dial(&net, &t1, 2, Some(vec![pin(&c3)]))
+        .hosted_specs()
+        .await
+        .unwrap_err();
     assert!(format!("{e:?}").contains("NotValidForName"), "{e:?}");
     assert_eq!(seen.load(Ordering::SeqCst), 0);
     server.abort();
@@ -216,11 +291,28 @@ async fn outbound_an_impostor_with_a_ca_signed_certificate_for_the_name_gets_not
     let fake2 = leaf(tmp.path(), &ca, "cosigner2", "fake2");
     let t1 = rutli_cosigner::tls::load(&c1).unwrap();
     let net = MemNet::new();
-    let (seen, server) = serve(&net, &authority(2), &rutli_cosigner::tls::load(&fake2).unwrap(), node(tmp.path(), 2), None);
+    let (seen, server) = serve(
+        &net,
+        &authority(2),
+        &rutli_cosigner::tls::load(&fake2).unwrap(),
+        node(tmp.path(), 2),
+        None,
+    );
 
-    let e = dial(&net, &t1, 2, Some(vec![pin(&real2)])).hosted_specs().await.unwrap_err();
-    assert!(chain(&e).contains(&hex::encode(pin(&fake2))), "{}", chain(&e));
-    assert_eq!(seen.load(Ordering::SeqCst), 0, "the impostor must receive no request");
+    let e = dial(&net, &t1, 2, Some(vec![pin(&real2)]))
+        .hosted_specs()
+        .await
+        .unwrap_err();
+    assert!(
+        chain(&e).contains(&hex::encode(pin(&fake2))),
+        "{}",
+        chain(&e)
+    );
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        0,
+        "the impostor must receive no request"
+    );
     // Without the pin it would have been accepted: the check is the pin, not the name or the CA.
     dial(&net, &t1, 2, None).hosted_specs().await.unwrap();
     assert_eq!(seen.load(Ordering::SeqCst), 1);
@@ -237,24 +329,57 @@ async fn inbound_a_caller_with_an_unpinned_key_is_refused_on_every_peer_rpc() {
     let c3 = leaf(tmp.path(), &ca, "cosigner3", "c3");
     let net = MemNet::new();
     let pins = peer_pins(&[(1, vec![pin(&real1)]), (2, vec![pin(&c2)])]);
-    let (_, server) = serve(&net, &authority(2), &rutli_cosigner::tls::load(&c2).unwrap(), node(tmp.path(), 2), Some(pins));
+    let (_, server) = serve(
+        &net,
+        &authority(2),
+        &rutli_cosigner::tls::load(&c2).unwrap(),
+        node(tmp.path(), 2),
+        Some(pins),
+    );
     let server_pin = Some(vec![pin(&c2)]);
 
     // A replaced node's old certificate: valid chain, right CN, wrong key.
-    let old = dial(&net, &rutli_cosigner::tls::load(&old1).unwrap(), 2, server_pin.clone());
+    let old = dial(
+        &net,
+        &rutli_cosigner::tls::load(&old1).unwrap(),
+        2,
+        server_pin.clone(),
+    );
     let e = old.hosted_specs().await.unwrap_err();
     let text = chain(&e);
-    assert!(text.contains("PermissionDenied") || text.contains("permission"), "{text}");
-    assert!(text.contains("'cosigner1'") && text.contains(&hex::encode(pin(&old1))), "{text}");
+    assert!(
+        text.contains("PermissionDenied") || text.contains("permission"),
+        "{text}"
+    );
+    assert!(
+        text.contains("'cosigner1'") && text.contains(&hex::encode(pin(&old1))),
+        "{text}"
+    );
     assert!(text.contains("peers[id=1].tls_spki_sha256"), "{text}");
     // ...on the handlers that act on who is calling, too.
     assert!(chain(&old.fetch_key("k").await.err().expect("refused")).contains("not pinned"));
     assert!(old.key_epoch("k").await.is_err());
 
     // The pinned key passes.
-    dial(&net, &rutli_cosigner::tls::load(&real1).unwrap(), 2, server_pin.clone()).hosted_specs().await.unwrap();
+    dial(
+        &net,
+        &rutli_cosigner::tls::load(&real1).unwrap(),
+        2,
+        server_pin.clone(),
+    )
+    .hosted_specs()
+    .await
+    .unwrap();
     // A peer without pins (only with tls.require_peer_pins: false) passes on its name.
-    dial(&net, &rutli_cosigner::tls::load(&c3).unwrap(), 2, server_pin).hosted_specs().await.unwrap();
+    dial(
+        &net,
+        &rutli_cosigner::tls::load(&c3).unwrap(),
+        2,
+        server_pin,
+    )
+    .hosted_specs()
+    .await
+    .unwrap();
     server.abort();
 }
 
@@ -270,23 +395,74 @@ async fn inbound_pins_hold_without_a_peer_allowlist() {
     let fake1 = leaf(tmp.path(), &ca, "cosigner1", "fake1");
     let driver = leaf(tmp.path(), &ca, "driver", "driver");
     let net = MemNet::new();
-    let pins = peer_pins(&[(1, vec![pin(&real1)]), (2, vec![pin(&c2)]), (3, vec![[3; 32]])]);
-    let (seen, server) =
-        serve_with(&net, &authority(2), &rutli_cosigner::tls::load(&c2).unwrap(), node(tmp.path(), 2), Some(pins), false);
+    let pins = peer_pins(&[
+        (1, vec![pin(&real1)]),
+        (2, vec![pin(&c2)]),
+        (3, vec![[3; 32]]),
+    ]);
+    let (seen, server) = serve_with(
+        &net,
+        &authority(2),
+        &rutli_cosigner::tls::load(&c2).unwrap(),
+        node(tmp.path(), 2),
+        Some(pins),
+        false,
+    );
     let server_pin = Some(vec![pin(&c2)]);
-    let e = dial(&net, &rutli_cosigner::tls::load(&fake1).unwrap(), 2, server_pin.clone()).hosted_specs().await.unwrap_err();
-    assert!(chain(&e).contains(&hex::encode(pin(&fake1))), "{}", chain(&e));
+    let e = dial(
+        &net,
+        &rutli_cosigner::tls::load(&fake1).unwrap(),
+        2,
+        server_pin.clone(),
+    )
+    .hosted_specs()
+    .await
+    .unwrap_err();
+    assert!(
+        chain(&e).contains(&hex::encode(pin(&fake1))),
+        "{}",
+        chain(&e)
+    );
     // The round-2 delivery path takes the sender from the certificate, not the claim.
-    let e = dial(&net, &rutli_cosigner::tls::load(&fake1).unwrap(), 2, server_pin.clone())
-        .fetch_key("k")
-        .await
-        .err()
-        .expect("refused");
+    let e = dial(
+        &net,
+        &rutli_cosigner::tls::load(&fake1).unwrap(),
+        2,
+        server_pin.clone(),
+    )
+    .fetch_key("k")
+    .await
+    .err()
+    .expect("refused");
     assert!(chain(&e).contains("not pinned"), "{}", chain(&e));
-    let e = dial(&net, &rutli_cosigner::tls::load(&driver).unwrap(), 2, server_pin.clone()).hosted_specs().await.unwrap_err();
-    assert!(chain(&e).contains("not the configured client CN"), "{}", chain(&e));
-    dial(&net, &rutli_cosigner::tls::load(&real1).unwrap(), 2, server_pin).hosted_specs().await.unwrap();
-    assert_eq!(seen.load(Ordering::SeqCst), 4, "the interceptor runs before the service refuses");
+    let e = dial(
+        &net,
+        &rutli_cosigner::tls::load(&driver).unwrap(),
+        2,
+        server_pin.clone(),
+    )
+    .hosted_specs()
+    .await
+    .unwrap_err();
+    assert!(
+        chain(&e).contains("not the configured client CN"),
+        "{}",
+        chain(&e)
+    );
+    dial(
+        &net,
+        &rutli_cosigner::tls::load(&real1).unwrap(),
+        2,
+        server_pin,
+    )
+    .hosted_specs()
+    .await
+    .unwrap();
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        4,
+        "the interceptor runs before the service refuses"
+    );
     server.abort();
 }
 
@@ -299,14 +475,26 @@ async fn a_peer_that_accepts_tcp_and_never_answers_the_handshake_times_out() {
     let net = MemNet::new();
     // Something listens at node 2's address, takes the connection and says nothing.
     let _incoming = net.listen(&authority(2));
-    let dial = t1.dial_as("cosigner2", Some(vec![[2; 32]]), 2).unwrap().with_connect_timeout(std::time::Duration::from_millis(300));
+    let dial = t1
+        .dial_as("cosigner2", Some(vec![[2; 32]]), 2)
+        .unwrap()
+        .with_connect_timeout(std::time::Duration::from_millis(300));
     let mut connector = dial.connector_over(net.dialer());
     let started = std::time::Instant::now();
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), connector.call(endpoint(2).parse().unwrap()))
-        .await
-        .expect("the connector's own bound must fire first");
-    let Err(e) = outcome else { panic!("a silent peer must fail the dial") };
-    assert!(e.to_string().contains("no TCP connection and TLS handshake within"), "{e}");
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        connector.call(endpoint(2).parse().unwrap()),
+    )
+    .await
+    .expect("the connector's own bound must fire first");
+    let Err(e) = outcome else {
+        panic!("a silent peer must fail the dial")
+    };
+    assert!(
+        e.to_string()
+            .contains("no TCP connection and TLS handshake within"),
+        "{e}"
+    );
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }
 
@@ -318,8 +506,12 @@ async fn a_server_that_does_not_negotiate_h2_is_refused() {
     let ca = ca();
     let t1 = rutli_cosigner::tls::load(&leaf(tmp.path(), &ca, "cosigner1", "c1")).unwrap();
     let c2 = leaf(tmp.path(), &ca, "cosigner2", "c2");
-    let certs = rustls_pemfile::certs(&mut std::fs::read(&c2.cert).unwrap().as_slice()).collect::<Result<Vec<_>, _>>().unwrap();
-    let key = rustls_pemfile::private_key(&mut std::fs::read(&c2.key).unwrap().as_slice()).unwrap().unwrap();
+    let certs = rustls_pemfile::certs(&mut std::fs::read(&c2.cert).unwrap().as_slice())
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let key = rustls_pemfile::private_key(&mut std::fs::read(&c2.key).unwrap().as_slice())
+        .unwrap()
+        .unwrap();
     let server = tokio_rustls::rustls::ServerConfig::builder_with_provider(Arc::new(
         tokio_rustls::rustls::crypto::ring::default_provider(),
     ))
@@ -340,8 +532,15 @@ async fn a_server_that_does_not_negotiate_h2_is_refused() {
             }
         }
     });
-    let e = dial(&net, &t1, 2, Some(vec![pin(&c2)])).hosted_specs().await.unwrap_err();
-    assert!(chain(&e).contains("did not negotiate HTTP/2 (ALPN h2)"), "{}", chain(&e));
+    let e = dial(&net, &t1, 2, Some(vec![pin(&c2)]))
+        .hosted_specs()
+        .await
+        .unwrap_err();
+    assert!(
+        chain(&e).contains("did not negotiate HTTP/2 (ALPN h2)"),
+        "{}",
+        chain(&e)
+    );
     served.abort();
 }
 
@@ -356,15 +555,38 @@ async fn a_second_dial_is_checked_again_and_cannot_ride_an_earlier_session() {
     let fake2 = leaf(tmp.path(), &ca, "cosigner2", "fake2");
     let net = MemNet::new();
     let d = t1.dial_as("cosigner2", Some(vec![pin(&real2)]), 2).unwrap();
-    let (_, real) = serve(&net, &authority(2), &rutli_cosigner::tls::load(&real2).unwrap(), node(tmp.path(), 2), None);
-    GrpcPeer::connect_lazy_over(Identifier::try_from(2u16).unwrap(), &endpoint(2), &d, d.connector_over(net.dialer()))
-        .unwrap()
-        .hosted_specs()
-        .await
-        .unwrap();
+    let (_, real) = serve(
+        &net,
+        &authority(2),
+        &rutli_cosigner::tls::load(&real2).unwrap(),
+        node(tmp.path(), 2),
+        None,
+    );
+    GrpcPeer::connect_lazy_over(
+        Identifier::try_from(2u16).unwrap(),
+        &endpoint(2),
+        &d,
+        d.connector_over(net.dialer()),
+    )
+    .unwrap()
+    .hosted_specs()
+    .await
+    .unwrap();
     real.abort();
-    let (seen, fake) = serve(&net, &authority(2), &rutli_cosigner::tls::load(&fake2).unwrap(), node(tmp.path(), 2), None);
-    let again = GrpcPeer::connect_lazy_over(Identifier::try_from(2u16).unwrap(), &endpoint(2), &d, d.connector_over(net.dialer())).unwrap();
+    let (seen, fake) = serve(
+        &net,
+        &authority(2),
+        &rutli_cosigner::tls::load(&fake2).unwrap(),
+        node(tmp.path(), 2),
+        None,
+    );
+    let again = GrpcPeer::connect_lazy_over(
+        Identifier::try_from(2u16).unwrap(),
+        &endpoint(2),
+        &d,
+        d.connector_over(net.dialer()),
+    )
+    .unwrap();
     assert!(chain(&again.hosted_specs().await.unwrap_err()).contains("not pinned"));
     assert_eq!(seen.load(Ordering::SeqCst), 0);
     fake.abort();
@@ -383,8 +605,17 @@ async fn two_pins_carry_a_key_roll_and_dropping_the_old_one_revokes_it() {
     // Node 2 still on its old key, then on its new key: node 1 pins both and reaches either.
     for (cfg, at) in [(&old2, "old"), (&new2, "new")] {
         let net = MemNet::new();
-        let (_, server) = serve(&net, &authority(2), &rutli_cosigner::tls::load(cfg).unwrap(), node(tmp.path(), 2), None);
-        dial(&net, &t1, 2, Some(both.clone())).hosted_specs().await.unwrap_or_else(|e| panic!("{at}: {e}"));
+        let (_, server) = serve(
+            &net,
+            &authority(2),
+            &rutli_cosigner::tls::load(cfg).unwrap(),
+            node(tmp.path(), 2),
+            None,
+        );
+        dial(&net, &t1, 2, Some(both.clone()))
+            .hosted_specs()
+            .await
+            .unwrap_or_else(|e| panic!("{at}: {e}"));
         server.abort();
     }
     // Node 1 serves; node 2 calls with either key while both are pinned, only the new one after.
@@ -392,8 +623,18 @@ async fn two_pins_carry_a_key_roll_and_dropping_the_old_one_revokes_it() {
         let net = MemNet::new();
         let pins = peer_pins(&[(1, vec![pin(&c1)]), (2, pins)]);
         let (_, server) = serve(&net, &authority(1), &t1, node(tmp.path(), 1), Some(pins));
-        let as_old = dial(&net, &rutli_cosigner::tls::load(&old2).unwrap(), 1, Some(vec![pin(&c1)]));
-        let as_new = dial(&net, &rutli_cosigner::tls::load(&new2).unwrap(), 1, Some(vec![pin(&c1)]));
+        let as_old = dial(
+            &net,
+            &rutli_cosigner::tls::load(&old2).unwrap(),
+            1,
+            Some(vec![pin(&c1)]),
+        );
+        let as_new = dial(
+            &net,
+            &rutli_cosigner::tls::load(&new2).unwrap(),
+            1,
+            Some(vec![pin(&c1)]),
+        );
         assert_eq!(as_old.hosted_specs().await.is_ok(), old_ok);
         as_new.hosted_specs().await.unwrap();
         server.abort();
@@ -424,9 +665,16 @@ fn mesh(impostor: Option<u16>) -> Mesh {
     let net = MemNet::new();
     let ca = ca();
     let tmp = tempfile::tempdir().unwrap();
-    let cfgs: Vec<TlsConfig> = (1..=N).map(|i| leaf(tmp.path(), &ca, &format!("cosigner{i}"), &format!("c{i}"))).collect();
-    let tls: Vec<Tls> = cfgs.iter().map(|c| rutli_cosigner::tls::load(c).unwrap()).collect();
-    let roster: Vec<(u16, Vec<[u8; 32]>)> = (1..=N).map(|i| (i, vec![pin(&cfgs[i as usize - 1])])).collect();
+    let cfgs: Vec<TlsConfig> = (1..=N)
+        .map(|i| leaf(tmp.path(), &ca, &format!("cosigner{i}"), &format!("c{i}")))
+        .collect();
+    let tls: Vec<Tls> = cfgs
+        .iter()
+        .map(|c| rutli_cosigner::tls::load(c).unwrap())
+        .collect();
+    let roster: Vec<(u16, Vec<[u8; 32]>)> = (1..=N)
+        .map(|i| (i, vec![pin(&cfgs[i as usize - 1])]))
+        .collect();
     let pins = peer_pins(&roster);
     let nodes: Vec<Arc<Node>> = (1..=N).map(|i| node(tmp.path(), i)).collect();
     let mut peers = Vec::new();
@@ -436,7 +684,12 @@ fn mesh(impostor: Option<u16>) -> Mesh {
                 if j as usize == i + 1 {
                     Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>
                 } else {
-                    Arc::new(dial(&net, &tls[i], j, Some(roster[j as usize - 1].1.clone()))) as Arc<dyn PeerApi>
+                    Arc::new(dial(
+                        &net,
+                        &tls[i],
+                        j,
+                        Some(roster[j as usize - 1].1.clone()),
+                    )) as Arc<dyn PeerApi>
                 }
             })
             .collect();
@@ -448,26 +701,51 @@ fn mesh(impostor: Option<u16>) -> Mesh {
     for (i, n) in nodes.iter().enumerate() {
         let id = i as u16 + 1;
         if impostor == Some(id) {
-            let fake = rutli_cosigner::tls::load(&leaf(tmp.path(), &ca, &format!("cosigner{id}"), "fake")).unwrap();
-            let (seen, h) = serve(&net, &authority(id), &fake, node(&tmp.path().join("impostor"), id), None);
+            let fake =
+                rutli_cosigner::tls::load(&leaf(tmp.path(), &ca, &format!("cosigner{id}"), "fake"))
+                    .unwrap();
+            let (seen, h) = serve(
+                &net,
+                &authority(id),
+                &fake,
+                node(&tmp.path().join("impostor"), id),
+                None,
+            );
             impostor_seen = seen;
             servers.push(h);
         } else {
             servers.push(serve(&net, &authority(id), &tls[i], n.clone(), Some(pins.clone())).1);
         }
     }
-    Mesh { nodes, peers, impostor_seen, servers, _tmp: tmp }
+    Mesh {
+        nodes,
+        peers,
+        impostor_seen,
+        servers,
+        _tmp: tmp,
+    }
 }
 
 #[tokio::test]
 async fn a_pinned_mesh_runs_dkg_refresh_and_sign_over_the_daemons_dial() {
     let m = mesh(None);
     let key = "frost-pinned";
-    let group = rutli_cosigner::orchestrator::run_dkg(&m.peers[0], key).await.unwrap();
-    assert_eq!(rutli_cosigner::orchestrator::run_refresh(&m.peers[1], key).await.unwrap(), group);
+    let group = rutli_cosigner::orchestrator::run_dkg(&m.peers[0], key)
+        .await
+        .unwrap();
+    assert_eq!(
+        rutli_cosigner::orchestrator::run_refresh(&m.peers[1], key)
+            .await
+            .unwrap(),
+        group
+    );
     let msg = rutli_frost_core::dealer::canton_test_message(b"pinned mesh");
-    let sig = rutli_cosigner::orchestrator::sign(&m.nodes[2], &m.peers[2], key, &msg).await.unwrap();
-    assert!(rutli_cosigner::verify_key::signature_verifies(&group, &msg, &sig));
+    let sig = rutli_cosigner::orchestrator::sign(&m.nodes[2], &m.peers[2], key, &msg)
+        .await
+        .unwrap();
+    assert!(rutli_cosigner::verify_key::signature_verifies(
+        &group, &msg, &sig
+    ));
 }
 
 #[tokio::test]
@@ -478,10 +756,20 @@ async fn a_dkg_with_an_impostor_at_one_nodes_address_delivers_it_nothing() {
     let m = mesh(Some(2));
     let key = "frost-impostor";
     for leader in [0usize, 2] {
-        assert!(rutli_cosigner::orchestrator::run_dkg(&m.peers[leader], key).await.is_err());
+        assert!(rutli_cosigner::orchestrator::run_dkg(&m.peers[leader], key)
+            .await
+            .is_err());
     }
-    assert_eq!(m.impostor_seen.load(Ordering::SeqCst), 0, "the impostor must receive nothing");
+    assert_eq!(
+        m.impostor_seen.load(Ordering::SeqCst),
+        0,
+        "the impostor must receive nothing"
+    );
     for i in [0usize, 2] {
-        assert!(!m.nodes[i].key_epoch(key).unwrap().present, "node {} must hold no key", i + 1);
+        assert!(
+            !m.nodes[i].key_epoch(key).unwrap().present,
+            "node {} must hold no key",
+            i + 1
+        );
     }
 }

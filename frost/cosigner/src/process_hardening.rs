@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Keep a crashing process's memory out of core dumps: `RLIMIT_CORE = 0` and, on Linux,
@@ -30,7 +30,10 @@ pub struct CoreDumps {
 pub fn disable_core_dumps() -> CoreDumps {
     // SAFETY: plain libc call with a valid, initialised argument; no memory is shared with it.
     let core_limit_zero = unsafe {
-        let zero = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        let zero = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         libc::setrlimit(libc::RLIMIT_CORE, &zero) == 0
     };
     #[cfg(target_os = "linux")]
@@ -45,13 +48,23 @@ pub fn disable_core_dumps() -> CoreDumps {
     let not_dumpable = false;
     #[cfg(target_os = "linux")]
     let (core_pattern, suid_dumpable) = (
-        std::fs::read_to_string("/proc/sys/kernel/core_pattern").ok().map(|s| s.trim().to_string()),
-        std::fs::read_to_string("/proc/sys/fs/suid_dumpable").ok().and_then(|s| s.trim().parse().ok()),
+        std::fs::read_to_string("/proc/sys/kernel/core_pattern")
+            .ok()
+            .map(|s| s.trim().to_string()),
+        std::fs::read_to_string("/proc/sys/fs/suid_dumpable")
+            .ok()
+            .and_then(|s| s.trim().parse().ok()),
     );
     #[cfg(not(target_os = "linux"))]
     let (core_pattern, suid_dumpable): (Option<String>, Option<u8>) = (None, None);
     let handler_risk = core_handler_risk(core_pattern.as_deref(), suid_dumpable);
-    CoreDumps { core_limit_zero, not_dumpable, core_pattern, suid_dumpable, handler_risk }
+    CoreDumps {
+        core_limit_zero,
+        not_dumpable,
+        core_pattern,
+        suid_dumpable,
+        handler_risk,
+    }
 }
 
 impl CoreDumps {
@@ -61,7 +74,10 @@ impl CoreDumps {
     /// non-dumpable by a credential change, not by prctl). Without it (it failed, or not Linux), a
     /// piped `core_pattern` ignores `RLIMIT_CORE`.
     pub fn may_dump(&self) -> bool {
-        let piped = self.core_pattern.as_deref().is_some_and(|p| p.starts_with('|'));
+        let piped = self
+            .core_pattern
+            .as_deref()
+            .is_some_and(|p| p.starts_with('|'));
         !self.not_dumpable && (piped || !self.core_limit_zero)
     }
 
@@ -78,9 +94,14 @@ pub fn core_handler_risk(core_pattern: Option<&str>, suid_dumpable: Option<u8>) 
 
 /// Whether the core-dump limit of this process is 0 (tests and the start-up log).
 pub fn core_limit_is_zero() -> bool {
-    let mut lim = libc::rlimit { rlim_cur: 1, rlim_max: 1 };
+    let mut lim = libc::rlimit {
+        rlim_cur: 1,
+        rlim_max: 1,
+    };
     // SAFETY: getrlimit writes into the struct we own.
-    unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut lim) == 0 && lim.rlim_cur == 0 && lim.rlim_max == 0 }
+    unsafe {
+        libc::getrlimit(libc::RLIMIT_CORE, &mut lim) == 0 && lim.rlim_cur == 0 && lim.rlim_max == 0
+    }
 }
 
 /// Whether this process is dumpable (`PR_GET_DUMPABLE`); `None` off Linux.
@@ -89,7 +110,13 @@ pub fn is_dumpable() -> Option<bool> {
     {
         // SAFETY: PR_GET_DUMPABLE takes no pointer arguments.
         let r = unsafe {
-            libc::prctl(libc::PR_GET_DUMPABLE, 0 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong)
+            libc::prctl(
+                libc::PR_GET_DUMPABLE,
+                0 as libc::c_ulong,
+                0 as libc::c_ulong,
+                0 as libc::c_ulong,
+                0 as libc::c_ulong,
+            )
         };
         // -1 is an error, not "dumpable".
         (r >= 0).then_some(r != 0)
@@ -104,10 +131,16 @@ mod tests {
 
     #[test]
     fn a_piped_core_pattern_or_suid_dumpable_2_is_a_core_handler_risk() {
-        assert!(core_handler_risk(Some("|/usr/lib/systemd/systemd-coredump %P"), Some(0)));
+        assert!(core_handler_risk(
+            Some("|/usr/lib/systemd/systemd-coredump %P"),
+            Some(0)
+        ));
         assert!(core_handler_risk(Some("core"), Some(2)));
         assert!(!core_handler_risk(Some("core"), Some(0)));
-        assert!(!core_handler_risk(None, None), "not Linux: nothing known, nothing claimed");
+        assert!(
+            !core_handler_risk(None, None),
+            "not Linux: nothing known, nothing claimed"
+        );
     }
 
     #[test]
@@ -121,10 +154,16 @@ mod tests {
         };
         assert!(!d(true, true, "|/usr/lib/systemd/systemd-coredump %P", 0).may_dump());
         assert!(!d(true, true, "core", 0).may_dump());
-        assert!(!d(true, true, "core", 2).may_dump(), "suid_dumpable does not undo prctl(0)");
+        assert!(
+            !d(true, true, "core", 2).may_dump(),
+            "suid_dumpable does not undo prctl(0)"
+        );
         assert!(d(true, false, "|/bin/handler", 0).may_dump());
         assert!(d(false, false, "core", 0).may_dump());
-        assert!(!d(true, false, "core", 0).may_dump(), "off Linux: RLIMIT_CORE=0 and a file pattern");
+        assert!(
+            !d(true, false, "core", 0).may_dump(),
+            "off Linux: RLIMIT_CORE=0 and a file pattern"
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Why did a node refuse us? A bare TLS handshake that reports the node's TLS alert, for
@@ -43,9 +43,15 @@ impl TlsProbe {
     /// trust anchors of `ca_cert`, this side's certificate and key, ALPN `h2`, and `domain` as the
     /// server name when set.
     pub fn new(cfg: &TlsConfig) -> Result<Self> {
-        let anchors = crate::trust::load_trust_anchors(&crate::tls::read_pem(&cfg.ca_cert)?, cfg.allow_expired_ca)
-            .map_err(|e| DaemonError::Config(format!("tls probe ca_cert: {e}")))?;
-        Ok(Self { config: crate::tls::rustls_client(cfg, &anchors)?, domain: cfg.domain.clone() })
+        let anchors = crate::trust::load_trust_anchors(
+            &crate::tls::read_pem(&cfg.ca_cert)?,
+            cfg.allow_expired_ca,
+        )
+        .map_err(|e| DaemonError::Config(format!("tls probe ca_cert: {e}")))?;
+        Ok(Self {
+            config: crate::tls::rustls_client(cfg, &anchors)?,
+            domain: cfg.domain.clone(),
+        })
     }
 
     /// Connect to `endpoint` (`https://host:port`) and report how the node refuses this client at
@@ -66,17 +72,24 @@ impl TlsProbe {
 
     async fn refusal_named(&self, endpoint: &str, server_name: Option<&str>) -> Option<String> {
         let uri: tonic::codegen::http::Uri = endpoint.parse().ok()?;
-        let host = uri.host()?.trim_start_matches('[').trim_end_matches(']').to_string();
+        let host = uri
+            .host()?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string();
         let port = uri.port_u16().unwrap_or(443);
         let name = server_name
             .map(str::to_string)
             .or_else(|| self.domain.clone())
             .unwrap_or_else(|| host.clone());
         let name = ServerName::try_from(name).ok()?;
-        let tcp = tokio::time::timeout(PROBE_TIMEOUT, tokio::net::TcpStream::connect((host.as_str(), port)))
-            .await
-            .ok()?
-            .ok()?;
+        let tcp = tokio::time::timeout(
+            PROBE_TIMEOUT,
+            tokio::net::TcpStream::connect((host.as_str(), port)),
+        )
+        .await
+        .ok()?
+        .ok()?;
         let connector = tokio_rustls::TlsConnector::from(self.config.clone());
         let outcome = tokio::time::timeout(PROBE_TIMEOUT, async {
             let mut tls = match connector.connect(name, tcp).await {
