@@ -7,8 +7,8 @@
 
 use std::collections::BTreeMap;
 
-use frost_ed25519 as frost;
 use frost::Identifier;
+use frost_ed25519 as frost;
 use rutli_frost_core::dkg::{group_verifying_key_bytes, DkgParticipant};
 use rutli_frost_core::nonce_store::NonceStore;
 use rutli_frost_core::session::{aggregate, Cosigner, SessionBinding};
@@ -35,8 +35,9 @@ fn canton_digest(msg: &[u8]) -> Vec<u8> {
 
 /// Run a full 2-of-3 DKG in-process; returns each cosigner (with its own temp nonce store).
 fn dkg_cluster(tmp: &tempfile::TempDir) -> Vec<Cosigner> {
-    let ids: Vec<Identifier> =
-        (1u16..=MAX_SIGNERS).map(|i| Identifier::try_from(i).unwrap()).collect();
+    let ids: Vec<Identifier> = (1u16..=MAX_SIGNERS)
+        .map(|i| Identifier::try_from(i).unwrap())
+        .collect();
 
     let mut participants: BTreeMap<Identifier, DkgParticipant> = ids
         .iter()
@@ -50,19 +51,27 @@ fn dkg_cluster(tmp: &tempfile::TempDir) -> Vec<Cosigner> {
     }
 
     // Part 2 — everyone processes the others' round-1 packages.
-    let mut r2_outbox: BTreeMap<Identifier, BTreeMap<Identifier, frost::keys::dkg::round2::Package>> =
-        BTreeMap::new();
+    let mut r2_outbox: BTreeMap<
+        Identifier,
+        BTreeMap<Identifier, frost::keys::dkg::round2::Package>,
+    > = BTreeMap::new();
     for (&id, p) in participants.iter_mut() {
-        let others: BTreeMap<_, _> =
-            r1.iter().filter(|(&k, _)| k != id).map(|(&k, v)| (k, v.clone())).collect();
+        let others: BTreeMap<_, _> = r1
+            .iter()
+            .filter(|(&k, _)| k != id)
+            .map(|(&k, v)| (k, v.clone()))
+            .collect();
         r2_outbox.insert(id, p.part2(&others).unwrap());
     }
 
     // Part 3 — deliver the point-to-point round-2 packages and finalize.
     let mut cosigners = Vec::new();
     for (&id, p) in participants.iter_mut() {
-        let others_r1: BTreeMap<_, _> =
-            r1.iter().filter(|(&k, _)| k != id).map(|(&k, v)| (k, v.clone())).collect();
+        let others_r1: BTreeMap<_, _> = r1
+            .iter()
+            .filter(|(&k, _)| k != id)
+            .map(|(&k, v)| (k, v.clone()))
+            .collect();
         let inbox: BTreeMap<_, _> = r2_outbox
             .iter()
             .filter(|(&from, _)| from != id)
@@ -90,9 +99,17 @@ fn sign_with(
     }
     let mut shares = BTreeMap::new();
     for c in cosigners {
-        shares.insert(c.identifier(), c.round2(session_id, KEY, message, &commitments, None)?);
+        shares.insert(
+            c.identifier(),
+            c.round2(session_id, KEY, message, &commitments, None)?,
+        );
     }
-    aggregate(message, &commitments, &shares, cosigners[0].public_key_package())
+    aggregate(
+        message,
+        &commitments,
+        &shares,
+        cosigners[0].public_key_package(),
+    )
 }
 
 #[test]
@@ -113,7 +130,10 @@ fn dkg_then_threshold_sign_verifies_under_strict_dalek() {
 
     // All three cosigners computed the same group key.
     for c in &cosigners {
-        assert_eq!(group_verifying_key_bytes(c.public_key_package()).unwrap(), group_key);
+        assert_eq!(
+            group_verifying_key_bytes(c.public_key_package()).unwrap(),
+            group_key
+        );
     }
 }
 
@@ -134,7 +154,8 @@ fn different_quorums_produce_valid_sigs_under_same_group_key() {
     .enumerate()
     {
         let sig = sign_with(quorum, &format!("session-quorum-{i}"), &message).unwrap();
-        vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig)).unwrap();
+        vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig))
+            .unwrap();
     }
 }
 
@@ -149,12 +170,16 @@ fn nonce_reuse_is_refused_even_across_cosigner_restart() {
     sign_with(&[&cosigners[0], &cosigners[1]], session, &message).unwrap();
 
     // Replaying round 1 with the same session id must be refused (burned marker on disk).
-    let err = cosigners[0].round1(session, SessionBinding::new(KEY)).unwrap_err();
+    let err = cosigners[0]
+        .round1(session, SessionBinding::new(KEY))
+        .unwrap_err();
     assert!(matches!(err, CoreError::NonceReuse(_)), "got: {err:?}");
 
     // And round 2 for a session that never did round 1 is unknown.
     let commitments = BTreeMap::new();
-    let err = cosigners[0].round2("session-nonexistent", KEY, &message, &commitments, None).unwrap_err();
+    let err = cosigners[0]
+        .round2("session-nonexistent", KEY, &message, &commitments, None)
+        .unwrap_err();
     assert!(matches!(err, CoreError::UnknownSession(_)), "got: {err:?}");
 }
 
@@ -174,7 +199,8 @@ fn below_threshold_aggregation_fails() {
             let group_key = group_verifying_key_bytes(cosigners[0].public_key_package()).unwrap();
             let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
             assert!(
-                vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig)).is_err(),
+                vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig))
+                    .is_err(),
                 "single share below threshold must never yield a valid group signature"
             );
         }
@@ -182,10 +208,15 @@ fn below_threshold_aggregation_fails() {
 }
 
 /// Raw DKG (no Cosigner wrapper) so the test can hold each node's key package for refresh.
-fn raw_dkg() -> Vec<(Identifier, frost::keys::KeyPackage, frost::keys::PublicKeyPackage)> {
+fn raw_dkg() -> Vec<(
+    Identifier,
+    frost::keys::KeyPackage,
+    frost::keys::PublicKeyPackage,
+)> {
     use frost::keys::dkg::{part1, part2, part3};
-    let ids: Vec<Identifier> =
-        (1u16..=MAX_SIGNERS).map(|i| Identifier::try_from(i).unwrap()).collect();
+    let ids: Vec<Identifier> = (1u16..=MAX_SIGNERS)
+        .map(|i| Identifier::try_from(i).unwrap())
+        .collect();
     let mut r1s = BTreeMap::new();
     let mut r1p = BTreeMap::new();
     for &id in &ids {
@@ -197,16 +228,22 @@ fn raw_dkg() -> Vec<(Identifier, frost::keys::KeyPackage, frost::keys::PublicKey
     let mut r2out: BTreeMap<Identifier, BTreeMap<Identifier, frost::keys::dkg::round2::Package>> =
         BTreeMap::new();
     for &id in &ids {
-        let others: BTreeMap<_, _> =
-            r1p.iter().filter(|(&k, _)| k != id).map(|(&k, v)| (k, v.clone())).collect();
+        let others: BTreeMap<_, _> = r1p
+            .iter()
+            .filter(|(&k, _)| k != id)
+            .map(|(&k, v)| (k, v.clone()))
+            .collect();
         let (s, out) = part2(r1s.remove(&id).unwrap(), &others).unwrap();
         r2s.insert(id, s);
         r2out.insert(id, out);
     }
     ids.iter()
         .map(|&id| {
-            let others: BTreeMap<_, _> =
-                r1p.iter().filter(|(&k, _)| k != id).map(|(&k, v)| (k, v.clone())).collect();
+            let others: BTreeMap<_, _> = r1p
+                .iter()
+                .filter(|(&k, _)| k != id)
+                .map(|(&k, v)| (k, v.clone()))
+                .collect();
             let inbox: BTreeMap<_, _> = r2out
                 .iter()
                 .filter(|(&from, _)| from != id)
@@ -244,9 +281,13 @@ fn lost_share_is_repaired_from_helpers_and_signs() {
     use rutli_frost_core::repair::{helper_step1, helper_step2, participant_step3};
 
     // Trusted-dealer split just to obtain SecretShares (with commitments) for the test.
-    let (shares, pkp) =
-        frost::keys::generate_with_dealer(MAX_SIGNERS, MIN_SIGNERS, IdentifierList::Default, rand::rngs::OsRng)
-            .unwrap();
+    let (shares, pkp) = frost::keys::generate_with_dealer(
+        MAX_SIGNERS,
+        MIN_SIGNERS,
+        IdentifierList::Default,
+        rand::rngs::OsRng,
+    )
+    .unwrap();
     let group_key = group_verifying_key_bytes(&pkp).unwrap();
 
     let id1 = Identifier::try_from(1u16).unwrap();
@@ -267,17 +308,28 @@ fn lost_share_is_repaired_from_helpers_and_signs() {
     // Rütli stores it (no min_signers).
     let stored = rutli_frost_core::dkg::without_min_signers(&pkp);
     let repaired = participant_step3(&[sigma2, sigma3], id1, &stored, MIN_SIGNERS).unwrap();
-    assert_eq!(repaired.signing_share(), shares[&id1].signing_share(), "exactly the lost share");
+    assert_eq!(
+        repaired.signing_share(),
+        shares[&id1].signing_share(),
+        "exactly the lost share"
+    );
 
     // A wrong sigma (here: one helper's sigma used twice) is refused, not turned into a share.
     assert!(participant_step3(&[sigma2, sigma2], id1, &stored, MIN_SIGNERS).is_err());
 
     // The repaired share signs (with an untouched helper) and verifies under the SAME group key.
     let msg = canton_digest(b"after repair");
-    let quorum = [(id1, repaired), (id2, KeyPackage::try_from(shares[&id2].clone()).unwrap())];
+    let quorum = [
+        (id1, repaired),
+        (id2, KeyPackage::try_from(shares[&id2].clone()).unwrap()),
+    ];
     let sig = raw_sign(&quorum, &pkp, &msg).unwrap();
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
-    vk.verify_strict(&msg, &ed25519_dalek::Signature::from_bytes(&sig.try_into().unwrap())).unwrap();
+    vk.verify_strict(
+        &msg,
+        &ed25519_dalek::Signature::from_bytes(&sig.try_into().unwrap()),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -290,8 +342,10 @@ fn refresh_keeps_group_key_and_invalidates_pre_refresh_shares() {
     let group_key = group_verifying_key_bytes(&old_pkp).unwrap();
 
     // --- distributed refresh (mirrors DKG orchestration) ---
-    let mut parts: BTreeMap<Identifier, RefreshParticipant> =
-        ids.iter().map(|&id| (id, RefreshParticipant::new(id, MAX_SIGNERS, MIN_SIGNERS))).collect();
+    let mut parts: BTreeMap<Identifier, RefreshParticipant> = ids
+        .iter()
+        .map(|&id| (id, RefreshParticipant::new(id, MAX_SIGNERS, MIN_SIGNERS)))
+        .collect();
     let mut r1 = BTreeMap::new();
     for (&id, p) in parts.iter_mut() {
         r1.insert(id, p.part1().unwrap());
@@ -299,29 +353,43 @@ fn refresh_keeps_group_key_and_invalidates_pre_refresh_shares() {
     let mut r2out: BTreeMap<Identifier, BTreeMap<Identifier, frost::keys::dkg::round2::Package>> =
         BTreeMap::new();
     for (&id, p) in parts.iter_mut() {
-        let others: BTreeMap<_, _> =
-            r1.iter().filter(|(&k, _)| k != id).map(|(&k, v)| (k, v.clone())).collect();
+        let others: BTreeMap<_, _> = r1
+            .iter()
+            .filter(|(&k, _)| k != id)
+            .map(|(&k, v)| (k, v.clone()))
+            .collect();
         r2out.insert(id, p.part2(&others).unwrap());
     }
-    let mut refreshed: Vec<(Identifier, frost::keys::KeyPackage, frost::keys::PublicKeyPackage)> =
-        Vec::new();
+    let mut refreshed: Vec<(
+        Identifier,
+        frost::keys::KeyPackage,
+        frost::keys::PublicKeyPackage,
+    )> = Vec::new();
     for (&id, p) in parts.iter_mut() {
         let (_, old_kp, old_pkp_i) = dealt.iter().find(|(i, _, _)| *i == id).unwrap();
-        let others: BTreeMap<_, _> =
-            r1.iter().filter(|(&k, _)| k != id).map(|(&k, v)| (k, v.clone())).collect();
+        let others: BTreeMap<_, _> = r1
+            .iter()
+            .filter(|(&k, _)| k != id)
+            .map(|(&k, v)| (k, v.clone()))
+            .collect();
         let inbox: BTreeMap<_, _> = r2out
             .iter()
             .filter(|(&from, _)| from != id)
             .map(|(&from, o)| (from, o.get(&id).unwrap().clone()))
             .collect();
-        let (nkp, npkp) =
-            p.part3(&others, &inbox, old_pkp_i.clone(), old_kp.clone()).unwrap();
+        let (nkp, npkp) = p
+            .part3(&others, &inbox, old_pkp_i.clone(), old_kp.clone())
+            .unwrap();
         refreshed.push((id, nkp, npkp));
     }
 
     // Group key is unchanged — Canton's namespace key and node identity are stable.
     for (_, _, npkp) in &refreshed {
-        assert_eq!(group_verifying_key_bytes(npkp).unwrap(), group_key, "group key must not change");
+        assert_eq!(
+            group_verifying_key_bytes(npkp).unwrap(),
+            group_key,
+            "group key must not change"
+        );
     }
     let new_pkp = refreshed[0].2.clone();
 
@@ -329,9 +397,17 @@ fn refresh_keeps_group_key_and_invalidates_pre_refresh_shares() {
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
 
     // Refreshed shares sign fine under the same group key.
-    let quorum: Vec<_> = refreshed.iter().take(2).map(|(id, kp, _)| (*id, kp.clone())).collect();
+    let quorum: Vec<_> = refreshed
+        .iter()
+        .take(2)
+        .map(|(id, kp, _)| (*id, kp.clone()))
+        .collect();
     let sig = raw_sign(&quorum, &new_pkp, &msg).unwrap();
-    vk.verify_strict(&msg, &ed25519_dalek::Signature::from_bytes(&sig.try_into().unwrap())).unwrap();
+    vk.verify_strict(
+        &msg,
+        &ed25519_dalek::Signature::from_bytes(&sig.try_into().unwrap()),
+    )
+    .unwrap();
 
     // An attacker with an OLD share + a NEW share cannot forge: the two are on different sharing
     // polynomials now, so aggregation either errors or yields a signature that does not verify.
@@ -342,7 +418,8 @@ fn refresh_keeps_group_key_and_invalidates_pre_refresh_shares() {
         Ok(bad) => {
             let bad: [u8; 64] = bad.try_into().unwrap();
             assert!(
-                vk.verify_strict(&msg, &ed25519_dalek::Signature::from_bytes(&bad)).is_err(),
+                vk.verify_strict(&msg, &ed25519_dalek::Signature::from_bytes(&bad))
+                    .is_err(),
                 "a pre-refresh share must not combine with post-refresh shares to sign"
             );
         }
@@ -378,12 +455,18 @@ fn dkg_participant_rejects_out_of_order_calls_without_panic() {
 
     // part2 before part1 → recoverable error, not a panic.
     let mut p = DkgParticipant::new(id, MAX_SIGNERS, MIN_SIGNERS);
-    assert!(matches!(p.part2(&r1), Err(CoreError::InvalidCeremonyState(_))));
+    assert!(matches!(
+        p.part2(&r1),
+        Err(CoreError::InvalidCeremonyState(_))
+    ));
 
     // part3 before part2 → recoverable error.
     let mut p = DkgParticipant::new(id, MAX_SIGNERS, MIN_SIGNERS);
     p.part1().unwrap();
-    assert!(matches!(p.part3(&r1, &r2), Err(CoreError::InvalidCeremonyState(_))));
+    assert!(matches!(
+        p.part3(&r1, &r2),
+        Err(CoreError::InvalidCeremonyState(_))
+    ));
 }
 
 #[test]
@@ -397,12 +480,18 @@ fn refresh_participant_rejects_out_of_order_calls_without_panic() {
 
     // part2 before part1.
     let mut p = RefreshParticipant::new(id, MAX_SIGNERS, MIN_SIGNERS);
-    assert!(matches!(p.part2(&r1), Err(CoreError::InvalidCeremonyState(_))));
+    assert!(matches!(
+        p.part2(&r1),
+        Err(CoreError::InvalidCeremonyState(_))
+    ));
 
     // part3 before part2.
     let mut p = RefreshParticipant::new(id, MAX_SIGNERS, MIN_SIGNERS);
     p.part1().unwrap();
-    assert!(matches!(p.part3(&r1, &r2, pkp, kp), Err(CoreError::InvalidCeremonyState(_))));
+    assert!(matches!(
+        p.part3(&r1, &r2, pkp, kp),
+        Err(CoreError::InvalidCeremonyState(_))
+    ));
 }
 
 #[test]
@@ -418,7 +507,8 @@ fn in_flight_sign_sessions_are_freed_on_completion_and_abort() {
     assert_eq!(c.pending_count(), 3);
 
     // Aborting a session frees its RAM nonces (leader gave up / timed out).
-    c.abort_as("s2", &rutli_frost_core::session::SessionOwner::Local).unwrap();
+    c.abort_as("s2", &rutli_frost_core::session::SessionOwner::Local)
+        .unwrap();
     assert_eq!(c.pending_count(), 2);
 
     // A completed 2-of-3 signature consumes the leader's pending session (round2 removes it).
@@ -436,7 +526,9 @@ fn duplicate_round1_for_same_session_is_refused() {
     let c = &cosigners[0];
     c.round1("dup-session", SessionBinding::new(KEY)).unwrap();
     // A second round1 with the SAME id must not overwrite the live nonces.
-    let err = c.round1("dup-session", SessionBinding::new(KEY)).unwrap_err();
+    let err = c
+        .round1("dup-session", SessionBinding::new(KEY))
+        .unwrap_err();
     assert!(matches!(err, CoreError::DuplicateSession(_)), "got {err:?}");
     // A different session id still works.
     assert!(c.round1("other-session", SessionBinding::new(KEY)).is_ok());
@@ -452,7 +544,10 @@ fn open_bound(cosigners: &[Cosigner], session: &str, message: &[u8]) -> Commitme
     let binding = SessionBinding::new(KEY)
         .with_message(message)
         .with_signers(quorum.iter().map(|c| c.identifier()));
-    quorum.iter().map(|c| (c.identifier(), c.round1(session, binding.clone()).unwrap())).collect()
+    quorum
+        .iter()
+        .map(|c| (c.identifier(), c.round1(session, binding.clone()).unwrap()))
+        .collect()
 }
 
 fn burned(tmp: &tempfile::TempDir, c: &Cosigner, session: &str) -> bool {
@@ -471,35 +566,86 @@ fn round2_is_refused_unless_it_matches_the_round1_binding_and_never_burns_on_a_m
 
     let other_message = canton_digest(b"substituted");
     let mut third = open_bound(&cosigners, "bind-x", &message);
-    third.insert(cosigners[2].identifier(), cosigners[2].round1("bind-x", SessionBinding::new(KEY)).unwrap());
+    third.insert(
+        cosigners[2].identifier(),
+        cosigners[2]
+            .round1("bind-x", SessionBinding::new(KEY))
+            .unwrap(),
+    );
     let mut altered = open_bound(&cosigners, "bind-x2", &message);
     let theirs = altered[&cosigners[1].identifier()];
     altered.insert(c.identifier(), theirs);
 
     // (session, key presented, message presented, commitments presented, intent, what differs)
-    type Case<'a> = (&'a str, &'a str, Vec<u8>, Commitments, Option<[u8; 32]>, &'a str);
+    type Case<'a> = (
+        &'a str,
+        &'a str,
+        Vec<u8>,
+        Commitments,
+        Option<[u8; 32]>,
+        &'a str,
+    );
     let cases: Vec<Case> = vec![
-        ("bind-1", KEY, other_message.clone(), open_bound(&cosigners, "bind-1", &message), None, "message"),
+        (
+            "bind-1",
+            KEY,
+            other_message.clone(),
+            open_bound(&cosigners, "bind-1", &message),
+            None,
+            "message",
+        ),
         ("bind-x", KEY, message.clone(), third, None, "signer set"),
-        ("bind-x2", KEY, message.clone(), altered, None, "own round-1 commitment"),
-        ("bind-3", "another-key", message.clone(), open_bound(&cosigners, "bind-3", &message), None, "key"),
-        ("bind-4", KEY, message.clone(), open_bound(&cosigners, "bind-4", &message), Some([7; 32]), "intent"),
+        (
+            "bind-x2",
+            KEY,
+            message.clone(),
+            altered,
+            None,
+            "own round-1 commitment",
+        ),
+        (
+            "bind-3",
+            "another-key",
+            message.clone(),
+            open_bound(&cosigners, "bind-3", &message),
+            None,
+            "key",
+        ),
+        (
+            "bind-4",
+            KEY,
+            message.clone(),
+            open_bound(&cosigners, "bind-4", &message),
+            Some([7; 32]),
+            "intent",
+        ),
     ];
     for (session, key, msg, commitments, intent, what) in cases {
-        let err = c.round2(session, key, &msg, &commitments, intent.as_ref()).unwrap_err();
+        let err = c
+            .round2(session, key, &msg, &commitments, intent.as_ref())
+            .unwrap_err();
         assert!(
             matches!(&err, CoreError::BindingMismatch { what: w, .. } if w.contains(what)),
             "{session}: expected a {what} mismatch, got {err:?}"
         );
-        assert!(!burned(&tmp, c, session), "{session}: a refused round 2 must not burn the marker");
+        assert!(
+            !burned(&tmp, c, session),
+            "{session}: a refused round 2 must not burn the marker"
+        );
         // The session's nonces are gone: no later round 2 can release a share for it.
-        let err = c.round2(session, KEY, &message, &commitments, None).unwrap_err();
-        assert!(matches!(err, CoreError::UnknownSession(_)), "{session}: {err:?}");
+        let err = c
+            .round2(session, KEY, &message, &commitments, None)
+            .unwrap_err();
+        assert!(
+            matches!(err, CoreError::UnknownSession(_)),
+            "{session}: {err:?}"
+        );
     }
 
     // The bound round 2 itself goes through and burns.
     let commitments = open_bound(&cosigners, "bind-ok", &message);
-    c.round2("bind-ok", KEY, &message, &commitments, None).unwrap();
+    c.round2("bind-ok", KEY, &message, &commitments, None)
+        .unwrap();
     assert!(burned(&tmp, c, "bind-ok"));
 }
 
@@ -507,7 +653,8 @@ fn round2_is_refused_unless_it_matches_the_round1_binding_and_never_burns_on_a_m
 fn round1_refuses_a_signer_set_it_cannot_belong_to() {
     let tmp = tempfile::tempdir().unwrap();
     let cosigners = dkg_cluster(&tmp);
-    let without_me = SessionBinding::new(KEY).with_signers([cosigners[1].identifier(), cosigners[2].identifier()]);
+    let without_me = SessionBinding::new(KEY)
+        .with_signers([cosigners[1].identifier(), cosigners[2].identifier()]);
     let too_small = SessionBinding::new(KEY).with_signers([cosigners[0].identifier()]);
     for b in [without_me, too_small] {
         let err = cosigners[0].round1("s", b).unwrap_err();
@@ -522,11 +669,30 @@ fn an_unbound_session_from_an_older_leader_still_signs() {
     let cosigners = dkg_cluster(&tmp);
     let message = canton_digest(b"legacy leader");
     let quorum = [&cosigners[0], &cosigners[2]];
-    let commitments: BTreeMap<_, _> =
-        quorum.iter().map(|c| (c.identifier(), c.round1("legacy", SessionBinding::new(KEY)).unwrap())).collect();
+    let commitments: BTreeMap<_, _> = quorum
+        .iter()
+        .map(|c| {
+            (
+                c.identifier(),
+                c.round1("legacy", SessionBinding::new(KEY)).unwrap(),
+            )
+        })
+        .collect();
     let shares: BTreeMap<_, _> = quorum
         .iter()
-        .map(|c| (c.identifier(), c.round2("legacy", KEY, &message, &commitments, None).unwrap()))
+        .map(|c| {
+            (
+                c.identifier(),
+                c.round2("legacy", KEY, &message, &commitments, None)
+                    .unwrap(),
+            )
+        })
         .collect();
-    aggregate(&message, &commitments, &shares, cosigners[0].public_key_package()).unwrap();
+    aggregate(
+        &message,
+        &commitments,
+        &shares,
+        cosigners[0].public_key_package(),
+    )
+    .unwrap();
 }

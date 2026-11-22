@@ -21,7 +21,8 @@ fn store(dir: &std::path::Path) -> KeyStore {
 
 /// A real 2-of-3 dealt share for node 1.
 fn share(seed: u8, epoch: u64) -> Share {
-    let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&[seed; 32], &[1, 2, 3], 2).unwrap();
+    let (shares, pkp) =
+        rutli_frost_core::dealer::split_ed25519_seed(&[seed; 32], &[1, 2, 3], 2).unwrap();
     Share {
         key_package: frost_ed25519::keys::KeyPackage::try_from(shares[0].clone()).unwrap(),
         public_key_package: pkp,
@@ -57,7 +58,9 @@ fn a_share_file_without_an_epoch_reads_as_epoch_zero() {
     let obj = legacy.as_object_mut().unwrap();
     obj.remove("epoch");
     obj.remove("key_id");
-    let sealed = Sealer::from_master_secret(MASTER, 1).seal(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let sealed = Sealer::from_master_secret(MASTER, 1)
+        .seal(&serde_json::to_vec(&legacy).unwrap())
+        .unwrap();
     std::fs::write(dir.join("legacy.json"), sealed).unwrap();
 
     let loaded = ks.load("legacy").unwrap();
@@ -79,22 +82,45 @@ fn a_staged_share_is_create_once_invisible_and_promotes_only_as_told() {
     let ks = store(&dir);
     let s1 = share(1, 1);
     ks.stage("k", "dkg-a", &s1).unwrap();
-    assert!(matches!(ks.stage("k", "dkg-a", &share(2, 1)), Err(DaemonError::KeyExists(_))));
-    assert_eq!(ks.list_staged().unwrap(), vec![("k".to_string(), "dkg-a".to_string())]);
-    assert!(Sealer::is_sealed(&std::fs::read(ks.staged_dir().join("k.dkg-a.json")).unwrap()));
+    assert!(matches!(
+        ks.stage("k", "dkg-a", &share(2, 1)),
+        Err(DaemonError::KeyExists(_))
+    ));
+    assert_eq!(
+        ks.list_staged().unwrap(),
+        vec![("k".to_string(), "dkg-a".to_string())]
+    );
+    assert!(Sealer::is_sealed(
+        &std::fs::read(ks.staged_dir().join("k.dkg-a.json")).unwrap()
+    ));
     // Not a key: absent for loads, the hosted inventory and the probe still pass.
     assert!(!ks.exists("k"));
     assert!(ks.list_hosted().unwrap().is_empty());
     ks.check_readable().unwrap();
-    assert!(ks.stage("k", "../x", &s1).is_err(), "ceremony ids name files");
+    assert!(
+        ks.stage("k", "../x", &s1).is_err(),
+        "ceremony ids name files"
+    );
 
     // DKG promotion never replaces a key that appeared meanwhile.
     ks.create("k", &share(9, 0)).unwrap();
-    assert_eq!(ks.promote_staged("k", "dkg-a", false).unwrap(), Promotion::TargetExists);
-    assert!(ks.has_staged("k", "dkg-a").unwrap(), "a refused promotion leaves the staged share");
+    assert_eq!(
+        ks.promote_staged("k", "dkg-a", false).unwrap(),
+        Promotion::TargetExists
+    );
+    assert!(
+        ks.has_staged("k", "dkg-a").unwrap(),
+        "a refused promotion leaves the staged share"
+    );
     // Refresh promotion is an atomic replace.
-    assert_eq!(ks.promote_staged("k", "dkg-a", true).unwrap(), Promotion::Promoted);
-    assert_eq!(ks.load("k").unwrap().pkp_digest().unwrap(), s1.pkp_digest().unwrap());
+    assert_eq!(
+        ks.promote_staged("k", "dkg-a", true).unwrap(),
+        Promotion::Promoted
+    );
+    assert_eq!(
+        ks.load("k").unwrap().pkp_digest().unwrap(),
+        s1.pkp_digest().unwrap()
+    );
     assert!(ks.list_staged().unwrap().is_empty());
 
     ks.stage("k", "refresh-b", &share(4, 2)).unwrap();
@@ -114,15 +140,28 @@ fn startup_removes_staged_shares_this_node_never_voted_for() {
     // Aborted, but the delete did not finish.
     let aborted = share(2, 2);
     ks.stage("k", "refresh-aborted", &aborted).unwrap();
-    records.write(None, &record("refresh-aborted", RecordState::Aborted, &aborted)).unwrap();
+    records
+        .write(
+            None,
+            &record("refresh-aborted", RecordState::Aborted, &aborted),
+        )
+        .unwrap();
     // A live yes-vote keeps its share.
     let staged = share(3, 2);
     ks.stage("k", "refresh-live", &staged).unwrap();
-    records.write(None, &record("refresh-live", RecordState::Staged, &staged)).unwrap();
+    records
+        .write(None, &record("refresh-live", RecordState::Staged, &staged))
+        .unwrap();
 
     let n = node(&dir);
-    assert_eq!(ks.list_staged().unwrap(), vec![("k".to_string(), "refresh-live".to_string())]);
-    assert_eq!(n.ceremony_record("refresh-live").unwrap().state, RecordState::Staged);
+    assert_eq!(
+        ks.list_staged().unwrap(),
+        vec![("k".to_string(), "refresh-live".to_string())]
+    );
+    assert_eq!(
+        n.ceremony_record("refresh-live").unwrap().state,
+        RecordState::Staged
+    );
     assert_eq!(n.staged_records().len(), 1);
     let view = n.key_epoch("k").unwrap();
     assert!(view.staged);
@@ -145,8 +184,15 @@ fn startup_completes_a_commit_interrupted_after_the_promotion() {
     ks.promote_staged("k", "refresh-1", true).unwrap();
 
     let n = node(&dir);
-    assert_eq!(n.ceremony_record("refresh-1").unwrap().state, RecordState::Committed);
-    assert_eq!(records.load_all().unwrap()[0].state, RecordState::Committed, "durably");
+    assert_eq!(
+        n.ceremony_record("refresh-1").unwrap().state,
+        RecordState::Committed
+    );
+    assert_eq!(
+        records.load_all().unwrap()[0].state,
+        RecordState::Committed,
+        "durably"
+    );
     assert_eq!(n.key_epoch("k").unwrap().epoch, 2);
 }
 
@@ -158,10 +204,22 @@ fn a_staged_vote_whose_share_vanished_is_left_for_an_operator() {
     let records = CeremonyRecords::open(ks.ceremony_dir());
     ks.create("k", &share(1, 1)).unwrap();
     // STAGED for an outcome that is neither staged nor live (the staged file was lost).
-    records.write(None, &record("refresh-lost", RecordState::Staged, &share(5, 2))).unwrap();
+    records
+        .write(
+            None,
+            &record("refresh-lost", RecordState::Staged, &share(5, 2)),
+        )
+        .unwrap();
     let n = node(&dir);
-    assert_eq!(n.ceremony_record("refresh-lost").unwrap().state, RecordState::Staged);
-    assert_eq!(n.key_epoch("k").unwrap().epoch, 1, "the live share is untouched");
+    assert_eq!(
+        n.ceremony_record("refresh-lost").unwrap().state,
+        RecordState::Staged
+    );
+    assert_eq!(
+        n.key_epoch("k").unwrap().epoch,
+        1,
+        "the live share is untouched"
+    );
 }
 
 /// Audit F4: the startup repair never deletes a staged share whose vote it could not read — not
@@ -175,7 +233,9 @@ fn startup_keeps_a_staged_share_whose_vote_it_cannot_read() {
     // A yes-vote whose record file is garbled (a torn or corrupted write): the share stays.
     let s = share(1, 2);
     ks.stage("k", "refresh-garbled", &s).unwrap();
-    records.write(None, &record("refresh-garbled", RecordState::Staged, &s)).unwrap();
+    records
+        .write(None, &record("refresh-garbled", RecordState::Staged, &s))
+        .unwrap();
     std::fs::write(ks.ceremony_dir().join("refresh-garbled.json"), b"{ torn").unwrap();
     // A share with no record file at all is still an orphan.
     ks.stage("k", "refresh-orphan", &share(2, 2)).unwrap();
@@ -184,13 +244,20 @@ fn startup_keeps_a_staged_share_whose_vote_it_cannot_read() {
     ks.stage("k", "refresh-quarantined", &q).unwrap();
     let staged = record("refresh-quarantined", RecordState::Staged, &q);
     records.write(None, &staged).unwrap();
-    let quarantined = CeremonyRecord { state: RecordState::Aborted, quarantined: true, ..staged.clone() };
+    let quarantined = CeremonyRecord {
+        state: RecordState::Aborted,
+        quarantined: true,
+        ..staged.clone()
+    };
     records.write(Some(&staged), &quarantined).unwrap();
 
     let n = node(&dir);
     assert_eq!(
         ks.list_staged().unwrap(),
-        vec![("k".to_string(), "refresh-garbled".to_string()), ("k".to_string(), "refresh-quarantined".to_string())]
+        vec![
+            ("k".to_string(), "refresh-garbled".to_string()),
+            ("k".to_string(), "refresh-quarantined".to_string())
+        ]
     );
     assert_eq!(n.quarantined_records().len(), 1);
     drop(n);
@@ -202,7 +269,11 @@ fn startup_keeps_a_staged_share_whose_vote_it_cannot_read() {
     std::fs::rename(&ceremonies, &aside).unwrap();
     std::fs::write(&ceremonies, b"not a directory").unwrap();
     drop(node(&dir));
-    assert_eq!(ks.list_staged().unwrap().len(), 3, "an unreadable vote set skips the repair");
+    assert_eq!(
+        ks.list_staged().unwrap().len(),
+        3,
+        "an unreadable vote set skips the repair"
+    );
     // Readable again: the orphan goes, the rest stays.
     std::fs::remove_file(&ceremonies).unwrap();
     std::fs::rename(&aside, &ceremonies).unwrap();

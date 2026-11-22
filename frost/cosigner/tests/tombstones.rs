@@ -37,7 +37,8 @@ use rutli_cosigner::journal::{Retention, SignJournal};
 use rutli_cosigner::keystore::KeyStore;
 use rutli_cosigner::node::{Node, Round1Ctx, TombstoneOutcome};
 use rutli_cosigner::orchestrator::{
-    anti_entropy_sweep, delete_hosted_key, generate_hosted_key_with_intent, repair_hosted_key, Peers,
+    anti_entropy_sweep, delete_hosted_key, generate_hosted_key_with_intent, repair_hosted_key,
+    Peers,
 };
 use rutli_cosigner::pb;
 use rutli_cosigner::peer::{GrpcPeer, LocalPeer, PeerApi};
@@ -73,7 +74,11 @@ impl Ids {
         for cn in ["cosigner1", "cosigner2", "cosigner3", "driver", "operator"] {
             pems.insert(cn.to_string(), leaf(&pki, cn));
         }
-        Self { pki, pems, approver: ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]) }
+        Self {
+            pki,
+            pems,
+            approver: ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]),
+        }
     }
 
     fn signer(&self, who: &str) -> rutli_cosigner::request_auth::NodeSigner {
@@ -82,7 +87,9 @@ impl Ids {
     }
 
     fn approver_spki_b64(&self) -> String {
-        let mut der = vec![0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+        let mut der = vec![
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
         der.extend_from_slice(self.approver.verifying_key().as_bytes());
         base64::engine::general_purpose::STANDARD.encode(der)
     }
@@ -115,7 +122,19 @@ fn sign(ids: &Ids, who: &str, i: pb::SignIntent) -> pb::SignedIntent {
 
 /// The driver's generate intent for an AES key `key_id` led by node `leader`, with a fresh request id.
 fn generate_intent(ids: &Ids, key_id: &str, leader: u16) -> pb::SignedIntent {
-    sign(ids, "driver", intent::generate_intent(CLUSTER, key_id, "aes-256-gcm", leader, intent::new_request_id(), intent::now_ms(), 60_000))
+    sign(
+        ids,
+        "driver",
+        intent::generate_intent(
+            CLUSTER,
+            key_id,
+            "aes-256-gcm",
+            leader,
+            intent::new_request_id(),
+            intent::now_ms(),
+            60_000,
+        ),
+    )
 }
 
 /// Node `leader`'s view of the cluster as the daemon has it: itself in process, every other node as
@@ -126,7 +145,11 @@ fn led_by(nodes: &[Arc<Node>], leader: usize) -> Peers {
         .enumerate()
         .map(|(j, n)| {
             let p = LocalPeer::new(n.clone());
-            let p = if j == leader { p } else { p.on_behalf_of(nodes[leader].clone()) };
+            let p = if j == leader {
+                p
+            } else {
+                p.on_behalf_of(nodes[leader].clone())
+            };
             Arc::new(p) as Arc<dyn PeerApi>
         })
         .collect()
@@ -157,8 +180,23 @@ fn keys_dir(root: &Path, i: u16) -> PathBuf {
     root.join(format!("node-{i}")).join("keys")
 }
 
-fn open_node(root: &Path, ids: &Ids, i: u16, delete: &DeletePolicy, policy: &SigningPolicyConfig, grace: Duration) -> Arc<Node> {
-    open_node_with(root, ids, i, delete, policy, grace, intent::DeleteGrants::default())
+fn open_node(
+    root: &Path,
+    ids: &Ids,
+    i: u16,
+    delete: &DeletePolicy,
+    policy: &SigningPolicyConfig,
+    grace: Duration,
+) -> Arc<Node> {
+    open_node_with(
+        root,
+        ids,
+        i,
+        delete,
+        policy,
+        grace,
+        intent::DeleteGrants::default(),
+    )
 }
 
 fn open_node_with(
@@ -177,11 +215,25 @@ fn open_node_with(
         accept_v1: true,
     });
     let ks = KeyStore::open_with_sealer(keys_dir(root, i), Some(Arc::new(sealer))).unwrap();
-    let verifier = IntentVerifier::new(ids.pki.ca_pem.as_bytes().to_vec(), false, CLUSTER.into(), ["driver".to_string()], policy)
-        .unwrap()
-        .with_delete_policy(delete.clone())
-        .with_delete_grants(grants);
-    let journal = SignJournal::open(root.join(format!("node-{i}")).join("journal"), i, Retention { days: 90, max_bytes: 64 << 20 }).unwrap();
+    let verifier = IntentVerifier::new(
+        ids.pki.ca_pem.as_bytes().to_vec(),
+        false,
+        CLUSTER.into(),
+        ["driver".to_string()],
+        policy,
+    )
+    .unwrap()
+    .with_delete_policy(delete.clone())
+    .with_delete_grants(grants);
+    let journal = SignJournal::open(
+        root.join(format!("node-{i}")).join("journal"),
+        i,
+        Retention {
+            days: 90,
+            max_bytes: 64 << 20,
+        },
+    )
+    .unwrap();
     let guard = Arc::new(SignGuard::new(Arc::new(verifier), journal, 10));
     Arc::new(
         Node::new(Identifier::try_from(i).unwrap(), N, T, ks)
@@ -193,26 +245,47 @@ fn open_node_with(
 }
 
 fn operator_deletes() -> DeletePolicy {
-    DeletePolicy { allowlist: ["operator".to_string()].into(), ..Default::default() }
+    DeletePolicy {
+        allowlist: ["operator".to_string()].into(),
+        ..Default::default()
+    }
 }
 
 fn cluster() -> Cluster {
-    cluster_with(operator_deletes(), SigningPolicyConfig::default(), Duration::from_secs(7 * 86400))
+    cluster_with(
+        operator_deletes(),
+        SigningPolicyConfig::default(),
+        Duration::from_secs(7 * 86400),
+    )
 }
 
 fn cluster_with(delete: DeletePolicy, policy: SigningPolicyConfig, grace: Duration) -> Cluster {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
     let ids = Ids::new();
-    let nodes: Vec<Arc<Node>> = (1..=N).map(|i| open_node(&root, &ids, i, &delete, &policy, grace)).collect();
+    let nodes: Vec<Arc<Node>> = (1..=N)
+        .map(|i| open_node(&root, &ids, i, &delete, &policy, grace))
+        .collect();
     rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
-    let peers: Peers = nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
-    Cluster { ids, nodes, peers, root, _tmp: tmp }
+    let peers: Peers = nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect();
+    Cluster {
+        ids,
+        nodes,
+        peers,
+        root,
+        _tmp: tmp,
+    }
 }
 
 impl Cluster {
     async fn generate(&self, key_id: &str) -> rutli_cosigner::hosted::HostedKey {
-        generate_hosted_key(&self.ids, &self.nodes[0], &led_by(&self.nodes, 0), key_id).await.unwrap().0
+        generate_hosted_key(&self.ids, &self.nodes[0], &led_by(&self.nodes, 0), key_id)
+            .await
+            .unwrap()
+            .0
     }
 
     fn file(&self, i: u16, key_id: &str) -> PathBuf {
@@ -221,7 +294,15 @@ impl Cluster {
 
     /// Every node's verdict on `key_id`: (live, tombstoned).
     fn states(&self, key_id: &str) -> Vec<(bool, bool)> {
-        self.nodes.iter().map(|n| (n.hosted_exists(key_id), n.hosted_tombstoned(key_id).unwrap())).collect()
+        self.nodes
+            .iter()
+            .map(|n| {
+                (
+                    n.hosted_exists(key_id),
+                    n.hosted_tombstoned(key_id).unwrap(),
+                )
+            })
+            .collect()
     }
 }
 
@@ -239,14 +320,23 @@ async fn a_signed_delete_tombstones_the_key_on_every_node_and_retains_its_materi
     let key = c.generate("rutli-sym-1").await;
     let blob = key.encrypt_symmetric(b"wrapped").unwrap();
 
-    let (deleted, tombstones) =
-        delete_hosted_key(&c.peers, "rutli-sym-1", &delete_intent(&c.ids, "operator", "rutli-sym-1"), 2).await.unwrap();
+    let (deleted, tombstones) = delete_hosted_key(
+        &c.peers,
+        "rutli-sym-1",
+        &delete_intent(&c.ids, "operator", "rutli-sym-1"),
+        2,
+    )
+    .await
+    .unwrap();
     assert!(deleted);
     assert_eq!(tombstones, 3);
     assert_eq!(c.states("rutli-sym-1"), vec![(false, true); 3]);
     for n in &c.nodes {
         // Never served: NOT_FOUND, exactly like a key that never existed.
-        assert!(matches!(n.hosted_load("rutli-sym-1"), Err(DaemonError::UnknownKey(_))));
+        assert!(matches!(
+            n.hosted_load("rutli-sym-1"),
+            Err(DaemonError::UnknownKey(_))
+        ));
         assert!(n.hosted_decrypt_symmetric("rutli-sym-1", &blob).is_err());
         assert!(n.hosted_list().unwrap().is_empty());
         // The material is still there, sealed inside the tombstone, for the grace period.
@@ -256,11 +346,21 @@ async fn a_signed_delete_tombstones_the_key_on_every_node_and_retains_its_materi
     }
     // The tombstone is a sealed v2 file of kind "tombstone", nothing readable on disk.
     let raw = std::fs::read(c.file(2, "rutli-sym-1")).unwrap();
-    assert_eq!(rutli_cosigner::seal::header_of(&raw).unwrap().kind, "tombstone");
+    assert_eq!(
+        rutli_cosigner::seal::header_of(&raw).unwrap().kind,
+        "tombstone"
+    );
     assert!(!String::from_utf8_lossy(&raw).contains(&key.private_der));
 
     // Idempotent: a retried delete changes nothing.
-    let again = delete_hosted_key(&c.peers, "rutli-sym-1", &delete_intent(&c.ids, "operator", "rutli-sym-1"), 2).await.unwrap();
+    let again = delete_hosted_key(
+        &c.peers,
+        "rutli-sym-1",
+        &delete_intent(&c.ids, "operator", "rutli-sym-1"),
+        2,
+    )
+    .await
+    .unwrap();
     assert_eq!(again, (false, 3));
 }
 
@@ -282,7 +382,9 @@ async fn a_delete_counts_one_tombstone_per_node_and_a_retry_none() {
         let out = handle.render();
         let value = |how: &str| {
             let prefix = format!("{WRITTEN}{{how=\"{how}\"}} ");
-            out.lines().find_map(|l| l.strip_prefix(&prefix)).map_or(0, |v| v.parse::<u64>().unwrap())
+            out.lines()
+                .find_map(|l| l.strip_prefix(&prefix))
+                .map_or(0, |v| v.parse::<u64>().unwrap())
         };
         (value("converted"), value("recorded"))
     };
@@ -290,27 +392,57 @@ async fn a_delete_counts_one_tombstone_per_node_and_a_retry_none() {
     // The executing node: one `converted` for the delete, nothing for the retries.
     let first = delete_intent(&c.ids, "operator", "rutli-sym-10");
     let executed = count(0, &|n| {
-        assert_eq!(n.hosted_apply_tombstone("rutli-sym-10", &first, intent::Expiry::Enforce, None).unwrap(), TombstoneOutcome::Converted);
-        assert_eq!(n.hosted_apply_tombstone("rutli-sym-10", &first, intent::Expiry::Enforce, None).unwrap(), TombstoneOutcome::Already);
+        assert_eq!(
+            n.hosted_apply_tombstone("rutli-sym-10", &first, intent::Expiry::Enforce, None)
+                .unwrap(),
+            TombstoneOutcome::Converted
+        );
+        assert_eq!(
+            n.hosted_apply_tombstone("rutli-sym-10", &first, intent::Expiry::Enforce, None)
+                .unwrap(),
+            TombstoneOutcome::Already
+        );
         let retry = delete_intent(&c.ids, "operator", "rutli-sym-10");
-        assert_eq!(n.hosted_apply_tombstone("rutli-sym-10", &retry, intent::Expiry::Enforce, None).unwrap(), TombstoneOutcome::Already);
+        assert_eq!(
+            n.hosted_apply_tombstone("rutli-sym-10", &retry, intent::Expiry::Enforce, None)
+                .unwrap(),
+            TombstoneOutcome::Already
+        );
     });
     assert_eq!(executed, (1, 0));
 
     // A peer that missed the delete still holds the key: anti-entropy converts it, once.
     let t = c.nodes[0].hosted_tombstones().unwrap().pop().unwrap();
-    let propagated = intent::Expiry::Propagated { deleted_at_ms: t.deleted_at_ms };
+    let propagated = intent::Expiry::Propagated {
+        deleted_at_ms: t.deleted_at_ms,
+    };
     let peer = count(1, &|n| {
-        assert_eq!(n.hosted_apply_tombstone("rutli-sym-10", &first, propagated, None).unwrap(), TombstoneOutcome::Converted);
-        assert_eq!(n.hosted_apply_tombstone("rutli-sym-10", &first, propagated, None).unwrap(), TombstoneOutcome::Already);
+        assert_eq!(
+            n.hosted_apply_tombstone("rutli-sym-10", &first, propagated, None)
+                .unwrap(),
+            TombstoneOutcome::Converted
+        );
+        assert_eq!(
+            n.hosted_apply_tombstone("rutli-sym-10", &first, propagated, None)
+                .unwrap(),
+            TombstoneOutcome::Already
+        );
     });
     assert_eq!(peer, (1, 0));
 
     // A node that never held the key records the tombstone, at delete time as by anti-entropy.
     let absent = delete_intent(&c.ids, "operator", "rutli-sym-11");
     let recorded = count(2, &|n| {
-        assert_eq!(n.hosted_apply_tombstone("rutli-sym-11", &absent, intent::Expiry::Enforce, None).unwrap(), TombstoneOutcome::Recorded);
-        assert_eq!(n.hosted_apply_tombstone("rutli-sym-11", &absent, intent::Expiry::Enforce, None).unwrap(), TombstoneOutcome::Already);
+        assert_eq!(
+            n.hosted_apply_tombstone("rutli-sym-11", &absent, intent::Expiry::Enforce, None)
+                .unwrap(),
+            TombstoneOutcome::Recorded
+        );
+        assert_eq!(
+            n.hosted_apply_tombstone("rutli-sym-11", &absent, intent::Expiry::Enforce, None)
+                .unwrap(),
+            TombstoneOutcome::Already
+        );
     });
     assert_eq!(recorded, (0, 1));
 }
@@ -322,85 +454,193 @@ async fn unsigned_forged_or_unauthorized_deletes_are_refused_at_every_node() {
     let now = intent::now_ms();
     let cases: Vec<(&str, pb::SignedIntent, &str)> = vec![
         // The driver holds the signer role, not the delete role.
-        ("driver", delete_intent(&c.ids, "driver", "rutli-sym-2"), "not on this node's hosted_keys.delete_allowlist"),
+        (
+            "driver",
+            delete_intent(&c.ids, "driver", "rutli-sym-2"),
+            "not on this node's hosted_keys.delete_allowlist",
+        ),
         // A cosigner certificate (a compromised node) can never delete.
-        ("cosigner", delete_intent(&c.ids, "cosigner3", "rutli-sym-2"), "delete_allowlist"),
+        (
+            "cosigner",
+            delete_intent(&c.ids, "cosigner3", "rutli-sym-2"),
+            "delete_allowlist",
+        ),
         // A valid delete of another key.
-        ("other key", delete_intent(&c.ids, "operator", "rutli-sym-other"), "intent deletes rutli-sym-other"),
+        (
+            "other key",
+            delete_intent(&c.ids, "operator", "rutli-sym-other"),
+            "intent deletes rutli-sym-other",
+        ),
         // A signing intent is not a delete.
-        ("purpose", sign(&c.ids, "operator", pb::SignIntent { purpose: "sign".into(), ..unsigned_delete("rutli-sym-2", now, now + 60_000) }), "purpose"),
+        (
+            "purpose",
+            sign(
+                &c.ids,
+                "operator",
+                pb::SignIntent {
+                    purpose: "sign".into(),
+                    ..unsigned_delete("rutli-sym-2", now, now + 60_000)
+                },
+            ),
+            "purpose",
+        ),
         // Expired.
-        ("expired", sign(&c.ids, "operator", unsigned_delete("rutli-sym-2", now - 600_000, now - 590_000)), "expired"),
+        (
+            "expired",
+            sign(
+                &c.ids,
+                "operator",
+                unsigned_delete("rutli-sym-2", now - 600_000, now - 590_000),
+            ),
+            "expired",
+        ),
         // Another cluster.
-        ("cluster", sign(&c.ids, "operator", pb::SignIntent { cluster_id: "othercluster0000".into(), ..unsigned_delete("rutli-sym-2", now, now + 60_000) }), "cluster"),
+        (
+            "cluster",
+            sign(
+                &c.ids,
+                "operator",
+                pb::SignIntent {
+                    cluster_id: "othercluster0000".into(),
+                    ..unsigned_delete("rutli-sym-2", now, now + 60_000)
+                },
+            ),
+            "cluster",
+        ),
     ];
     for (what, bad, needle) in &cases {
         for p in &c.peers {
             refused(p.delete_key("delkey-x", "rutli-sym-2", bad).await, needle);
         }
-        assert!(delete_hosted_key(&c.peers, "rutli-sym-2", bad, 2).await.is_err(), "{what}");
+        assert!(
+            delete_hosted_key(&c.peers, "rutli-sym-2", bad, 2)
+                .await
+                .is_err(),
+            "{what}"
+        );
     }
     // Forged: the operator's intent with its bytes altered after signing.
     let mut forged = delete_intent(&c.ids, "operator", "rutli-sym-other");
-    forged.intent = prost::Message::encode_to_vec(&unsigned_delete("rutli-sym-2", now, now + 60_000));
+    forged.intent =
+        prost::Message::encode_to_vec(&unsigned_delete("rutli-sym-2", now, now + 60_000));
     for p in &c.peers {
-        refused(p.delete_key("delkey-x", "rutli-sym-2", &forged).await, "signature");
+        refused(
+            p.delete_key("delkey-x", "rutli-sym-2", &forged).await,
+            "signature",
+        );
     }
     // A peer's PurgeKey without an intent is only a rollback of its own fenced generation.
     for p in &c.peers {
-        refused(p.purge_key("genkey-anything", "rutli-sym-2").await, "not the rollback");
+        refused(
+            p.purge_key("genkey-anything", "rutli-sym-2").await,
+            "not the rollback",
+        );
     }
-    assert_eq!(c.states("rutli-sym-2"), vec![(true, false); 3], "the key is untouched everywhere");
+    assert_eq!(
+        c.states("rutli-sym-2"),
+        vec![(true, false); 3],
+        "the key is untouched everywhere"
+    );
 }
 
 #[tokio::test]
 async fn delete_approvals_are_counted_by_every_node() {
     let ids_policy = |ids: &Ids| SigningPolicyConfig {
-        approvers: vec![ApproverConfig { id: "alice".into(), public_key_spki_b64: ids.approver_spki_b64() }],
+        approvers: vec![ApproverConfig {
+            id: "alice".into(),
+            public_key_spki_b64: ids.approver_spki_b64(),
+        }],
         ..Default::default()
     };
     // The cluster's own identities, so the approver key matches.
     let probe = Ids::new();
     let policy = ids_policy(&probe);
-    let delete = DeletePolicy { approval_threshold: 1, ..operator_deletes() };
+    let delete = DeletePolicy {
+        approval_threshold: 1,
+        ..operator_deletes()
+    };
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
-    let nodes: Vec<Arc<Node>> = (1..=N).map(|i| open_node(&root, &probe, i, &delete, &policy, Duration::from_secs(60))).collect();
-    let peers: Peers = nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
-    generate_hosted_key(&probe, &nodes[0], &led_by(&nodes, 0), "rutli-sym-gated").await.unwrap();
+    let nodes: Vec<Arc<Node>> = (1..=N)
+        .map(|i| open_node(&root, &probe, i, &delete, &policy, Duration::from_secs(60)))
+        .collect();
+    let peers: Peers = nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect();
+    generate_hosted_key(&probe, &nodes[0], &led_by(&nodes, 0), "rutli-sym-gated")
+        .await
+        .unwrap();
 
     // Without an approval: refused everywhere.
     let bare = delete_intent(&probe, "operator", "rutli-sym-gated");
-    refused(delete_hosted_key(&peers, "rutli-sym-gated", &bare, 2).await, "approval");
+    refused(
+        delete_hosted_key(&peers, "rutli-sym-gated", &bare, 2).await,
+        "approval",
+    );
     let now = intent::now_ms();
     let nonce = vec![3u8; 16];
     use ed25519_dalek::Signer as _;
     // Audit F6: alice's approval of what looks like a SIGN request over the same digest (the
     // sign-format request id) does not approve the delete.
-    let sign_format = intent::approval_request_id("rutli-sym-gated", &intent::delete_digest("rutli-sym-gated"), &nonce);
+    let sign_format = intent::approval_request_id(
+        "rutli-sym-gated",
+        &intent::delete_digest("rutli-sym-gated"),
+        &nonce,
+    );
     let as_sign = pb::IntentApproval {
         approver_id: "alice".into(),
-        signature: probe.approver.sign(sign_format.as_bytes()).to_bytes().to_vec(),
+        signature: probe
+            .approver
+            .sign(sign_format.as_bytes())
+            .to_bytes()
+            .to_vec(),
     };
     let mislabeled = sign(
         &probe,
         "operator",
-        pb::SignIntent { approval_nonce: nonce.clone(), approvals: vec![as_sign], ..unsigned_delete("rutli-sym-gated", now, now + 60_000) },
+        pb::SignIntent {
+            approval_nonce: nonce.clone(),
+            approvals: vec![as_sign],
+            ..unsigned_delete("rutli-sym-gated", now, now + 60_000)
+        },
     );
-    refused(delete_hosted_key(&peers, "rutli-sym-gated", &mislabeled, 2).await, "approval");
+    refused(
+        delete_hosted_key(&peers, "rutli-sym-gated", &mislabeled, 2).await,
+        "approval",
+    );
     // With alice's approval of the DELETE (what rutli-approve signs for `delete:<key>`).
-    let request_id = intent::delete_approval_request_id("rutli-sym-gated", &intent::delete_digest("rutli-sym-gated"), &nonce);
+    let request_id = intent::delete_approval_request_id(
+        "rutli-sym-gated",
+        &intent::delete_digest("rutli-sym-gated"),
+        &nonce,
+    );
     let approval = pb::IntentApproval {
         approver_id: "alice".into(),
-        signature: probe.approver.sign(request_id.as_bytes()).to_bytes().to_vec(),
+        signature: probe
+            .approver
+            .sign(request_id.as_bytes())
+            .to_bytes()
+            .to_vec(),
     };
     let approved = sign(
         &probe,
         "operator",
-        pb::SignIntent { approval_nonce: nonce, approvals: vec![approval], ..unsigned_delete("rutli-sym-gated", now, now + 60_000) },
+        pb::SignIntent {
+            approval_nonce: nonce,
+            approvals: vec![approval],
+            ..unsigned_delete("rutli-sym-gated", now, now + 60_000)
+        },
     );
-    assert!(delete_hosted_key(&peers, "rutli-sym-gated", &approved, 2).await.unwrap().0);
-    assert!(nodes.iter().all(|n| n.hosted_tombstoned("rutli-sym-gated").unwrap()));
+    assert!(
+        delete_hosted_key(&peers, "rutli-sym-gated", &approved, 2)
+            .await
+            .unwrap()
+            .0
+    );
+    assert!(nodes
+        .iter()
+        .all(|n| n.hosted_tombstoned("rutli-sym-gated").unwrap()));
 }
 
 #[tokio::test]
@@ -409,17 +649,34 @@ async fn a_delete_acl_limits_what_the_delete_role_may_delete() {
         acl: [("operator".to_string(), vec!["rutli-tenant-a-".to_string()])].into(),
         ..operator_deletes()
     };
-    let c = cluster_with(delete, SigningPolicyConfig::default(), Duration::from_secs(60));
+    let c = cluster_with(
+        delete,
+        SigningPolicyConfig::default(),
+        Duration::from_secs(60),
+    );
     c.generate("rutli-tenant-b-key").await;
     refused(
-        delete_hosted_key(&c.peers, "rutli-tenant-b-key", &delete_intent(&c.ids, "operator", "rutli-tenant-b-key"), 2).await,
+        delete_hosted_key(
+            &c.peers,
+            "rutli-tenant-b-key",
+            &delete_intent(&c.ids, "operator", "rutli-tenant-b-key"),
+            2,
+        )
+        .await,
         "delete_acl",
     );
     c.generate("rutli-tenant-a-key").await;
-    assert!(delete_hosted_key(&c.peers, "rutli-tenant-a-key", &delete_intent(&c.ids, "operator", "rutli-tenant-a-key"), 2)
+    assert!(
+        delete_hosted_key(
+            &c.peers,
+            "rutli-tenant-a-key",
+            &delete_intent(&c.ids, "operator", "rutli-tenant-a-key"),
+            2
+        )
         .await
         .unwrap()
-        .0);
+        .0
+    );
 }
 
 // ── anti-entropy ──────────────────────────────────────────────────────────────────────────────
@@ -435,20 +692,37 @@ async fn a_valid_tombstone_propagates_and_beats_a_stale_replica() {
 
     // Node 3 is down during the delete.
     let up: Peers = c.peers.iter().take(2).cloned().collect();
-    let (_, tombstones) =
-        delete_hosted_key(&up, "rutli-sym-3", &delete_intent(&c.ids, "operator", "rutli-sym-3"), 2).await.unwrap();
+    let (_, tombstones) = delete_hosted_key(
+        &up,
+        "rutli-sym-3",
+        &delete_intent(&c.ids, "operator", "rutli-sym-3"),
+        2,
+    )
+    .await
+    .unwrap();
     assert_eq!(tombstones, 2);
-    assert_eq!(c.states("rutli-sym-3"), vec![(false, true), (false, true), (true, false)]);
+    assert_eq!(
+        c.states("rutli-sym-3"),
+        vec![(false, true), (false, true), (true, false)]
+    );
 
     // Node 3 is back. The tombstoned nodes' sweeps neither push nor pull the key.
     for n in &c.nodes[..2] {
         anti_entropy_sweep(n, &c.peers).await.unwrap();
     }
-    assert_eq!(c.states("rutli-sym-3"), vec![(false, true), (false, true), (true, false)]);
+    assert_eq!(
+        c.states("rutli-sym-3"),
+        vec![(false, true), (false, true), (true, false)]
+    );
     // Node 3's sweep applies the peers' tombstone (an expired intent is fine for propagation).
     anti_entropy_sweep(&c.nodes[2], &c.peers).await.unwrap();
     assert_eq!(c.states("rutli-sym-3"), vec![(false, true); 3]);
-    assert!(c.nodes[2].hosted_tombstones().unwrap()[0].retained.is_some(), "its material is kept for undelete");
+    assert!(
+        c.nodes[2].hosted_tombstones().unwrap()[0]
+            .retained
+            .is_some(),
+        "its material is kept for undelete"
+    );
 
     // Node 2 restored from its old backup: the live copy is back on disk...
     std::fs::write(c.file(2, "rutli-sym-3"), &backup_of_node2).unwrap();
@@ -462,11 +736,20 @@ async fn a_valid_tombstone_propagates_and_beats_a_stale_replica() {
 
     // A node that never had the key records the tombstone, so the key can never arrive there.
     let fresh = tempfile::tempdir().unwrap();
-    let late = open_node(fresh.path(), &c.ids, 3, &operator_deletes(), &SigningPolicyConfig::default(), Duration::from_secs(60));
+    let late = open_node(
+        fresh.path(),
+        &c.ids,
+        3,
+        &operator_deletes(),
+        &SigningPolicyConfig::default(),
+        Duration::from_secs(60),
+    );
     let as_late: Peers = c.nodes[..2]
         .iter()
         .map(|n| Arc::new(LocalPeer::new(n.clone()).on_behalf_of(late.clone())) as Arc<dyn PeerApi>)
-        .chain(std::iter::once(Arc::new(LocalPeer::new(late.clone())) as Arc<dyn PeerApi>))
+        .chain(std::iter::once(
+            Arc::new(LocalPeer::new(late.clone())) as Arc<dyn PeerApi>
+        ))
         .collect();
     anti_entropy_sweep(&late, &as_late).await.unwrap();
     assert!(late.hosted_tombstoned("rutli-sym-3").unwrap());
@@ -481,9 +764,20 @@ async fn a_forged_tombstone_from_a_peer_is_refused() {
     let liar: Arc<dyn PeerApi> = Arc::new(LyingPeer {
         inner: Arc::new(LocalPeer::new(c.nodes[2].clone())),
         manifest: vec![
-            tomb("rutli-sym-4", delete_intent(&c.ids, "driver", "rutli-sym-4")),
-            tomb("rutli-sym-4", delete_intent(&c.ids, "cosigner3", "rutli-sym-4")),
-            pb::KeyManifest { key_id: "rutli-sym-4".into(), tombstone: true, delete_intent: b"garbage".to_vec(), ..Default::default() },
+            tomb(
+                "rutli-sym-4",
+                delete_intent(&c.ids, "driver", "rutli-sym-4"),
+            ),
+            tomb(
+                "rutli-sym-4",
+                delete_intent(&c.ids, "cosigner3", "rutli-sym-4"),
+            ),
+            pb::KeyManifest {
+                key_id: "rutli-sym-4".into(),
+                tombstone: true,
+                delete_intent: b"garbage".to_vec(),
+                ..Default::default()
+            },
         ],
     });
     let peers: Peers = vec![c.peers[0].clone(), c.peers[1].clone(), liar];
@@ -501,7 +795,10 @@ async fn an_old_delete_intent_is_not_replayed_after_the_role_is_granted() {
     c.generate("rutli-sym-replay").await;
     // The driver's delete intent, refused at the time (not on the delete role).
     let old = delete_intent(&c.ids, "driver", "rutli-sym-replay");
-    refused(delete_hosted_key(&c.peers, "rutli-sym-replay", &old, 2).await, "delete_allowlist");
+    refused(
+        delete_hosted_key(&c.peers, "rutli-sym-replay", &old, 2).await,
+        "delete_allowlist",
+    );
     let issued = intent::now_ms();
     let with_time = |intent: pb::SignedIntent, deleted_at_ms: u64| pb::KeyManifest {
         deleted_at_ms,
@@ -510,40 +807,88 @@ async fn an_old_delete_intent_is_not_replayed_after_the_role_is_granted() {
 
     // Later (ten minutes, well past the clock-skew allowance) the operator grants the driver the
     // delete role; node 1 restarts and notes the change.
-    let granted = DeletePolicy { allowlist: ["operator".to_string(), "driver".to_string()].into(), ..Default::default() };
+    let granted = DeletePolicy {
+        allowlist: ["operator".to_string(), "driver".to_string()].into(),
+        ..Default::default()
+    };
     let grants_file = c.root.join("delete-policy.json");
-    intent::DeleteGrants::load_and_update(&grants_file, &operator_deletes(), &SigningPolicyConfig::default(), issued - 10_000)
-        .unwrap();
+    intent::DeleteGrants::load_and_update(
+        &grants_file,
+        &operator_deletes(),
+        &SigningPolicyConfig::default(),
+        issued - 10_000,
+    )
+    .unwrap();
     std::thread::sleep(Duration::from_millis(5));
-    let grants =
-        intent::DeleteGrants::load_and_update(&grants_file, &granted, &SigningPolicyConfig::default(), intent::now_ms() + 600_000)
-            .unwrap();
-    let node1 = open_node_with(&c.root, &c.ids, 1, &granted, &SigningPolicyConfig::default(), Duration::from_secs(60), grants);
+    let grants = intent::DeleteGrants::load_and_update(
+        &grants_file,
+        &granted,
+        &SigningPolicyConfig::default(),
+        intent::now_ms() + 600_000,
+    )
+    .unwrap();
+    let node1 = open_node_with(
+        &c.root,
+        &c.ids,
+        1,
+        &granted,
+        &SigningPolicyConfig::default(),
+        Duration::from_secs(60),
+        grants,
+    );
     rutli_cosigner::peer::wire_local_mesh(std::slice::from_ref(&node1)).ok();
     // A compromised peer lists a tombstone carrying the old intent: refused, the key stays.
     let liar = |m: pb::KeyManifest| -> Peers {
         vec![
             Arc::new(LocalPeer::new(node1.clone())) as Arc<dyn PeerApi>,
-            Arc::new(LyingPeer { inner: Arc::new(LocalPeer::new(c.nodes[2].clone())), manifest: vec![m] }),
+            Arc::new(LyingPeer {
+                inner: Arc::new(LocalPeer::new(c.nodes[2].clone())),
+                manifest: vec![m],
+            }),
         ]
     };
     assert!(node1.hosted_exists("rutli-sym-replay"), "precondition");
-    anti_entropy_sweep(&node1, &liar(with_time(old.clone(), issued + 1))).await.unwrap();
-    assert!(node1.hosted_exists("rutli-sym-replay") && !node1.hosted_tombstoned("rutli-sym-replay").unwrap());
+    anti_entropy_sweep(&node1, &liar(with_time(old.clone(), issued + 1)))
+        .await
+        .unwrap();
+    assert!(
+        node1.hosted_exists("rutli-sym-replay")
+            && !node1.hosted_tombstoned("rutli-sym-replay").unwrap()
+    );
 
     // Without a recorded change (a grant older than what the node knows), the same tombstone would
     // apply — the grant time is what stops it. But never with a deletion time outside the window.
-    let unrestricted =
-        open_node_with(&c.root, &c.ids, 1, &granted, &SigningPolicyConfig::default(), Duration::from_secs(60), Default::default());
+    let unrestricted = open_node_with(
+        &c.root,
+        &c.ids,
+        1,
+        &granted,
+        &SigningPolicyConfig::default(),
+        Duration::from_secs(60),
+        Default::default(),
+    );
     let liar2 = |m: pb::KeyManifest| -> Peers {
         vec![
             Arc::new(LocalPeer::new(unrestricted.clone())) as Arc<dyn PeerApi>,
-            Arc::new(LyingPeer { inner: Arc::new(LocalPeer::new(c.nodes[2].clone())), manifest: vec![m] }),
+            Arc::new(LyingPeer {
+                inner: Arc::new(LocalPeer::new(c.nodes[2].clone())),
+                manifest: vec![m],
+            }),
         ]
     };
-    anti_entropy_sweep(&unrestricted, &liar2(with_time(old.clone(), issued + 3_600_000))).await.unwrap();
-    assert!(!unrestricted.hosted_tombstoned("rutli-sym-replay").unwrap(), "deleted an hour after the intent expired");
-    anti_entropy_sweep(&unrestricted, &liar2(with_time(old, issued + 1))).await.unwrap();
+    anti_entropy_sweep(
+        &unrestricted,
+        &liar2(with_time(old.clone(), issued + 3_600_000)),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !unrestricted.hosted_tombstoned("rutli-sym-replay").unwrap(),
+        "deleted an hour after the intent expired"
+    );
+    anti_entropy_sweep(&unrestricted, &liar2(with_time(old, issued + 1)))
+        .await
+        .unwrap();
     assert!(unrestricted.hosted_tombstoned("rutli-sym-replay").unwrap());
 }
 
@@ -592,7 +937,14 @@ impl PeerApi for LyingPeer {
     async fn node_info(&self) -> Result<(u16, [u8; 32])> {
         self.inner.node_info().await
     }
-    async fn replicate_key(&self, c: &str, k: &str, s: &str, p: &[u8], w: &rutli_cosigner::wrap::Wrapped) -> Result<Vec<u8>> {
+    async fn replicate_key(
+        &self,
+        c: &str,
+        k: &str,
+        s: &str,
+        p: &[u8],
+        w: &rutli_cosigner::wrap::Wrapped,
+    ) -> Result<Vec<u8>> {
         self.inner.replicate_key(c, k, s, p, w).await
     }
     async fn fetch_key(&self, k: &str) -> Result<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {
@@ -618,14 +970,26 @@ async fn a_tombstoned_id_is_not_pulled_back_even_when_two_peers_hold_it() {
     let id = "rutli-sym-tomb-pull";
     c.generate(id).await;
     // Node 1 alone applied the delete (the others missed it).
-    let outcome = c.nodes[0].hosted_apply_tombstone(id, &delete_intent(&c.ids, "operator", id), intent::Expiry::Enforce, None).unwrap();
+    let outcome = c.nodes[0]
+        .hosted_apply_tombstone(
+            id,
+            &delete_intent(&c.ids, "operator", id),
+            intent::Expiry::Enforce,
+            None,
+        )
+        .unwrap();
     assert_eq!(outcome, TombstoneOutcome::Converted);
     let as_node1: Peers = c
         .nodes
         .iter()
-        .map(|n| Arc::new(LocalPeer::new(n.clone()).on_behalf_of(c.nodes[0].clone())) as Arc<dyn PeerApi>)
+        .map(|n| {
+            Arc::new(LocalPeer::new(n.clone()).on_behalf_of(c.nodes[0].clone())) as Arc<dyn PeerApi>
+        })
         .collect();
-    assert!(!repair_hosted_key(&c.nodes[0], &as_node1, id).await.unwrap(), "NOT_FOUND, not a pull");
+    assert!(
+        !repair_hosted_key(&c.nodes[0], &as_node1, id).await.unwrap(),
+        "NOT_FOUND, not a pull"
+    );
     assert_eq!(anti_entropy_sweep(&c.nodes[0], &as_node1).await.unwrap(), 0);
     assert_eq!(c.states(id)[0], (false, true));
 }
@@ -640,23 +1004,49 @@ async fn a_peer_tombstone_stops_a_pull_and_a_generation() {
     let id = "rutli-sym-peer-tomb";
     c.generate(id).await;
     // Node 1 deleted it (the others missed the delete); node 3 is rebuilt empty.
-    c.nodes[0].hosted_apply_tombstone(id, &delete_intent(&c.ids, "operator", id), intent::Expiry::Enforce, None).unwrap();
+    c.nodes[0]
+        .hosted_apply_tombstone(
+            id,
+            &delete_intent(&c.ids, "operator", id),
+            intent::Expiry::Enforce,
+            None,
+        )
+        .unwrap();
     std::fs::remove_file(c.file(3, id)).unwrap();
     let as_node3: Peers = c
         .nodes
         .iter()
-        .map(|n| Arc::new(LocalPeer::new(n.clone()).on_behalf_of(c.nodes[2].clone())) as Arc<dyn PeerApi>)
+        .map(|n| {
+            Arc::new(LocalPeer::new(n.clone()).on_behalf_of(c.nodes[2].clone())) as Arc<dyn PeerApi>
+        })
         .collect();
-    assert!(!repair_hosted_key(&c.nodes[2], &as_node3, id).await.unwrap(), "NOT_FOUND, not a pull");
-    assert_eq!(c.states(id)[2], (false, true), "node 3 recorded the peer's tombstone");
+    assert!(
+        !repair_hosted_key(&c.nodes[2], &as_node3, id).await.unwrap(),
+        "NOT_FOUND, not a pull"
+    );
+    assert_eq!(
+        c.states(id)[2],
+        (false, true),
+        "node 3 recorded the peer's tombstone"
+    );
 
     // A leader that lacks the id learns the tombstone the same way and refuses to generate it.
     let id2 = "rutli-sym-peer-tomb-gen";
     c.generate(id2).await;
-    c.nodes[0].hosted_apply_tombstone(id2, &delete_intent(&c.ids, "operator", id2), intent::Expiry::Enforce, None).unwrap();
+    c.nodes[0]
+        .hosted_apply_tombstone(
+            id2,
+            &delete_intent(&c.ids, "operator", id2),
+            intent::Expiry::Enforce,
+            None,
+        )
+        .unwrap();
     std::fs::remove_file(c.file(3, id2)).unwrap();
     let e = generate_hosted_key(&c.ids, &c.nodes[2], &as_node3, id2).await;
-    assert!(matches!(&e, Err(DaemonError::KeyExists(m)) if m.contains("tombstoned")), "{e:?}");
+    assert!(
+        matches!(&e, Err(DaemonError::KeyExists(m)) if m.contains("tombstoned")),
+        "{e:?}"
+    );
     assert!(!c.nodes[2].hosted_exists(id2));
 }
 
@@ -672,17 +1062,33 @@ async fn a_pushed_key_with_a_future_creation_time_is_refused() {
     let leader = LocalPeer::new(c.nodes[1].clone()).on_behalf_of(c.nodes[0].clone());
     let gi = generate_intent(&c.ids, id, 1);
     let cid = intent::generate_ceremony_id_of(&gi).unwrap();
-    leader.genkey_fence(&cid, id, "aes-256-gcm", Some(&gi)).await.unwrap();
+    leader
+        .genkey_fence(&cid, id, "aes-256-gcm", Some(&gi))
+        .await
+        .unwrap();
     let to2 = c.nodes[1].dist_public_key().unwrap();
     let w = c.nodes[0].hosted_wrap_for(id, &key, 2, &to2).unwrap();
-    let e = leader.replicate_key(&cid, id, "aes-256-gcm", &[], &w).await.unwrap_err();
+    let e = leader
+        .replicate_key(&cid, id, "aes-256-gcm", &[], &w)
+        .await
+        .unwrap_err();
     assert!(matches!(e, DaemonError::HostedInvalid(_)), "{e:?}");
     assert!(!c.nodes[1].hosted_exists(id));
     // Within the skew allowance it is accepted, and a fresh delete intent still applies to it.
     key.created_at = rutli_cosigner::hosted::now_secs() + 60;
     let w = c.nodes[0].hosted_wrap_for(id, &key, 2, &to2).unwrap();
-    leader.replicate_key(&cid, id, "aes-256-gcm", &[], &w).await.unwrap();
-    let outcome = c.nodes[1].hosted_apply_tombstone(id, &delete_intent(&c.ids, "operator", id), intent::Expiry::Enforce, None).unwrap();
+    leader
+        .replicate_key(&cid, id, "aes-256-gcm", &[], &w)
+        .await
+        .unwrap();
+    let outcome = c.nodes[1]
+        .hosted_apply_tombstone(
+            id,
+            &delete_intent(&c.ids, "operator", id),
+            intent::Expiry::Enforce,
+            None,
+        )
+        .unwrap();
     assert_eq!(outcome, TombstoneOutcome::Converted);
 }
 
@@ -693,86 +1099,150 @@ async fn undelete_within_grace_restores_the_key_and_the_old_tombstone_no_longer_
     let c = cluster();
     let key = c.generate("rutli-sym-5").await;
     let blob = key.encrypt_symmetric(b"still mine").unwrap();
-    delete_hosted_key(&c.peers, "rutli-sym-5", &delete_intent(&c.ids, "operator", "rutli-sym-5"), 2).await.unwrap();
+    delete_hosted_key(
+        &c.peers,
+        "rutli-sym-5",
+        &delete_intent(&c.ids, "operator", "rutli-sym-5"),
+        2,
+    )
+    .await
+    .unwrap();
 
     // `hosted-undelete` on node 1 only (offline, its own key store): it serves again...
     let ks1 = KeyStore::open_with_sealer(
         keys_dir(&c.root, 1),
-        Some(Arc::new(Sealer::from_master_secret(MASTER, 1).with_binding(KeyFileBinding {
-            node: 1,
-            cluster_uuid: Some(UUID.into()),
-            write_version: 2,
-            accept_v1: true,
-        }))),
+        Some(Arc::new(
+            Sealer::from_master_secret(MASTER, 1).with_binding(KeyFileBinding {
+                node: 1,
+                cluster_uuid: Some(UUID.into()),
+                write_version: 2,
+                accept_v1: true,
+            }),
+        )),
     )
     .unwrap();
     let restored = ks1.undelete("rutli-sym-5", intent::now_ms()).unwrap();
     assert!(restored.undeleted_at_ms.is_some());
-    assert_eq!(c.nodes[0].hosted_decrypt_symmetric("rutli-sym-5", &blob).unwrap(), b"still mine");
+    assert_eq!(
+        c.nodes[0]
+            .hosted_decrypt_symmetric("rutli-sym-5", &blob)
+            .unwrap(),
+        b"still mine"
+    );
     // ...and the peers' tombstone — whose intent predates the undelete — does not re-delete it.
     anti_entropy_sweep(&c.nodes[0], &c.peers).await.unwrap();
     assert!(c.nodes[0].hosted_exists("rutli-sym-5"));
-    assert!(c.nodes[1].hosted_tombstoned("rutli-sym-5").unwrap(), "undelete is per node");
-    assert!(ks1.undelete("rutli-sym-5", 0).is_err(), "nothing to undelete any more");
+    assert!(
+        c.nodes[1].hosted_tombstoned("rutli-sym-5").unwrap(),
+        "undelete is per node"
+    );
+    assert!(
+        ks1.undelete("rutli-sym-5", 0).is_err(),
+        "nothing to undelete any more"
+    );
     // A NEW delete still works on the undeleted copy.
     tokio::time::sleep(Duration::from_millis(5)).await;
     let outcome = c.nodes[0]
-        .hosted_apply_tombstone("rutli-sym-5", &delete_intent(&c.ids, "operator", "rutli-sym-5"), intent::Expiry::Enforce, None)
+        .hosted_apply_tombstone(
+            "rutli-sym-5",
+            &delete_intent(&c.ids, "operator", "rutli-sym-5"),
+            intent::Expiry::Enforce,
+            None,
+        )
         .unwrap();
     assert_eq!(outcome, TombstoneOutcome::Converted);
 }
 
 #[tokio::test]
 async fn past_the_grace_period_the_retained_material_is_dropped() {
-    let c = cluster_with(operator_deletes(), SigningPolicyConfig::default(), Duration::from_millis(1));
+    let c = cluster_with(
+        operator_deletes(),
+        SigningPolicyConfig::default(),
+        Duration::from_millis(1),
+    );
     c.generate("rutli-sym-6").await;
-    delete_hosted_key(&c.peers, "rutli-sym-6", &delete_intent(&c.ids, "operator", "rutli-sym-6"), 2).await.unwrap();
+    delete_hosted_key(
+        &c.peers,
+        "rutli-sym-6",
+        &delete_intent(&c.ids, "operator", "rutli-sym-6"),
+        2,
+    )
+    .await
+    .unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
     // The sweep drops it (here node 1's; every node sweeps its own).
     anti_entropy_sweep(&c.nodes[0], &c.peers).await.unwrap();
     let t = c.nodes[0].hosted_tombstones().unwrap().pop().unwrap();
     assert!(t.retained.is_none());
-    assert!(!String::from_utf8_lossy(&std::fs::read(c.file(1, "rutli-sym-6")).unwrap()).contains("retained"));
+    assert!(
+        !String::from_utf8_lossy(&std::fs::read(c.file(1, "rutli-sym-6")).unwrap())
+            .contains("retained")
+    );
 }
 
 #[tokio::test]
 async fn a_tombstone_blocks_regenerating_the_id_until_cleared_on_every_node() {
-    let c = cluster_with(operator_deletes(), SigningPolicyConfig::default(), Duration::from_millis(1));
+    let c = cluster_with(
+        operator_deletes(),
+        SigningPolicyConfig::default(),
+        Duration::from_millis(1),
+    );
     c.generate("rutli-sym-7").await;
-    delete_hosted_key(&c.peers, "rutli-sym-7", &delete_intent(&c.ids, "operator", "rutli-sym-7"), 2).await.unwrap();
+    delete_hosted_key(
+        &c.peers,
+        "rutli-sym-7",
+        &delete_intent(&c.ids, "operator", "rutli-sym-7"),
+        2,
+    )
+    .await
+    .unwrap();
     tokio::time::sleep(Duration::from_millis(10)).await;
     for n in &c.nodes {
         n.hosted_purge_expired(intent::now_ms()).unwrap();
     }
 
     let again = generate_hosted_key(&c.ids, &c.nodes[0], &led_by(&c.nodes, 0), "rutli-sym-7").await;
-    assert!(matches!(&again, Err(DaemonError::KeyExists(m)) if m.contains("tombstoned")), "{again:?}");
+    assert!(
+        matches!(&again, Err(DaemonError::KeyExists(m)) if m.contains("tombstoned")),
+        "{again:?}"
+    );
 
     // Break-glass on node 1 only: its peers still refuse the id, so the generation fails and rolls
     // back — node 1 keeps no lonely copy — and node 1 ignores the cleared intent from its peers.
     let ks = |i: u16| {
         KeyStore::open_with_sealer(
             keys_dir(&c.root, i),
-            Some(Arc::new(Sealer::from_master_secret(MASTER, i).with_binding(KeyFileBinding {
-                node: i,
-                cluster_uuid: Some(UUID.into()),
-                write_version: 2,
-                accept_v1: true,
-            }))),
+            Some(Arc::new(
+                Sealer::from_master_secret(MASTER, i).with_binding(KeyFileBinding {
+                    node: i,
+                    cluster_uuid: Some(UUID.into()),
+                    write_version: 2,
+                    accept_v1: true,
+                }),
+            )),
         )
         .unwrap()
     };
     ks(1).clear_tombstone("rutli-sym-7").unwrap();
-    let partial = generate_hosted_key(&c.ids, &c.nodes[0], &led_by(&c.nodes, 0), "rutli-sym-7").await;
-    assert!(matches!(&partial, Err(DaemonError::KeyExists(m)) if m.contains("tombstoned")), "{partial:?}");
+    let partial =
+        generate_hosted_key(&c.ids, &c.nodes[0], &led_by(&c.nodes, 0), "rutli-sym-7").await;
+    assert!(
+        matches!(&partial, Err(DaemonError::KeyExists(m)) if m.contains("tombstoned")),
+        "{partial:?}"
+    );
     assert!(!c.nodes[0].hosted_exists("rutli-sym-7"), "rolled back");
     anti_entropy_sweep(&c.nodes[0], &c.peers).await.unwrap();
-    assert!(!c.nodes[0].hosted_tombstoned("rutli-sym-7").unwrap(), "a cleared intent stays cleared");
+    assert!(
+        !c.nodes[0].hosted_tombstoned("rutli-sym-7").unwrap(),
+        "a cleared intent stays cleared"
+    );
 
     // Cleared everywhere: the id is generated afresh, and stays.
     ks(2).clear_tombstone("rutli-sym-7").unwrap();
     ks(3).clear_tombstone("rutli-sym-7").unwrap();
-    generate_hosted_key(&c.ids, &c.nodes[0], &led_by(&c.nodes, 0), "rutli-sym-7").await.unwrap();
+    generate_hosted_key(&c.ids, &c.nodes[0], &led_by(&c.nodes, 0), "rutli-sym-7")
+        .await
+        .unwrap();
     for n in &c.nodes {
         anti_entropy_sweep(n, &c.peers).await.unwrap();
     }
@@ -784,18 +1254,37 @@ async fn a_write_quorum_rollback_purges_only_the_generations_own_key() {
     let c = cluster();
     c.generate("rutli-sym-8").await;
     // A leader fences an existing key without a client's generate intent: refused (0.5.0).
-    refused(c.peers[1].ceremony_fence("genkey-evil", "rutli-sym-8", "genkey").await, "no generate intent");
+    refused(
+        c.peers[1]
+            .ceremony_fence("genkey-evil", "rutli-sym-8", "genkey")
+            .await,
+        "no generate intent",
+    );
     // With an intent the driver signed for it (a retry of the same id through node 2), a compromised
     // node 2 asks for a "rollback": refused, the key it did not create in that generation stays.
     let gi = generate_intent(&c.ids, "rutli-sym-8", 2);
     let cid = intent::generate_ceremony_id_of(&gi).unwrap();
-    c.peers[1].genkey_fence(&cid, "rutli-sym-8", "aes-256-gcm", Some(&gi)).await.unwrap();
-    refused(c.peers[1].purge_key(&cid, "rutli-sym-8").await, "not the rollback");
-    c.peers[1].ceremony_release(&cid, "rutli-sym-8").await.unwrap();
+    c.peers[1]
+        .genkey_fence(&cid, "rutli-sym-8", "aes-256-gcm", Some(&gi))
+        .await
+        .unwrap();
+    refused(
+        c.peers[1].purge_key(&cid, "rutli-sym-8").await,
+        "not the rollback",
+    );
+    c.peers[1]
+        .ceremony_release(&cid, "rutli-sym-8")
+        .await
+        .unwrap();
     assert!(c.nodes[1].hosted_exists("rutli-sym-8"));
     // A tombstone outcome sanity check on the direct path.
     let outcome = c.nodes[1]
-        .hosted_apply_tombstone("rutli-sym-8", &delete_intent(&c.ids, "operator", "rutli-sym-8"), intent::Expiry::Enforce, None)
+        .hosted_apply_tombstone(
+            "rutli-sym-8",
+            &delete_intent(&c.ids, "operator", "rutli-sym-8"),
+            intent::Expiry::Enforce,
+            None,
+        )
         .unwrap();
     assert_eq!(outcome, TombstoneOutcome::Converted);
 }
@@ -829,7 +1318,10 @@ async fn serve_mesh(c: &Cluster) -> (Vec<String>, Vec<tokio::task::JoinHandle<()
     for _ in 0..N {
         listeners.push(TcpListener::bind("127.0.0.1:0").await.unwrap());
     }
-    let endpoints: Vec<String> = listeners.iter().map(|l| format!("https://{}", l.local_addr().unwrap())).collect();
+    let endpoints: Vec<String> = listeners
+        .iter()
+        .map(|l| format!("https://{}", l.local_addr().unwrap()))
+        .collect();
     let tls: Vec<_> = (1..=N).map(|i| tls_for(&format!("cosigner{i}"))).collect();
     let mut servers = Vec::new();
     for (i, listener) in listeners.into_iter().enumerate() {
@@ -842,7 +1334,11 @@ async fn serve_mesh(c: &Cluster) -> (Vec<String>, Vec<tokio::task::JoinHandle<()
                         GrpcPeer::connect_lazy(
                             Identifier::try_from(j as u16 + 1).unwrap(),
                             &endpoints[j],
-                            Some(tls[i].dial_as(&format!("cosigner{}", j + 1), None, 0).unwrap()),
+                            Some(
+                                tls[i]
+                                    .dial_as(&format!("cosigner{}", j + 1), None, 0)
+                                    .unwrap(),
+                            ),
                         )
                         .unwrap(),
                     ) as Arc<dyn PeerApi>
@@ -862,8 +1358,14 @@ async fn serve_mesh(c: &Cluster) -> (Vec<String>, Vec<tokio::task::JoinHandle<()
         };
         let peer = rutli_cosigner::service::PeerSvc {
             node: c.nodes[i].clone(),
-            allowed_cns: Some(Arc::new((1..=N).map(|k| format!("cosigner{k}")).collect::<HashSet<_>>())),
-            peer_ids: Some(Arc::new((1..=N).map(|k| (format!("cosigner{k}"), k)).collect())),
+            allowed_cns: Some(Arc::new(
+                (1..=N)
+                    .map(|k| format!("cosigner{k}"))
+                    .collect::<HashSet<_>>(),
+            )),
+            peer_ids: Some(Arc::new(
+                (1..=N).map(|k| (format!("cosigner{k}"), k)).collect(),
+            )),
             peer_pins: None,
         };
         let server = tonic::transport::Server::builder()
@@ -895,39 +1397,87 @@ async fn the_driver_certificate_cannot_delete_and_the_delete_role_can() {
             .ca_certificate(Certificate::from_pem(&c.ids.pki.ca_pem))
             .domain_name("cosigner1")
             .identity(Identity::from_pem(cert, key));
-        Endpoint::from_shared(endpoints[0].clone()).unwrap().tls_config(tls).unwrap().connect_lazy()
+        Endpoint::from_shared(endpoints[0].clone())
+            .unwrap()
+            .tls_config(tls)
+            .unwrap()
+            .connect_lazy()
     };
-    let delete = |intent: Option<pb::SignedIntent>| pb::DeleteKeyRequest { key_id: "rutli-sym-9".into(), intent };
-    let denied = |r: std::result::Result<tonic::Response<pb::DeleteKeyReply>, tonic::Status>, needle: &str| {
+    let delete = |intent: Option<pb::SignedIntent>| pb::DeleteKeyRequest {
+        key_id: "rutli-sym-9".into(),
+        intent,
+    };
+    let denied = |r: std::result::Result<tonic::Response<pb::DeleteKeyReply>, tonic::Status>,
+                  needle: &str| {
         let s = r.expect_err("must be refused");
         assert_eq!(s.code(), tonic::Code::PermissionDenied, "{s:?}");
-        assert!(s.message().contains(needle), "expected {needle:?} in {}", s.message());
+        assert!(
+            s.message().contains(needle),
+            "expected {needle:?} in {}",
+            s.message()
+        );
     };
 
     // The driver — allowed to Sign and Decrypt — may not delete, even with a well-formed intent.
     let mut driver = SignerClient::new(channel("driver"));
-    denied(driver.delete_key(delete(Some(delete_intent(&c.ids, "driver", "rutli-sym-9")))).await, "may not delete");
+    denied(
+        driver
+            .delete_key(delete(Some(delete_intent(&c.ids, "driver", "rutli-sym-9"))))
+            .await,
+        "may not delete",
+    );
     // The delete role, with no intent, or replaying another client's intent.
     let mut operator = SignerClient::new(channel("operator"));
     denied(operator.delete_key(delete(None)).await, "no delete intent");
-    denied(operator.delete_key(delete(Some(delete_intent(&c.ids, "driver", "rutli-sym-9")))).await, "delete_allowlist");
+    denied(
+        operator
+            .delete_key(delete(Some(delete_intent(&c.ids, "driver", "rutli-sym-9"))))
+            .await,
+        "delete_allowlist",
+    );
     // A cosigner certificate on the Peer API: no intent, no purge.
     let mut cosigner3 = PeerClient::new(channel("cosigner3"));
     let purge = cosigner3
-        .purge_key(pb::PurgeKeyRequest { ceremony_id: "genkey-x".into(), key_id: "rutli-sym-9".into(), intent: None })
+        .purge_key(pb::PurgeKeyRequest {
+            ceremony_id: "genkey-x".into(),
+            key_id: "rutli-sym-9".into(),
+            intent: None,
+        })
         .await;
     assert_eq!(purge.unwrap_err().code(), tonic::Code::PermissionDenied);
     assert_eq!(c.states("rutli-sym-9"), vec![(true, false); 3]);
 
     // The operator's own intent: tombstoned on every node, over the mesh.
-    let reply = operator.delete_key(delete(Some(delete_intent(&c.ids, "operator", "rutli-sym-9")))).await.unwrap().into_inner();
+    let reply = operator
+        .delete_key(delete(Some(delete_intent(
+            &c.ids,
+            "operator",
+            "rutli-sym-9",
+        ))))
+        .await
+        .unwrap()
+        .into_inner();
     assert!(reply.deleted);
     assert_eq!(reply.tombstones, 3);
     assert_eq!(c.states("rutli-sym-9"), vec![(false, true); 3]);
     // ListKeys carries the tombstone with its intent; KeyInfo answers "does not exist".
-    let listed = cosigner3.list_keys(pb::ListKeysRequest {}).await.unwrap().into_inner().keys;
-    assert!(listed.iter().any(|k| k.key_id == "rutli-sym-9" && k.tombstone && !k.delete_intent.is_empty()));
-    let info = driver.key_info(pb::KeyInfoRequest { key_id: "rutli-sym-9".into(), ..Default::default() }).await.unwrap().into_inner();
+    let listed = cosigner3
+        .list_keys(pb::ListKeysRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .keys;
+    assert!(listed
+        .iter()
+        .any(|k| k.key_id == "rutli-sym-9" && k.tombstone && !k.delete_intent.is_empty()));
+    let info = driver
+        .key_info(pb::KeyInfoRequest {
+            key_id: "rutli-sym-9".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner();
     assert!(!info.exists);
     for s in &servers {
         s.abort();
@@ -945,10 +1495,20 @@ async fn delete_hosted_key_collects_approvals_through_the_inbox() {
     use sha2::Digest as _;
     let key = "rutli-sym-inbox";
     let policy = SigningPolicyConfig {
-        approvers: vec![ApproverConfig { id: "alice".into(), public_key_spki_b64: Ids::new().approver_spki_b64() }],
+        approvers: vec![ApproverConfig {
+            id: "alice".into(),
+            public_key_spki_b64: Ids::new().approver_spki_b64(),
+        }],
         ..Default::default()
     };
-    let c = cluster_with(DeletePolicy { approval_threshold: 1, ..operator_deletes() }, policy, Duration::from_secs(7 * 86400));
+    let c = cluster_with(
+        DeletePolicy {
+            approval_threshold: 1,
+            ..operator_deletes()
+        },
+        policy,
+        Duration::from_secs(7 * 86400),
+    );
     c.generate(key).await;
     let (endpoints, servers, dir) = serve_mesh(&c).await;
 
@@ -979,30 +1539,64 @@ async fn delete_hosted_key_collects_approvals_through_the_inbox() {
     async fn finish(mut child: std::process::Child) -> (bool, String) {
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         while child.try_wait().unwrap().is_none() {
-            assert!(std::time::Instant::now() < deadline, "delete-hosted-key did not finish");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "delete-hosted-key did not finish"
+            );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         let out = child.wait_with_output().unwrap();
-        (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr))
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string()
+                + &String::from_utf8_lossy(&out.stderr),
+        )
     }
 
     // No approvals: every node requires one, so the delete is refused and nothing changes.
     let (ok, out) = finish(cli(&[])).await;
-    assert!(!ok && out.contains("DeleteKey refused") && out.contains("approval"), "{out}");
+    assert!(
+        !ok && out.contains("DeleteKey refused") && out.contains("approval"),
+        "{out}"
+    );
     assert_eq!(c.states(key), vec![(true, false); 3]);
 
     // The inbox, nobody approving: gives up at the timeout and withdraws its pending request.
     let inbox_s = inbox.to_str().unwrap();
-    let (ok, out) = finish(cli(&["--approvals-inbox", inbox_s, "--approvals", "1", "--approval-timeout-secs", "1"])).await;
+    let (ok, out) = finish(cli(&[
+        "--approvals-inbox",
+        inbox_s,
+        "--approvals",
+        "1",
+        "--approval-timeout-secs",
+        "1",
+    ]))
+    .await;
     assert!(!ok && out.contains("0 of 1 approvals"), "{out}");
-    assert_eq!(std::fs::read_dir(inbox.join("pending")).unwrap().count(), 0, "the timed-out request is withdrawn");
+    assert_eq!(
+        std::fs::read_dir(inbox.join("pending")).unwrap().count(),
+        0,
+        "the timed-out request is withdrawn"
+    );
     assert_eq!(c.states(key), vec![(true, false); 3]);
 
     // The inbox with alice approving.
-    let child = cli(&["--approvals-inbox", inbox_s, "--approvals", "1", "--approval-timeout-secs", "60"]);
+    let child = cli(&[
+        "--approvals-inbox",
+        inbox_s,
+        "--approvals",
+        "1",
+        "--approval-timeout-secs",
+        "60",
+    ]);
     let pending = loop {
-        let found = std::fs::read_dir(inbox.join("pending")).ok().and_then(|mut d| d.next()).map(|e| e.unwrap().path());
-        if let Some(p) = found.filter(|p| std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false)) {
+        let found = std::fs::read_dir(inbox.join("pending"))
+            .ok()
+            .and_then(|mut d| d.next())
+            .map(|e| e.unwrap().path());
+        if let Some(p) =
+            found.filter(|p| std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false))
+        {
             break p;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1011,13 +1605,25 @@ async fn delete_hosted_key_collects_approvals_through_the_inbox() {
     // What rutli-approve shows and checks: a DELETE of this key (`delete:<key>`), the digest of
     // the delete digest, and a request id it can recompute from those and the nonce.
     let delete_digest = intent::delete_digest(key);
-    assert_eq!(req["keyId"], format!("{}{key}", intent::DELETE_APPROVAL_KEY_PREFIX));
+    assert_eq!(
+        req["keyId"],
+        format!("{}{key}", intent::DELETE_APPROVAL_KEY_PREFIX)
+    );
     assert_eq!(req["operation"], "delete-hosted-key");
-    assert_eq!(req["digest"].as_str().unwrap(), hex::encode(sha2::Sha256::digest(delete_digest)));
+    assert_eq!(
+        req["digest"].as_str().unwrap(),
+        hex::encode(sha2::Sha256::digest(delete_digest))
+    );
     let nonce = hex::decode(req["nonce"].as_str().unwrap()).unwrap();
     let request_id = req["requestId"].as_str().unwrap().to_string();
-    assert_eq!(request_id, intent::delete_approval_request_id(key, &delete_digest, &nonce));
-    assert_eq!(pending.file_name().unwrap().to_str().unwrap(), format!("{request_id}.json"));
+    assert_eq!(
+        request_id,
+        intent::delete_approval_request_id(key, &delete_digest, &nonce)
+    );
+    assert_eq!(
+        pending.file_name().unwrap().to_str().unwrap(),
+        format!("{request_id}.json")
+    );
     // A stray approval for another request is ignored; alice's approval of this one completes it.
     let approvals = inbox.join("approvals");
     let approval = |rid: &str| {
@@ -1028,10 +1634,17 @@ async fn delete_hosted_key_collects_approvals_through_the_inbox() {
         .to_string()
     };
     std::fs::write(approvals.join("0000.alice.sig"), approval("0000")).unwrap();
-    std::fs::write(approvals.join(format!("{request_id}.alice.sig")), approval(&request_id)).unwrap();
+    std::fs::write(
+        approvals.join(format!("{request_id}.alice.sig")),
+        approval(&request_id),
+    )
+    .unwrap();
     let (ok, out) = finish(child).await;
     assert!(ok, "{out}");
-    assert!(out.contains(&format!("{key}: deleted — tombstoned on 3 node(s)")), "{out}");
+    assert!(
+        out.contains(&format!("{key}: deleted — tombstoned on 3 node(s)")),
+        "{out}"
+    );
     assert_eq!(c.states(key), vec![(false, true); 3]);
     assert!(!pending.exists(), "the answered request leaves the inbox");
     for s in &servers {
@@ -1044,7 +1657,11 @@ async fn delete_hosted_key_collects_approvals_through_the_inbox() {
 /// `hosted-clear-tombstone` then frees the id for its DKG.
 #[tokio::test]
 async fn a_squatted_frost_id_stays_deletable_but_no_tombstone_lands_on_one() {
-    let c = cluster_with(operator_deletes(), SigningPolicyConfig::default(), Duration::from_millis(1));
+    let c = cluster_with(
+        operator_deletes(),
+        SigningPolicyConfig::default(),
+        Duration::from_millis(1),
+    );
     let id = "frost-namespace";
     // Planted on nodes 1 and 2 behind their nodes' backs, as a pre-rc.6 push could have.
     let key = rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
@@ -1062,19 +1679,30 @@ async fn a_squatted_frost_id_stays_deletable_but_no_tombstone_lands_on_one() {
     }
     let intent = delete_intent(&c.ids, "operator", id);
     // Node 3 holds nothing there: no delete fence, no tombstone.
-    assert!(matches!(c.nodes[2].ceremony_fence("delkey-x", id, "delkey"), Err(DaemonError::NotHostedKeyId(_))));
+    assert!(matches!(
+        c.nodes[2].ceremony_fence("delkey-x", id, "delkey"),
+        Err(DaemonError::NotHostedKeyId(_))
+    ));
     assert!(matches!(
         c.nodes[2].hosted_apply_tombstone(id, &intent, intent::Expiry::Enforce, None),
         Err(DaemonError::NotHostedKeyId(_))
     ));
     // The delete converts the two squatted copies and skips node 3.
-    assert_eq!(delete_hosted_key(&c.peers, id, &intent, 2).await.unwrap(), (true, 2));
-    assert_eq!(c.states(id), vec![(false, true), (false, true), (false, false)]);
+    assert_eq!(
+        delete_hosted_key(&c.peers, id, &intent, 2).await.unwrap(),
+        (true, 2)
+    );
+    assert_eq!(
+        c.states(id),
+        vec![(false, true), (false, true), (false, false)]
+    );
     // Anti-entropy does not carry the tombstone to node 3 either.
     let as_node3: Peers = c
         .nodes
         .iter()
-        .map(|n| Arc::new(LocalPeer::new(n.clone()).on_behalf_of(c.nodes[2].clone())) as Arc<dyn PeerApi>)
+        .map(|n| {
+            Arc::new(LocalPeer::new(n.clone()).on_behalf_of(c.nodes[2].clone())) as Arc<dyn PeerApi>
+        })
         .collect();
     let _ = anti_entropy_sweep(&c.nodes[2], &as_node3).await;
     assert!(!c.nodes[2].has_key(id));
@@ -1086,7 +1714,10 @@ async fn a_squatted_frost_id_stays_deletable_but_no_tombstone_lands_on_one() {
     for i in [1, 2] {
         store(i).clear_tombstone(id).unwrap();
     }
-    assert!(c.nodes.iter().all(|n| !n.has_key(id)), "the id is free for its DKG");
+    assert!(
+        c.nodes.iter().all(|n| !n.has_key(id)),
+        "the id is free for its DKG"
+    );
 }
 
 /// The realistic legacy case: one node holds a hosted key squatted on a FROST id. The delete
@@ -1094,7 +1725,11 @@ async fn a_squatted_frost_id_stays_deletable_but_no_tombstone_lands_on_one() {
 /// quorum. `hosted-clear-tombstone` then frees the id, and the key's DKG runs.
 #[tokio::test]
 async fn deleting_a_squat_on_one_node_succeeds_and_frees_the_id_for_its_dkg() {
-    let c = cluster_with(operator_deletes(), SigningPolicyConfig::default(), Duration::from_millis(1));
+    let c = cluster_with(
+        operator_deletes(),
+        SigningPolicyConfig::default(),
+        Duration::from_millis(1),
+    );
     let id = "frost-participant1-signing";
     let store = |i: u16| {
         let sealer = Sealer::from_master_secret(MASTER, i).with_binding(KeyFileBinding {
@@ -1105,15 +1740,39 @@ async fn deleting_a_squat_on_one_node_succeeds_and_frees_the_id_for_its_dkg() {
         });
         KeyStore::open_with_sealer(keys_dir(&c.root, i), Some(Arc::new(sealer))).unwrap()
     };
-    store(2).create_hosted(id, &rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap()).unwrap();
+    store(2)
+        .create_hosted(
+            id,
+            &rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap(),
+        )
+        .unwrap();
     let intent = delete_intent(&c.ids, "operator", id);
-    assert_eq!(delete_hosted_key(&c.peers, id, &intent, 2).await.unwrap(), (true, 1));
-    assert_eq!(c.states(id), vec![(false, false), (false, true), (false, false)]);
+    assert_eq!(
+        delete_hosted_key(&c.peers, id, &intent, 2).await.unwrap(),
+        (true, 1)
+    );
+    assert_eq!(
+        c.states(id),
+        vec![(false, false), (false, true), (false, false)]
+    );
     std::thread::sleep(Duration::from_millis(5));
     c.nodes[1].hosted_purge_expired(intent::now_ms()).unwrap();
     store(2).clear_tombstone(id).unwrap();
-    let dkg = intent::ceremony_intent(CLUSTER, rutli_cosigner::node::CeremonyKind::Dkg, id, [0x51; 16], intent::now_ms(), 120_000);
-    rutli_cosigner::orchestrator::run_dkg_with_intent(&c.peers, id, Some(sign(&c.ids, "driver", dkg))).await.unwrap();
+    let dkg = intent::ceremony_intent(
+        CLUSTER,
+        rutli_cosigner::node::CeremonyKind::Dkg,
+        id,
+        [0x51; 16],
+        intent::now_ms(),
+        120_000,
+    );
+    rutli_cosigner::orchestrator::run_dkg_with_intent(
+        &c.peers,
+        id,
+        Some(sign(&c.ids, "driver", dkg)),
+    )
+    .await
+    .unwrap();
     assert!(c.nodes.iter().all(|n| n.key_epoch(id).unwrap().present));
 }
 
@@ -1121,24 +1780,45 @@ async fn deleting_a_squat_on_one_node_succeeds_and_frees_the_id_for_its_dkg() {
 /// NOT_FOUND, never a "success" with zero tombstones.
 #[tokio::test]
 async fn deleting_a_non_hosted_id_that_holds_nothing_is_not_found() {
-    let c = cluster_with(operator_deletes(), SigningPolicyConfig::default(), Duration::from_millis(1));
+    let c = cluster_with(
+        operator_deletes(),
+        SigningPolicyConfig::default(),
+        Duration::from_millis(1),
+    );
     let id = "frost-namespace-typo";
     let intent = delete_intent(&c.ids, "operator", id);
-    let err = delete_hosted_key(&c.peers, id, &intent, 2).await.unwrap_err();
-    assert!(matches!(err, DaemonError::UnknownKey(ref m) if m.contains("nothing hosted")), "{err:?}");
+    let err = delete_hosted_key(&c.peers, id, &intent, 2)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DaemonError::UnknownKey(ref m) if m.contains("nothing hosted")),
+        "{err:?}"
+    );
 }
 
 /// A squat a node cannot read is not "nothing here": its fence error is a refusal, the delete fails,
 /// and the file stays for the operator.
 #[tokio::test]
 async fn an_unreadable_squat_fails_the_delete() {
-    let c = cluster_with(operator_deletes(), SigningPolicyConfig::default(), Duration::from_millis(1));
+    let c = cluster_with(
+        operator_deletes(),
+        SigningPolicyConfig::default(),
+        Duration::from_millis(1),
+    );
     let id = "frost-participant1-signing";
     let path = keys_dir(&c.root, 2).join(format!("{id}.json"));
     std::fs::write(&path, b"{ not a key file").unwrap();
     let intent = delete_intent(&c.ids, "operator", id);
-    let err = delete_hosted_key(&c.peers, id, &intent, 2).await.unwrap_err();
-    assert!(!matches!(err, DaemonError::NotHostedKeyId(_) | DaemonError::UnknownKey(_)), "{err:?}");
+    let err = delete_hosted_key(&c.peers, id, &intent, 2)
+        .await
+        .unwrap_err();
+    assert!(
+        !matches!(
+            err,
+            DaemonError::NotHostedKeyId(_) | DaemonError::UnknownKey(_)
+        ),
+        "{err:?}"
+    );
     assert!(path.exists(), "the squat file is still there");
 }
 
@@ -1146,7 +1826,11 @@ async fn an_unreadable_squat_fails_the_delete() {
 /// though the squat was tombstoned where it was.
 #[tokio::test]
 async fn deleting_a_squat_with_a_node_unreachable_does_not_succeed() {
-    let c = cluster_with(operator_deletes(), SigningPolicyConfig::default(), Duration::from_millis(1));
+    let c = cluster_with(
+        operator_deletes(),
+        SigningPolicyConfig::default(),
+        Duration::from_millis(1),
+    );
     let id = "frost-participant1-signing";
     let sealer = Sealer::from_master_secret(MASTER, 1).with_binding(KeyFileBinding {
         node: 1,
@@ -1156,13 +1840,19 @@ async fn deleting_a_squat_with_a_node_unreachable_does_not_succeed() {
     });
     KeyStore::open_with_sealer(keys_dir(&c.root, 1), Some(Arc::new(sealer)))
         .unwrap()
-        .create_hosted(id, &rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap())
+        .create_hosted(
+            id,
+            &rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap(),
+        )
         .unwrap();
     let mut peers = c.peers.clone();
     peers[2] = Arc::new(Unreachable(c.nodes[2].identifier));
     let intent = delete_intent(&c.ids, "operator", id);
     let err = delete_hosted_key(&peers, id, &intent, 2).await.unwrap_err();
-    assert!(matches!(err, DaemonError::ThresholdNotMet { needed: 3, got: 2 }), "{err:?}");
+    assert!(
+        matches!(err, DaemonError::ThresholdNotMet { needed: 3, got: 2 }),
+        "{err:?}"
+    );
 }
 
 /// A cosigner that cannot be reached: every call is a transport error.
@@ -1198,7 +1888,14 @@ impl PeerApi for Unreachable {
     async fn node_info(&self) -> Result<(u16, [u8; 32])> {
         Err(down())
     }
-    async fn replicate_key(&self, _: &str, _: &str, _: &str, _: &[u8], _: &rutli_cosigner::wrap::Wrapped) -> Result<Vec<u8>> {
+    async fn replicate_key(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: &rutli_cosigner::wrap::Wrapped,
+    ) -> Result<Vec<u8>> {
         Err(down())
     }
     async fn fetch_key(&self, _: &str) -> Result<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {

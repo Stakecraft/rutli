@@ -86,7 +86,9 @@ pub(crate) fn parse_pkcs8(der: &[u8]) -> Result<(PrivateKeyMaterial, PublicKey)>
     let oid = pki.algorithm.oid;
     let (material, public) = if oid == OID_ED25519 {
         if pki.algorithm.parameters.is_some() {
-            return Err(Error::Malformed("Ed25519 AlgorithmIdentifier must not carry parameters (RFC 8410)".into()));
+            return Err(Error::Malformed(
+                "Ed25519 AlgorithmIdentifier must not carry parameters (RFC 8410)".into(),
+            ));
         }
         // CurvePrivateKey ::= OCTET STRING (RFC 8410 §7), itself inside PrivateKeyInfo.privateKey.
         let inner = OctetStringRef::from_der(pki.private_key)
@@ -100,14 +102,19 @@ pub(crate) fn parse_pkcs8(der: &[u8]) -> Result<(PrivateKeyMaterial, PublicKey)>
                 ));
             }
         }
-        (PrivateKeyMaterial::Ed25519 { seed }, PublicKey::Ed25519(public))
+        (
+            PrivateKeyMaterial::Ed25519 { seed },
+            PublicKey::Ed25519(public),
+        )
     } else if oid == OID_EC_PUBLIC_KEY {
         let curve = pki
             .algorithm
             .parameters_oid()
             .map_err(|_| Error::Malformed("EC AlgorithmIdentifier must name its curve".into()))?;
         if curve != OID_PRIME256V1 {
-            return Err(Error::Unsupported(format!("EC curve {curve}; only P-256 (prime256v1) is supported")));
+            return Err(Error::Unsupported(format!(
+                "EC curve {curve}; only P-256 (prime256v1) is supported"
+            )));
         }
         let (scalar, embedded) = parse_sec1(pki.private_key)?;
         let public = p256_public(&scalar)?;
@@ -118,12 +125,19 @@ pub(crate) fn parse_pkcs8(der: &[u8]) -> Result<(PrivateKeyMaterial, PublicKey)>
                 ));
             }
         }
-        (PrivateKeyMaterial::EcP256 { scalar }, PublicKey::EcP256(public))
+        (
+            PrivateKeyMaterial::EcP256 { scalar },
+            PublicKey::EcP256(public),
+        )
     } else if oid == OID_RSA_ENCRYPTION {
         // RFC 8017 A.1: the parameters MUST be NULL.
         match pki.algorithm.parameters {
             Some(p) if p.decode_as::<Null>().is_ok() => {}
-            _ => return Err(Error::Malformed("rsaEncryption AlgorithmIdentifier must carry NULL parameters".into())),
+            _ => {
+                return Err(Error::Malformed(
+                    "rsaEncryption AlgorithmIdentifier must carry NULL parameters".into(),
+                ))
+            }
         }
         let spki_der = rsa_public_spki(der)?;
         if let Some(embedded) = pki.public_key {
@@ -136,7 +150,9 @@ pub(crate) fn parse_pkcs8(der: &[u8]) -> Result<(PrivateKeyMaterial, PublicKey)>
             }
         }
         (
-            PrivateKeyMaterial::Rsa2048 { pkcs8_der: Zeroizing::new(der.to_vec()) },
+            PrivateKeyMaterial::Rsa2048 {
+                pkcs8_der: Zeroizing::new(der.to_vec()),
+            },
             PublicKey::Rsa2048 { spki_der },
         )
     } else {
@@ -150,7 +166,10 @@ pub(crate) fn parse_pkcs8(der: &[u8]) -> Result<(PrivateKeyMaterial, PublicKey)>
 /// Ed25519 seed from exactly 32 bytes.
 pub(crate) fn ed25519_seed(bytes: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
     secret32(bytes).ok_or_else(|| {
-        Error::Malformed(format!("Ed25519 private key must be a 32-byte seed, got {} bytes", bytes.len()))
+        Error::Malformed(format!(
+            "Ed25519 private key must be a 32-byte seed, got {} bytes",
+            bytes.len()
+        ))
     })
 }
 
@@ -167,7 +186,9 @@ fn secret32(bytes: &[u8]) -> Option<Zeroizing<[u8; 32]>> {
 /// RFC 8032 §5.1.5: the public key is derived from the seed (SHA-512, clamp, multiply).
 pub(crate) fn ed25519_public(seed: &Zeroizing<[u8; 32]>) -> [u8; 32] {
     // SigningKey zeroizes itself on drop (ed25519-dalek's default `zeroize` feature).
-    ed25519_dalek::SigningKey::from_bytes(seed).verifying_key().to_bytes()
+    ed25519_dalek::SigningKey::from_bytes(seed)
+        .verifying_key()
+        .to_bytes()
 }
 
 /// A SEC1 private scalar and the public point embedded next to it, if any.
@@ -185,15 +206,19 @@ fn parse_sec1(der: &[u8]) -> Result<Sec1Key<'_>> {
         .sequence(|r| {
             let version = u8::decode(r)?;
             let d = OctetStringRef::decode(r)?;
-            let params = r.context_specific::<ObjectIdentifier>(TagNumber::N0, TagMode::Explicit)?;
-            let public = r.context_specific::<BitStringRef<'_>>(TagNumber::N1, TagMode::Explicit)?;
+            let params =
+                r.context_specific::<ObjectIdentifier>(TagNumber::N0, TagMode::Explicit)?;
+            let public =
+                r.context_specific::<BitStringRef<'_>>(TagNumber::N1, TagMode::Explicit)?;
             Ok((version, d, params, public))
         })
         .and_then(|v| reader.finish(v))
         .map_err(|e| der_err("SEC1 ECPrivateKey", e))
         .and_then(|(version, d, params, public)| {
             if version != 1 {
-                return Err(Error::Malformed(format!("SEC1 ECPrivateKey version {version}, expected 1")));
+                return Err(Error::Malformed(format!(
+                    "SEC1 ECPrivateKey version {version}, expected 1"
+                )));
             }
             if let Some(curve) = params {
                 if curve != OID_PRIME256V1 {
@@ -204,7 +229,10 @@ fn parse_sec1(der: &[u8]) -> Result<Sec1Key<'_>> {
             }
             let d = d.as_bytes();
             let scalar = secret32(d).ok_or_else(|| {
-                Error::Malformed(format!("P-256 private scalar must be 32 bytes, got {}", d.len()))
+                Error::Malformed(format!(
+                    "P-256 private scalar must be 32 bytes, got {}",
+                    d.len()
+                ))
             })?;
             let public = match public {
                 None => None,
@@ -222,16 +250,18 @@ pub(crate) fn p256_public(scalar: &Zeroizing<[u8; 32]>) -> Result<[u8; 65]> {
     // 0 < d < n, checked explicitly (aws-lc rejects it too; this keeps the guarantee local).
     let s: &[u8; 32] = scalar;
     if s.iter().all(|b| *b == 0) || s >= &P256_ORDER {
-        return Err(Error::Malformed("P-256 private scalar is out of range".into()));
+        return Err(Error::Malformed(
+            "P-256 private scalar is out of range".into(),
+        ));
     }
     let sk = agreement::PrivateKey::from_private_key(&ECDH_P256, scalar.as_slice())
         .map_err(|_| Error::Malformed("P-256 private scalar rejected".into()))?;
     let pk = sk
         .compute_public_key()
         .map_err(|_| Error::Malformed("P-256 public key derivation failed".into()))?;
-    pk.as_ref()
-        .try_into()
-        .map_err(|_| Error::Malformed("P-256 public key is not a 65-byte uncompressed point".into()))
+    pk.as_ref().try_into().map_err(|_| {
+        Error::Malformed("P-256 public key is not a 65-byte uncompressed point".into())
+    })
 }
 
 /// Validate an RSA PKCS#8 document with aws-lc (the same library that later serves decryption in
@@ -275,7 +305,9 @@ fn rsa_exponent(spki_der: &[u8]) -> Result<u32> {
         .map_err(|e| der_err("RSAPublicKey", e))?;
     let bytes = e.as_bytes();
     if bytes.len() > 4 {
-        return Err(Error::Unsupported("RSA public exponent larger than 32 bits".into()));
+        return Err(Error::Unsupported(
+            "RSA public exponent larger than 32 bits".into(),
+        ));
     }
     Ok(bytes.iter().fold(0u32, |acc, b| (acc << 8) | u32::from(*b)))
 }
@@ -291,7 +323,8 @@ pub(crate) fn spki_der(public: &PublicKey) -> Vec<u8> {
 
 /// Parse an X.509 SPKI DER into a validated public key.
 pub(crate) fn parse_spki(der: &[u8]) -> Result<PublicKey> {
-    let spki = SubjectPublicKeyInfoRef::from_der(der).map_err(|e| der_err("SubjectPublicKeyInfo", e))?;
+    let spki =
+        SubjectPublicKeyInfoRef::from_der(der).map_err(|e| der_err("SubjectPublicKeyInfo", e))?;
     let oid = spki.algorithm.oid;
     let key = spki
         .subject_public_key
@@ -299,7 +332,9 @@ pub(crate) fn parse_spki(der: &[u8]) -> Result<PublicKey> {
         .ok_or_else(|| Error::Malformed("SPKI BIT STRING has unused bits".into()))?;
     let public = if oid == OID_ED25519 {
         if spki.algorithm.parameters.is_some() {
-            return Err(Error::Malformed("Ed25519 AlgorithmIdentifier must not carry parameters".into()));
+            return Err(Error::Malformed(
+                "Ed25519 AlgorithmIdentifier must not carry parameters".into(),
+            ));
         }
         ed25519_public_from_bytes(key)?
     } else if oid == OID_EC_PUBLIC_KEY {
@@ -308,19 +343,28 @@ pub(crate) fn parse_spki(der: &[u8]) -> Result<PublicKey> {
             .parameters_oid()
             .map_err(|_| Error::Malformed("EC AlgorithmIdentifier must name its curve".into()))?;
         if curve != OID_PRIME256V1 {
-            return Err(Error::Unsupported(format!("EC curve {curve}; only P-256 is supported")));
+            return Err(Error::Unsupported(format!(
+                "EC curve {curve}; only P-256 is supported"
+            )));
         }
         p256_public_from_bytes(key)?
     } else if oid == OID_RSA_ENCRYPTION {
         let pk = PublicEncryptingKey::from_der(der)
             .map_err(|e| Error::Malformed(format!("RSA public key rejected: {e}")))?;
         if pk.key_size_bits() != 2048 {
-            return Err(Error::Unsupported(format!("RSA-{} public key", pk.key_size_bits())));
+            return Err(Error::Unsupported(format!(
+                "RSA-{} public key",
+                pk.key_size_bits()
+            )));
         }
         if rsa_exponent(der)? != RSA_F4 {
-            return Err(Error::Unsupported("RSA public exponent is not 65537".into()));
+            return Err(Error::Unsupported(
+                "RSA public exponent is not 65537".into(),
+            ));
         }
-        PublicKey::Rsa2048 { spki_der: der.to_vec() }
+        PublicKey::Rsa2048 {
+            spki_der: der.to_vec(),
+        }
     } else {
         return Err(Error::Unsupported(format!("public key algorithm {oid}")));
     };
@@ -333,9 +377,12 @@ pub(crate) fn parse_spki(der: &[u8]) -> Result<PublicKey> {
 }
 
 pub(crate) fn ed25519_public_from_bytes(key: &[u8]) -> Result<PublicKey> {
-    let arr: [u8; 32] = key
-        .try_into()
-        .map_err(|_| Error::Malformed(format!("Ed25519 public key must be 32 bytes, got {}", key.len())))?;
+    let arr: [u8; 32] = key.try_into().map_err(|_| {
+        Error::Malformed(format!(
+            "Ed25519 public key must be 32 bytes, got {}",
+            key.len()
+        ))
+    })?;
     ed25519_dalek::VerifyingKey::from_bytes(&arr)
         .map_err(|_| Error::Malformed("Ed25519 public key is not a valid curve point".into()))?;
     Ok(PublicKey::Ed25519(arr))
@@ -343,10 +390,15 @@ pub(crate) fn ed25519_public_from_bytes(key: &[u8]) -> Result<PublicKey> {
 
 fn p256_public_from_bytes(key: &[u8]) -> Result<PublicKey> {
     let arr: [u8; 65] = key.try_into().map_err(|_| {
-        Error::Malformed(format!("P-256 public key must be a 65-byte uncompressed point, got {} bytes", key.len()))
+        Error::Malformed(format!(
+            "P-256 public key must be a 65-byte uncompressed point, got {} bytes",
+            key.len()
+        ))
     })?;
     if arr[0] != 0x04 {
-        return Err(Error::Malformed("P-256 public key is not in uncompressed form".into()));
+        return Err(Error::Malformed(
+            "P-256 public key is not in uncompressed form".into(),
+        ));
     }
     ParsedPublicKey::try_from(&UnparsedPublicKey::new(&ECDH_P256, arr.as_slice()))
         .map_err(|_| Error::Malformed("P-256 public key is not a valid curve point".into()))?;
@@ -369,14 +421,20 @@ const PEM_PKCS8_LABEL: &str = "PRIVATE KEY";
 
 /// Whether `input` looks like PEM (after optional leading whitespace).
 pub(crate) fn looks_like_pem(input: &[u8]) -> bool {
-    let start = input.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(input.len());
-    input.get(start..).is_some_and(|rest| rest.starts_with(PEM_BEGIN.as_bytes()))
+    let start = input
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(input.len());
+    input
+        .get(start..)
+        .is_some_and(|rest| rest.starts_with(PEM_BEGIN.as_bytes()))
 }
 
 /// Strict single-block RFC 7468 PEM decoding of an unencrypted PKCS#8 `PRIVATE KEY`. Anything
 /// outside the one block (other than whitespace) is an error, as are headers and other labels.
 pub(crate) fn pem_to_der(input: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-    let text = std::str::from_utf8(input).map_err(|_| Error::Malformed("PEM is not valid UTF-8".into()))?;
+    let text = std::str::from_utf8(input)
+        .map_err(|_| Error::Malformed("PEM is not valid UTF-8".into()))?;
     let mut lines = text.trim().lines().map(str::trim);
     let first = lines.next().unwrap_or_default();
     let label = first
@@ -403,7 +461,9 @@ pub(crate) fn pem_to_der(input: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         if line == end {
             closed = true;
         } else if line.contains(':') {
-            return Err(Error::Malformed("PEM headers are not allowed for PRIVATE KEY".into()));
+            return Err(Error::Malformed(
+                "PEM headers are not allowed for PRIVATE KEY".into(),
+            ));
         } else {
             body.push_str(line);
         }

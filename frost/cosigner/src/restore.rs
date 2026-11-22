@@ -86,9 +86,17 @@ fn committed_epochs(ks: &KeyStore) -> Result<std::collections::HashMap<String, u
 
 /// Verify every key file in `from` against this node's live store and decide what to install.
 /// Any refusal is an error and nothing is installed.
-pub fn plan(ks: &KeyStore, from: &Path, force: bool, break_glass: Option<&BreakGlass>) -> Result<Plan> {
+pub fn plan(
+    ks: &KeyStore,
+    from: &Path,
+    force: bool,
+    break_glass: Option<&BreakGlass>,
+) -> Result<Plan> {
     if !from.is_dir() {
-        return Err(DaemonError::Config(format!("{} is not a directory", from.display())));
+        return Err(DaemonError::Config(format!(
+            "{} is not a directory",
+            from.display()
+        )));
     }
     let committed = committed_epochs(ks)?;
     let mut files: Vec<PathBuf> = Vec::new();
@@ -103,11 +111,25 @@ pub fn plan(ks: &KeyStore, from: &Path, force: bool, break_glass: Option<&BreakG
         files.push(entry.path());
     }
     files.sort();
-    let mut plan = Plan { cleared: cleared_markers(&from.join(crate::keystore::CLEARED_DIR))?, ..Plan::default() };
+    let mut plan = Plan {
+        cleared: cleared_markers(&from.join(crate::keystore::CLEARED_DIR))?,
+        ..Plan::default()
+    };
     let mut refusals = Vec::new();
     for path in files {
-        let key_id = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
-        match decide(ks, &path, &key_id, force, break_glass, committed.get(&key_id).copied()) {
+        let key_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        match decide(
+            ks,
+            &path,
+            &key_id,
+            force,
+            break_glass,
+            committed.get(&key_id).copied(),
+        ) {
             Ok(Decision::Install { broke_glass }) => {
                 if broke_glass {
                     plan.broke_glass.push(key_id.clone());
@@ -120,7 +142,10 @@ pub fn plan(ks: &KeyStore, from: &Path, force: bool, break_glass: Option<&BreakG
     }
     if let Some(bg) = break_glass {
         if !plan.broke_glass.contains(&bg.key_id) {
-            refusals.push(format!("--break-glass names {}, which this restore does not need it for", bg.key_id));
+            refusals.push(format!(
+                "--break-glass names {}, which this restore does not need it for",
+                bg.key_id
+            ));
         }
     }
     if !refusals.is_empty() {
@@ -144,9 +169,11 @@ fn cleared_markers(dir: &Path) -> Result<Vec<String>> {
         let valid = entry.file_type()?.is_file()
             && name.split_once('.').is_some_and(|(k, d)| {
                 !k.is_empty()
-                    && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                    && k.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
                     && d.len() == 64
-                    && d.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                    && d.bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
             });
         if valid {
             out.push(name);
@@ -192,13 +219,19 @@ fn decide(
     let live = match ks.load_record(key_id) {
         Ok(r) => Some(r),
         Err(DaemonError::UnknownKey(_)) => None,
-        Err(e) => return Err(DaemonError::Config(format!("the live file cannot be read ({e}) — resolve it first"))),
+        Err(e) => {
+            return Err(DaemonError::Config(format!(
+                "the live file cannot be read ({e}) — resolve it first"
+            )))
+        }
     };
     let overwrite = |what: &str| -> Result<Decision> {
         if force {
             Ok(Decision::Install { broke_glass: false })
         } else {
-            Err(DaemonError::Config(format!("{what}; pass --force to replace the live file")))
+            Err(DaemonError::Config(format!(
+                "{what}; pass --force to replace the live file"
+            )))
         }
     };
     match (&backup, live.as_ref()) {
@@ -281,7 +314,9 @@ pub fn apply(ks: &KeyStore, plan: &Plan, crash_after_staging: bool) -> Result<us
     if plan.install.is_empty() {
         return Ok(0);
     }
-    let staging = ks.dir().join(format!("{STAGING_PREFIX}{}", uuid::Uuid::new_v4()));
+    let staging = ks
+        .dir()
+        .join(format!("{STAGING_PREFIX}{}", uuid::Uuid::new_v4()));
     crate::keystore::ensure_private_dir(&staging)?;
     for (key_id, src) in &plan.install {
         use std::io::Write;
@@ -295,7 +330,10 @@ pub fn apply(ks: &KeyStore, plan: &Plan, crash_after_staging: bool) -> Result<us
         return Err(DaemonError::Config("injected crash after staging".into()));
     }
     for (key_id, _) in &plan.install {
-        std::fs::rename(staging.join(format!("{key_id}.json")), ks.dir().join(format!("{key_id}.json")))?;
+        std::fs::rename(
+            staging.join(format!("{key_id}.json")),
+            ks.dir().join(format!("{key_id}.json")),
+        )?;
     }
     std::fs::File::open(ks.dir())?.sync_all()?;
     std::fs::remove_dir_all(&staging)?;
@@ -307,7 +345,12 @@ pub fn sweep_staging(ks: &KeyStore) -> Result<usize> {
     let mut n = 0;
     for entry in std::fs::read_dir(ks.dir())? {
         let entry = entry?;
-        if entry.file_name().to_string_lossy().starts_with(STAGING_PREFIX) && entry.file_type()?.is_dir() {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(STAGING_PREFIX)
+            && entry.file_type()?.is_dir()
+        {
             std::fs::remove_dir_all(entry.path())?;
             n += 1;
         }

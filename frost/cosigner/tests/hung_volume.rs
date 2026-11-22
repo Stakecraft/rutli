@@ -68,7 +68,10 @@ impl Gate {
 
     fn parked_within(&self, n: usize, within: Duration) -> bool {
         let s = self.state.lock().unwrap();
-        let (s, _) = self.changed.wait_timeout_while(s, within, |s| s.parked < n).unwrap();
+        let (s, _) = self
+            .changed
+            .wait_timeout_while(s, within, |s| s.parked < n)
+            .unwrap();
         s.parked >= n
     }
 
@@ -150,24 +153,40 @@ fn a_store_call_parked_on_a_hung_volume_does_not_freeze_health_or_other_keys() {
             )
         })
         .collect();
-    let peers: Peers =
-        nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    let peers: Peers = nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect();
     rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     let group_a = rt.block_on(run_dkg(&peers, "a")).unwrap();
     rt.block_on(run_dkg(&peers, "b")).unwrap();
 
     let signer1 = signer_svc(&nodes[0], &peers);
-    let peer1 = Arc::new(PeerSvc { node: nodes[0].clone(), allowed_cns: None, peer_ids: None, peer_pins: None });
+    let peer1 = Arc::new(PeerSvc {
+        node: nodes[0].clone(),
+        allowed_cns: None,
+        peer_ids: None,
+        peer_pins: None,
+    });
     let health = |svc: &Arc<SignerSvc>| {
         let svc = svc.clone();
-        async move { Signer::health(&*svc, Request::new(HealthRequest {})).await.unwrap().into_inner() }
+        async move {
+            Signer::health(&*svc, Request::new(HealthRequest {}))
+                .await
+                .unwrap()
+                .into_inner()
+        }
     };
     let round1_b = |svc: &Arc<PeerSvc>, session: &'static str| {
         let svc = svc.clone();
         async move {
             Peer::sign_round1(
                 &*svc,
-                Request::new(SignRound1Request { key_id: "b".into(), session_id: session.into(), ..Default::default() }),
+                Request::new(SignRound1Request {
+                    key_id: "b".into(),
+                    session_id: session.into(),
+                    ..Default::default()
+                }),
             )
             .await
         }
@@ -183,23 +202,46 @@ fn a_store_call_parked_on_a_hung_volume_does_not_freeze_health_or_other_keys() {
             Signer::group_key(&*svc, Request::new(GroupKeyRequest { key_id: "a".into() })).await
         })
     };
-    assert!(gate.parked_within(1, Duration::from_secs(5)), "the GroupKey read must reach the store");
+    assert!(
+        gate.parked_within(1, Duration::from_secs(5)),
+        "the GroupKey read must reach the store"
+    );
 
     // The single worker is still free: Health answers (the probe itself is fine), a peer sign
     // round on another key answers, and the node still LEADS a whole signature on that key.
     let h = answers_within(&rt, answer, health(&signer1)).expect("Health must answer");
-    assert!(h.ok, "nothing is wrong with the store as a whole yet: {}", h.detail);
+    assert!(
+        h.ok,
+        "nothing is wrong with the store as a whole yet: {}",
+        h.detail
+    );
     let r1 = answers_within(&rt, answer, round1_b(&peer1, "s-1")).expect("SignRound1 must answer");
-    assert!(r1.is_ok(), "a sign round on another key must succeed: {r1:?}");
+    assert!(
+        r1.is_ok(),
+        "a sign round on another key must succeed: {r1:?}"
+    );
     let led = answers_within(&rt, answer, {
         let svc = signer1.clone();
         async move {
-            Signer::sign(&*svc, Request::new(SignRequest { key_id: "b".into(), message: canton_digest(), intent: None }))
-                .await
+            Signer::sign(
+                &*svc,
+                Request::new(SignRequest {
+                    key_id: "b".into(),
+                    message: canton_digest(),
+                    intent: None,
+                }),
+            )
+            .await
         }
     })
     .expect("Sign must answer");
-    assert_eq!(led.expect("node 1 leads a signature on b").into_inner().signature.len(), 64);
+    assert_eq!(
+        led.expect("node 1 leads a signature on b")
+            .into_inner()
+            .signature
+            .len(),
+        64
+    );
 
     // 2. Now the whole volume hangs: the readiness probe parks too. Health still answers within the
     //    probe timeout — NOT_SERVING, unresponsive — and the node turns sign rounds away at once,
@@ -207,18 +249,28 @@ fn a_store_call_parked_on_a_hung_volume_does_not_freeze_health_or_other_keys() {
     gate.hang_on(&keys1);
     let started = Instant::now();
     let h = answers_within(&rt, answer, health(&signer1)).expect("Health must answer");
-    assert!(started.elapsed() < answer, "Health took {:?}", started.elapsed());
+    assert!(
+        started.elapsed() < answer,
+        "Health took {:?}",
+        started.elapsed()
+    );
     assert!(!h.ok, "a hung store must not report healthy");
     assert!(h.detail.contains("unresponsive"), "{}", h.detail);
     let refused = answers_within(&rt, Duration::from_secs(2), round1_b(&peer1, "s-2"))
         .expect("a refusal must be immediate, not another parked call");
-    assert_eq!(refused.expect_err("refused while down").code(), tonic::Code::Unavailable);
+    assert_eq!(
+        refused.expect_err("refused while down").code(),
+        tonic::Code::Unavailable
+    );
     let around = answers_within(&rt, answer, {
         let (leader, peers) = (nodes[1].clone(), peers.clone());
         async move { sign(&leader, &peers, "b", &canton_digest()).await }
     })
     .expect("node 2's Sign must answer");
-    assert!(around.is_ok(), "node 2 must sign around the hung node: {around:?}");
+    assert!(
+        around.is_ok(),
+        "node 2 must sign around the hung node: {around:?}"
+    );
 
     // 3. The volume comes back: the parked read completes with the right answer, the hung probe's
     //    real result replaces "unresponsive", and the node serves again.
@@ -253,12 +305,18 @@ fn the_watchdog_flips_the_verdict_on_a_hung_store_without_any_async_runtime() {
     );
     let _watchdog = spawn_monitor(node.clone(), Duration::from_millis(20));
 
-    assert!(gate.parked_within(1, Duration::from_secs(5)), "the watchdog's probe reaches the store");
+    assert!(
+        gate.parked_within(1, Duration::from_secs(5)),
+        "the watchdog's probe reaches the store"
+    );
     let deadline = Instant::now() + PROBE_TIMEOUT + Duration::from_secs(3);
     while !node.keystore_health().is_down() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(node.keystore_health().is_down(), "a hung probe must turn the node away from work");
+    assert!(
+        node.keystore_health().is_down(),
+        "a hung probe must turn the node away from work"
+    );
     assert!(node.refuse_if_keystore_down().is_err());
 
     gate.release();
@@ -266,5 +324,8 @@ fn the_watchdog_flips_the_verdict_on_a_hung_store_without_any_async_runtime() {
     while node.keystore_health().is_down() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(!node.keystore_health().is_down(), "the probe's real result must clear the verdict");
+    assert!(
+        !node.keystore_health().is_down(),
+        "the probe's real result must clear the verdict"
+    );
 }

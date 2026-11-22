@@ -199,8 +199,12 @@ impl SigningKeyUsage {
 
     /// Canton's `SigningKeyUsage.All` (`Signing.scala:757-763`): what Canton reads a signing key
     /// with an empty usage list as (`fromProtoListWithDefaultV30`, `Signing.scala:874-888`).
-    pub const ALL: [Self; 4] =
-        [Self::Namespace, Self::SequencerAuthentication, Self::Protocol, Self::ProofOfOwnership];
+    pub const ALL: [Self; 4] = [
+        Self::Namespace,
+        Self::SequencerAuthentication,
+        Self::Protocol,
+        Self::ProofOfOwnership,
+    ];
 
     /// Canton's name for the usage (`SigningKeyUsage.identifier`, `Signing.scala:816-845`), as the
     /// console prints it. `IdentityDelegation` has none left in Canton; this one is ours.
@@ -379,7 +383,12 @@ pub fn parse(input: &[u8], password: Option<&[u8]>) -> Result<CantonPrivateKey> 
             canton::Shape::PasswordBasedEncrypted => decrypt_export(inner, password),
             canton::Shape::CryptoKeyPair => {
                 refuse_password(password)?;
-                canton::parse_export_plain(input, Source::Export { password_protected: false })
+                canton::parse_export_plain(
+                    input,
+                    Source::Export {
+                        password_protected: false,
+                    },
+                )
             }
             canton::Shape::StoredKey => {
                 refuse_password(password)?;
@@ -391,7 +400,12 @@ pub fn parse(input: &[u8], password: Option<&[u8]>) -> Result<CantonPrivateKey> 
         // Canton's import also accepts a bare, unversioned CryptoKeyPair.
         Err(_) => {
             refuse_password(password)?;
-            canton::parse_export_plain(input, Source::Export { password_protected: false })
+            canton::parse_export_plain(
+                input,
+                Source::Export {
+                    password_protected: false,
+                },
+            )
         }
     }
 }
@@ -404,7 +418,12 @@ pub fn parse_export(input: &[u8], password: Option<&[u8]>) -> Result<CantonPriva
         }
     }
     refuse_password(password)?;
-    canton::parse_export_plain(input, Source::Export { password_protected: false })
+    canton::parse_export_plain(
+        input,
+        Source::Export {
+            password_protected: false,
+        },
+    )
 }
 
 /// Parse a `common_crypto_private_keys.data` value of an unwrapped row (`wrapper_key_id` NULL).
@@ -459,7 +478,11 @@ impl CantonPublicKey {
 /// Useful to cross-check an imported key against the public key Canton has on record.
 pub fn parse_public_key(input: &[u8]) -> Result<CantonPublicKey> {
     let (public, purpose, usage) = canton::parse_public(input)?;
-    Ok(CantonPublicKey { public, purpose, usage })
+    Ok(CantonPublicKey {
+        public,
+        purpose,
+        usage,
+    })
 }
 
 fn refuse_password(password: Option<&[u8]>) -> Result<()> {
@@ -473,7 +496,12 @@ fn decrypt_export(inner: &[u8], password: Option<&[u8]>) -> Result<CantonPrivate
     let encrypted = pbe::PasswordBasedEncrypted::parse(inner)?;
     let password = password.ok_or(Error::PasswordRequired)?;
     let plain = encrypted.decrypt(password)?;
-    canton::parse_export_plain(&plain, Source::Export { password_protected: true })
+    canton::parse_export_plain(
+        &plain,
+        Source::Export {
+            password_protected: true,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -482,7 +510,9 @@ mod tests {
 
     #[test]
     fn debug_never_prints_key_bytes() {
-        let m = PrivateKeyMaterial::Ed25519 { seed: Zeroizing::new([0xab; 32]) };
+        let m = PrivateKeyMaterial::Ed25519 {
+            seed: Zeroizing::new([0xab; 32]),
+        };
         let s = format!("{m:?}");
         assert!(!s.contains("ab") && !s.contains("171"), "{s}");
     }
@@ -490,9 +520,14 @@ mod tests {
     #[test]
     fn rfc8032_test_vector_1_fingerprint_input_is_the_raw_key() {
         // RFC 8032 §7.1 TEST 1.
-        let seed = Zeroizing::new(asn1_hex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"));
+        let seed = Zeroizing::new(asn1_hex(
+            "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        ));
         let public = asn1::ed25519_public(&seed);
-        assert_eq!(hex::encode(public), "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+        assert_eq!(
+            hex::encode(public),
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+        );
         let fp = fingerprint(&PublicKey::Ed25519(public));
         assert!(fp.starts_with("1220") && fp.len() == 68);
     }

@@ -326,7 +326,9 @@ async fn a_peer_key_that_is_not_its_pin_is_refused_through_the_accept_loop() {
 
     let refused = node_info(addr, &client).await;
     assert!(
-        refused.as_ref().is_err_and(|e| e.contains("PermissionDenied") || e.contains("permission")),
+        refused
+            .as_ref()
+            .is_err_and(|e| e.contains("PermissionDenied") || e.contains("permission")),
         "a key that is not the peer's pin is refused, got {refused:?}"
     );
     serving.abort();

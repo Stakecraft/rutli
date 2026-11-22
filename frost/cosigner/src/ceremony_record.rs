@@ -252,7 +252,9 @@ impl CeremonyRecords {
             }
             let parsed = std::fs::read(entry.path())
                 .map_err(DaemonError::from)
-                .and_then(|b| serde_json::from_slice::<CeremonyRecord>(&b).map_err(DaemonError::from));
+                .and_then(|b| {
+                    serde_json::from_slice::<CeremonyRecord>(&b).map_err(DaemonError::from)
+                });
             match parsed {
                 Ok(r) if format!("{}.json", r.ceremony_id) == name => out.push(r),
                 Ok(r) => tracing::error!(
@@ -292,7 +294,9 @@ impl CeremonyRecords {
         }
         let path = self.path(&rec.ceremony_id)?;
         crate::keystore::ensure_private_dir(&self.dir)?;
-        let tmp = self.dir.join(format!(".{}-{}.tmp", rec.ceremony_id, uuid::Uuid::new_v4()));
+        let tmp = self
+            .dir
+            .join(format!(".{}-{}.tmp", rec.ceremony_id, uuid::Uuid::new_v4()));
         {
             let mut f = private_file(&tmp, true)?;
             f.write_all(&serde_json::to_vec_pretty(rec)?)?;
@@ -344,7 +348,9 @@ impl CeremonyRecords {
             )));
         }
         let path = self.path(&rec.ceremony_id)?;
-        let tmp = self.dir.join(format!(".{}-{}.tmp", rec.ceremony_id, uuid::Uuid::new_v4()));
+        let tmp = self
+            .dir
+            .join(format!(".{}-{}.tmp", rec.ceremony_id, uuid::Uuid::new_v4()));
         {
             let mut f = private_file(&tmp, true)?;
             f.write_all(&serde_json::to_vec_pretty(rec)?)?;
@@ -370,7 +376,12 @@ impl CeremonyRecords {
     /// Durably mark `ceremony_id` as fenced on this node, test-and-set: `false` when it already
     /// was. Existence is the mark (a create-new file, fsynced with its directory); the content —
     /// key id, leader, time — is for operators. Survives a restart, unlike the in-memory guard.
-    pub fn mark_fenced(&self, ceremony_id: &str, key_id: &str, leader: Option<&str>) -> Result<bool> {
+    pub fn mark_fenced(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        leader: Option<&str>,
+    ) -> Result<bool> {
         validate_ceremony_id(ceremony_id)?;
         let dir = self.fenced_dir();
         crate::keystore::ensure_private_dir(&self.dir)?;
@@ -408,7 +419,11 @@ impl CeremonyRecords {
         let mut n = 0;
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
-            let old = entry.metadata()?.modified()?.elapsed().is_ok_and(|age| age >= older_than);
+            let old = entry
+                .metadata()?
+                .modified()?
+                .elapsed()
+                .is_ok_and(|age| age >= older_than);
             if old {
                 std::fs::remove_file(entry.path())?;
                 n += 1;
@@ -461,14 +476,26 @@ pub struct StatusInfo {
 
 impl StatusInfo {
     pub fn in_progress() -> Self {
-        Self { phase: Phase::InProgress, outcome: None }
+        Self {
+            phase: Phase::InProgress,
+            outcome: None,
+        }
     }
 
     pub fn from_record(r: &CeremonyRecord) -> Self {
         match r.state {
-            RecordState::Staged => Self { phase: Phase::Staged, outcome: Some(r.outcome()) },
-            RecordState::Committed => Self { phase: Phase::Committed, outcome: Some(r.outcome()) },
-            RecordState::Aborted => Self { phase: Phase::Aborted, outcome: None },
+            RecordState::Staged => Self {
+                phase: Phase::Staged,
+                outcome: Some(r.outcome()),
+            },
+            RecordState::Committed => Self {
+                phase: Phase::Committed,
+                outcome: Some(r.outcome()),
+            },
+            RecordState::Aborted => Self {
+                phase: Phase::Aborted,
+                outcome: None,
+            },
         }
     }
 
@@ -517,7 +544,10 @@ pub enum Decision {
 /// * Otherwise wait.
 pub fn decide(local: &CeremonyRecord, me: u16, reports: &BTreeMap<u16, PeerReport>) -> Decision {
     if local.state != RecordState::Staged {
-        return Decision::Wait(format!("local record is {}, not staged", local.state.as_str()));
+        return Decision::Wait(format!(
+            "local record is {}, not staged",
+            local.state.as_str()
+        ));
     }
     let mine = local.outcome();
     let mut waiting = Vec::new();
@@ -550,7 +580,11 @@ pub fn decide(local: &CeremonyRecord, me: u16, reports: &BTreeMap<u16, PeerRepor
 
 /// Some other roster node reports a yes-vote (STAGED or COMMITTED) for exactly this node's outcome.
 /// An abort while this holds is acted on only after the votes are gathered again (audit F3).
-pub fn mixed_evidence(local: &CeremonyRecord, me: u16, reports: &BTreeMap<u16, PeerReport>) -> bool {
+pub fn mixed_evidence(
+    local: &CeremonyRecord,
+    me: u16,
+    reports: &BTreeMap<u16, PeerReport>,
+) -> bool {
     let mine = local.outcome();
     local.roster.iter().filter(|&&id| id != me).any(|id| {
         matches!(reports.get(id), Some(PeerReport::Staged(o)) | Some(PeerReport::Committed(o)) if *o == mine)
@@ -562,7 +596,13 @@ pub fn mixed_evidence(local: &CeremonyRecord, me: u16, reports: &BTreeMap<u16, P
 /// no-vote), so some cosigner equivocated (audit F3).
 pub fn equivocation(local: &CeremonyRecord, me: u16, reports: &BTreeMap<u16, PeerReport>) -> bool {
     let mine = local.outcome();
-    let others = || local.roster.iter().filter(move |&&id| id != me).filter_map(|id| reports.get(id));
+    let others = || {
+        local
+            .roster
+            .iter()
+            .filter(move |&&id| id != me)
+            .filter_map(|id| reports.get(id))
+    };
     others().any(|r| matches!(r, PeerReport::Committed(o) if *o == mine))
         && others().any(|r| matches!(r, PeerReport::Aborted))
 }
@@ -582,13 +622,21 @@ pub fn split_evident(local: &CeremonyRecord, me: u16, reports: &BTreeMap<u16, Pe
 /// terminal vote and none COMMITTED this node's outcome. An honest node that committed would say
 /// so, and a terminal vote never changes, so no honest node can commit it any more — the share is
 /// of no further use.
-pub fn quarantine_droppable(local: &CeremonyRecord, me: u16, reports: &BTreeMap<u16, PeerReport>) -> bool {
+pub fn quarantine_droppable(
+    local: &CeremonyRecord,
+    me: u16,
+    reports: &BTreeMap<u16, PeerReport>,
+) -> bool {
     let mine = local.outcome();
-    local.roster.iter().filter(|&&id| id != me).all(|id| match reports.get(id) {
-        Some(PeerReport::Aborted) => true,
-        Some(PeerReport::Committed(o)) => *o != mine,
-        _ => false,
-    })
+    local
+        .roster
+        .iter()
+        .filter(|&&id| id != me)
+        .all(|id| match reports.get(id) {
+            Some(PeerReport::Aborted) => true,
+            Some(PeerReport::Committed(o)) => *o != mine,
+            _ => false,
+        })
 }
 
 fn short(hex: &str) -> &str {
@@ -612,15 +660,32 @@ mod tests {
     fn fence_marks_are_set_once_survive_a_reopen_and_are_pruned_by_age() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CeremonyRecords::open(tmp.path().join("ceremonies"));
-        assert!(store.mark_fenced("refresh-aa", "frost-ns", Some("cosigner1")).unwrap());
+        assert!(store
+            .mark_fenced("refresh-aa", "frost-ns", Some("cosigner1"))
+            .unwrap());
         assert!(!store.mark_fenced("refresh-aa", "frost-ns", None).unwrap());
         let reopened = CeremonyRecords::open(tmp.path().join("ceremonies"));
-        assert!(!reopened.mark_fenced("refresh-aa", "frost-ns", Some("cosigner3")).unwrap());
-        assert!(reopened.load_all().unwrap().is_empty(), "a mark is not a vote");
-        assert_eq!(reopened.prune_fenced(std::time::Duration::from_secs(3600)).unwrap(), 0);
+        assert!(!reopened
+            .mark_fenced("refresh-aa", "frost-ns", Some("cosigner3"))
+            .unwrap());
+        assert!(
+            reopened.load_all().unwrap().is_empty(),
+            "a mark is not a vote"
+        );
+        assert_eq!(
+            reopened
+                .prune_fenced(std::time::Duration::from_secs(3600))
+                .unwrap(),
+            0
+        );
         assert_eq!(reopened.prune_fenced(std::time::Duration::ZERO).unwrap(), 1);
-        assert!(reopened.mark_fenced("refresh-aa", "frost-ns", None).unwrap());
-        assert!(reopened.mark_fenced("../x", "frost-ns", None).is_err(), "ids are validated");
+        assert!(reopened
+            .mark_fenced("refresh-aa", "frost-ns", None)
+            .unwrap());
+        assert!(
+            reopened.mark_fenced("../x", "frost-ns", None).is_err(),
+            "ids are validated"
+        );
     }
 
     fn staged(id: &str, roster: &[u16], pkp: &str) -> CeremonyRecord {
@@ -640,12 +705,23 @@ mod tests {
     fn transitions_never_leave_a_terminal_state() {
         use RecordState::*;
         for to in [Staged, Committed, Aborted] {
-            assert_eq!(transition_allowed(Some(Committed), to), to == Committed, "committed -> {to:?}");
-            assert_eq!(transition_allowed(Some(Aborted), to), to == Aborted, "aborted -> {to:?}");
+            assert_eq!(
+                transition_allowed(Some(Committed), to),
+                to == Committed,
+                "committed -> {to:?}"
+            );
+            assert_eq!(
+                transition_allowed(Some(Aborted), to),
+                to == Aborted,
+                "aborted -> {to:?}"
+            );
         }
         assert!(transition_allowed(None, Staged));
         assert!(transition_allowed(None, Aborted));
-        assert!(!transition_allowed(None, Committed), "commit requires a staged yes-vote first");
+        assert!(
+            !transition_allowed(None, Committed),
+            "commit requires a staged yes-vote first"
+        );
         assert!(transition_allowed(Some(Staged), Committed));
         assert!(transition_allowed(Some(Staged), Aborted));
     }
@@ -661,9 +737,15 @@ mod tests {
         assert!(store.write(None, &other).is_err());
         assert_eq!(store.load_all().unwrap(), vec![rec.clone()]);
         // Staged -> committed is a replace; committed -> aborted is refused.
-        let committed = CeremonyRecord { state: RecordState::Committed, ..rec.clone() };
+        let committed = CeremonyRecord {
+            state: RecordState::Committed,
+            ..rec.clone()
+        };
         store.write(Some(&rec), &committed).unwrap();
-        let aborted = CeremonyRecord { state: RecordState::Aborted, ..rec.clone() };
+        let aborted = CeremonyRecord {
+            state: RecordState::Aborted,
+            ..rec.clone()
+        };
         assert!(store.write(Some(&committed), &aborted).is_err());
         assert_eq!(store.load_all().unwrap(), vec![committed]);
         #[cfg(unix)]
@@ -672,7 +754,9 @@ mod tests {
             let mode = std::fs::metadata(store.dir()).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o700);
         }
-        assert!(store.write(None, &CeremonyRecord::aborted("../evil", "x")).is_err());
+        assert!(store
+            .write(None, &CeremonyRecord::aborted("../evil", "x"))
+            .is_err());
     }
 
     #[test]
@@ -693,17 +777,34 @@ mod tests {
         let committed = PeerReport::Committed(local.outcome());
         let all = |r2: PeerReport, r3: PeerReport| BTreeMap::from([(2u16, r2), (3u16, r3)]);
 
-        assert_eq!(decide(&local, 1, &all(yes.clone(), committed.clone())), Decision::Commit);
+        assert_eq!(
+            decide(&local, 1, &all(yes.clone(), committed.clone())),
+            Decision::Commit
+        );
         // One node not yet known, in progress, or unreachable: wait — never commit, never abort.
-        assert!(matches!(decide(&local, 1, &BTreeMap::from([(2, yes.clone())])), Decision::Wait(_)));
-        assert!(matches!(decide(&local, 1, &all(yes.clone(), PeerReport::InProgress)), Decision::Wait(_)));
         assert!(matches!(
-            decide(&local, 1, &all(yes.clone(), PeerReport::Unknown("timeout".into()))),
+            decide(&local, 1, &BTreeMap::from([(2, yes.clone())])),
+            Decision::Wait(_)
+        ));
+        assert!(matches!(
+            decide(&local, 1, &all(yes.clone(), PeerReport::InProgress)),
+            Decision::Wait(_)
+        ));
+        assert!(matches!(
+            decide(
+                &local,
+                1,
+                &all(yes.clone(), PeerReport::Unknown("timeout".into()))
+            ),
             Decision::Wait(_)
         ));
         // Evidence: any no-vote aborts, even with another node still unknown.
         assert!(matches!(
-            decide(&local, 1, &all(PeerReport::Unknown("down".into()), PeerReport::Aborted)),
+            decide(
+                &local,
+                1,
+                &all(PeerReport::Unknown("down".into()), PeerReport::Aborted)
+            ),
             Decision::Abort(_)
         ));
         // A yes-vote for another outcome (pkp, epoch, key or round-1 digest) is divergence.
@@ -716,13 +817,22 @@ mod tests {
                 _ => o.round1_digest = "r1x".into(),
             }
             assert!(
-                matches!(decide(&local, 1, &all(yes.clone(), PeerReport::Committed(o))), Decision::Abort(_)),
+                matches!(
+                    decide(&local, 1, &all(yes.clone(), PeerReport::Committed(o))),
+                    Decision::Abort(_)
+                ),
                 "tweak {tweak}"
             );
         }
         // A record that is not STAGED is never decided again.
-        let done = CeremonyRecord { state: RecordState::Committed, ..local };
-        assert!(matches!(decide(&done, 1, &all(yes, committed)), Decision::Wait(_)));
+        let done = CeremonyRecord {
+            state: RecordState::Committed,
+            ..local
+        };
+        assert!(matches!(
+            decide(&done, 1, &all(yes, committed)),
+            Decision::Wait(_)
+        ));
     }
 
     #[test]
@@ -737,16 +847,35 @@ mod tests {
         // A crash: one node no, the other yes — mixed, not (yet) proof of anything.
         let crash = all(PeerReport::Aborted, yes.clone());
         assert!(mixed_evidence(&local, 1, &crash) && !equivocation(&local, 1, &crash));
-        assert!(!quarantine_droppable(&local, 1, &crash), "node 3 may still be resolving");
+        assert!(
+            !quarantine_droppable(&local, 1, &crash),
+            "node 3 may still be resolving"
+        );
         // COMMITTED and ABORTED for one ceremony: equivocation, a split if this node aborted.
         let lie = all(PeerReport::Aborted, committed.clone());
         assert!(equivocation(&local, 1, &lie) && split_evident(&local, 1, &lie));
         assert!(!quarantine_droppable(&local, 1, &lie));
         // Every peer terminal, nobody committed this outcome: the quarantined share can go.
-        assert!(quarantine_droppable(&local, 1, &all(PeerReport::Aborted, PeerReport::Aborted)));
-        assert!(quarantine_droppable(&local, 1, &all(PeerReport::Aborted, PeerReport::Committed(other.clone()))));
-        assert!(!quarantine_droppable(&local, 1, &all(PeerReport::Aborted, PeerReport::Unknown("down".into()))));
-        assert!(!mixed_evidence(&local, 1, &all(PeerReport::Aborted, PeerReport::Staged(other))));
+        assert!(quarantine_droppable(
+            &local,
+            1,
+            &all(PeerReport::Aborted, PeerReport::Aborted)
+        ));
+        assert!(quarantine_droppable(
+            &local,
+            1,
+            &all(PeerReport::Aborted, PeerReport::Committed(other.clone()))
+        ));
+        assert!(!quarantine_droppable(
+            &local,
+            1,
+            &all(PeerReport::Aborted, PeerReport::Unknown("down".into()))
+        ));
+        assert!(!mixed_evidence(
+            &local,
+            1,
+            &all(PeerReport::Aborted, PeerReport::Staged(other))
+        ));
     }
 
     #[test]
@@ -755,15 +884,31 @@ mod tests {
         let store = CeremonyRecords::open(tmp.path().join(".ceremonies"));
         let rec = staged("refresh-9", &[1, 2, 3], "aa");
         store.write(None, &rec).unwrap();
-        let aborted = CeremonyRecord { state: RecordState::Aborted, ..rec.clone() };
+        let aborted = CeremonyRecord {
+            state: RecordState::Aborted,
+            ..rec.clone()
+        };
         store.write(Some(&rec), &aborted).unwrap();
-        let committed = CeremonyRecord { state: RecordState::Committed, recovered: true, ..rec.clone() };
-        assert!(store.write_recovery(&aborted, &committed).is_err(), "not quarantined");
-        let quarantined = CeremonyRecord { quarantined: true, ..aborted.clone() };
+        let committed = CeremonyRecord {
+            state: RecordState::Committed,
+            recovered: true,
+            ..rec.clone()
+        };
+        assert!(
+            store.write_recovery(&aborted, &committed).is_err(),
+            "not quarantined"
+        );
+        let quarantined = CeremonyRecord {
+            quarantined: true,
+            ..aborted.clone()
+        };
         store.write(Some(&aborted), &quarantined).unwrap();
         let mut wrong = committed.clone();
         wrong.new_pkp_digest = "bb".into();
-        assert!(store.write_recovery(&quarantined, &wrong).is_err(), "another outcome");
+        assert!(
+            store.write_recovery(&quarantined, &wrong).is_err(),
+            "another outcome"
+        );
         store.write_recovery(&quarantined, &committed).unwrap();
         assert_eq!(store.load_all().unwrap(), vec![committed]);
     }

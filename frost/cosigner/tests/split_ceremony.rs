@@ -45,8 +45,12 @@ fn canton_namespace_key() -> ([u8; 32], [u8; 32], String) {
     let password = manifest["password"].as_str().unwrap();
     let input = std::fs::read(dir.join("namespace.export-pw.bin")).unwrap();
     let key = rutli_canton_key::parse(&input, Some(password.as_bytes())).unwrap();
-    let rutli_canton_key::PrivateKeyMaterial::Ed25519 { seed } = &key.material else { panic!() };
-    let rutli_canton_key::PublicKey::Ed25519(public) = key.public else { panic!() };
+    let rutli_canton_key::PrivateKeyMaterial::Ed25519 { seed } = &key.material else {
+        panic!()
+    };
+    let rutli_canton_key::PublicKey::Ed25519(public) = key.public else {
+        panic!()
+    };
     (**seed, public, key.fingerprint())
 }
 
@@ -68,7 +72,11 @@ impl Site {
             cluster_id: pki::shared().cluster_id(),
         };
         let signer = pki::shared().signer(&format!("cosigner{identifier}"));
-        Self { data_dir, ctx, signer }
+        Self {
+            data_dir,
+            ctx,
+            signer,
+        }
     }
 
     fn sealer(&self) -> Sealer {
@@ -82,11 +90,28 @@ impl Site {
     }
 
     fn recipient(&self) -> RecipientRequest {
-        share_recipient(&self.ctx, &self.keystore(), &self.sealer(), &self.signer, KEY, CEREMONY, false).unwrap()
+        share_recipient(
+            &self.ctx,
+            &self.keystore(),
+            &self.sealer(),
+            &self.signer,
+            KEY,
+            CEREMONY,
+            false,
+        )
+        .unwrap()
     }
 
     fn import(&self, bundle: &ShareBundle, fingerprint: &str) -> DaemonResult<()> {
-        import_share(&self.ctx, &self.keystore(), &self.sealer(), bundle, fingerprint, false).map(|_| ())
+        import_share(
+            &self.ctx,
+            &self.keystore(),
+            &self.sealer(),
+            bundle,
+            fingerprint,
+            false,
+        )
+        .map(|_| ())
     }
 
     fn node(&self) -> Arc<Node> {
@@ -108,7 +133,8 @@ fn ceremony(root: &Path) -> (Vec<Site>, Vec<ShareBundle>, [u8; 32], String) {
         .map(|(r, s)| {
             // What the dealer does first: verify the request to the cluster CA.
             let verified =
-                rutli_cosigner::request_auth::verify_request(r, pki::shared().ca_pem.as_bytes()).unwrap();
+                rutli_cosigner::request_auth::verify_request(r, pki::shared().ca_pem.as_bytes())
+                    .unwrap();
             let usage = rutli_cosigner::carry::CarriedUsage {
                 expected: "namespace".into(),
                 recorded: Some(vec!["namespace".into()]),
@@ -139,7 +165,10 @@ fn signer_svc(node: &Arc<Node>, peers: &Peers) -> rutli_cosigner::service::Signe
 
 fn local_peers(nodes: &[Arc<Node>]) -> Peers {
     rutli_cosigner::peer::wire_local_mesh(nodes).unwrap();
-    nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect()
+    nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect()
 }
 
 fn verifies(public: &[u8; 32], msg: &[u8], sig: &[u8; 64]) -> bool {
@@ -148,7 +177,12 @@ fn verifies(public: &[u8; 32], msg: &[u8], sig: &[u8; 64]) -> bool {
 
 /// `verify-key`, in process: every node's KeyStatus, checked together; then each node leads one
 /// signature.
-async fn verify_key(nodes: &[Arc<Node>], peers: &Peers, fingerprint: &str, sign_test: bool) -> rutli_cosigner::verify_key::VerifyReport {
+async fn verify_key(
+    nodes: &[Arc<Node>],
+    peers: &Peers,
+    fingerprint: &str,
+    sign_test: bool,
+) -> rutli_cosigner::verify_key::VerifyReport {
     let views: Vec<NodeView> = nodes
         .iter()
         .zip(1u16..)
@@ -190,34 +224,57 @@ async fn an_imported_canton_key_signs_verifies_refreshes_and_signs_again() {
     }
     let msg = rutli_frost_core::dealer::canton_test_message(b"NamespaceDelegation");
     let sig = sign(&nodes[0], &peers, KEY, &msg).await.unwrap();
-    assert!(verifies(&public, &msg, &sig), "must verify under the original Canton public key");
+    assert!(
+        verifies(&public, &msg, &sig),
+        "must verify under the original Canton public key"
+    );
 
     let before = verify_key(&nodes, &peers, &fingerprint, true).await;
     assert!(before.ok, "{:?}", before.problems);
     assert_eq!(before.sign_test.len(), 3);
-    assert_eq!((before.origin.as_deref(), before.refresh_count), (Some("dealer-split"), Some(0)));
-    assert_eq!(before.pkp_digest.as_deref(), Some(bundles[0].pkp_digest.as_str()));
+    assert_eq!(
+        (before.origin.as_deref(), before.refresh_count),
+        (Some("dealer-split"), Some(0))
+    );
+    assert_eq!(
+        before.pkp_digest.as_deref(),
+        Some(bundles[0].pkp_digest.as_str())
+    );
 
     // Refresh: same key, new sharing, counted. Every dealt bundle is now worthless.
     assert_eq!(run_refresh(&peers, KEY).await.unwrap(), public);
     let after = verify_key(&nodes, &peers, &fingerprint, true).await;
     assert!(after.ok, "{:?}", after.problems);
     assert_eq!(after.refresh_count, Some(1));
-    assert_ne!(after.pkp_digest, before.pkp_digest, "refresh must change the sharing");
+    assert_ne!(
+        after.pkp_digest, before.pkp_digest,
+        "refresh must change the sharing"
+    );
     let msg = rutli_frost_core::dealer::canton_test_message(b"after refresh");
-    assert!(verifies(&public, &msg, &sign(&nodes[2], &peers, KEY, &msg).await.unwrap()));
+    assert!(verifies(
+        &public,
+        &msg,
+        &sign(&nodes[2], &peers, KEY, &msg).await.unwrap()
+    ));
 
     // A copy of a bundle cannot be opened with the node's live store: install deleted the recipient
     // secret (unlinked: its sealed bytes can survive in freed blocks). (That a dealt share no
     // longer combines with refreshed ones is pinned in rutli-frost-core's dealer tests.)
     let state_gone = share_delivery::load_recipient(&sites[0].data_dir, &sites[0].sealer(), KEY);
-    assert!(state_gone.is_err(), "install deleted the recipient secret: the bundle cannot be opened");
+    assert!(
+        state_gone.is_err(),
+        "install deleted the recipient secret: the bundle cannot be opened"
+    );
 
     // A restart (fresh Node over the same store) still signs.
     let nodes: Vec<Arc<Node>> = sites.iter().map(Site::node).collect();
     let peers = local_peers(&nodes);
     let msg = rutli_frost_core::dealer::canton_test_message(b"after restart");
-    assert!(verifies(&public, &msg, &sign(&nodes[1], &peers, KEY, &msg).await.unwrap()));
+    assert!(verifies(
+        &public,
+        &msg,
+        &sign(&nodes[1], &peers, KEY, &msg).await.unwrap()
+    ));
 }
 
 #[tokio::test]
@@ -228,9 +285,15 @@ async fn dkg_can_never_mint_or_overwrite_the_imported_id() {
     // Before install: reserved, on every node.
     let nodes: Vec<Arc<Node>> = sites.iter().map(Site::node).collect();
     let peers = local_peers(&nodes);
-    assert!(matches!(run_dkg(&peers, KEY).await, Err(DaemonError::ReservedKeyId(_))));
+    assert!(matches!(
+        run_dkg(&peers, KEY).await,
+        Err(DaemonError::ReservedKeyId(_))
+    ));
     for n in &nodes {
-        assert!(matches!(n.dkg_part1("d", KEY), Err(DaemonError::ReservedKeyId(_))));
+        assert!(matches!(
+            n.dkg_part1("d", KEY),
+            Err(DaemonError::ReservedKeyId(_))
+        ));
     }
 
     // After install: still refused, and the key is untouched.
@@ -239,7 +302,11 @@ async fn dkg_can_never_mint_or_overwrite_the_imported_id() {
     }
     assert!(run_dkg(&peers, KEY).await.is_err());
     let msg = rutli_frost_core::dealer::canton_test_message(b"still the canton key");
-    assert!(verifies(&public, &msg, &sign(&nodes[0], &peers, KEY, &msg).await.unwrap()));
+    assert!(verifies(
+        &public,
+        &msg,
+        &sign(&nodes[0], &peers, KEY, &msg).await.unwrap()
+    ));
 }
 
 /// A cosigner that is down: every call fails as an unreachable peer would.
@@ -254,7 +321,12 @@ impl PeerApi for DownPeer {
     fn identifier(&self) -> Identifier {
         self.0
     }
-    async fn sign_round1(&self, _: &str, _: &str, _: &rutli_cosigner::node::Round1Ctx) -> DaemonResult<SigningCommitments> {
+    async fn sign_round1(
+        &self,
+        _: &str,
+        _: &str,
+        _: &rutli_cosigner::node::Round1Ctx,
+    ) -> DaemonResult<SigningCommitments> {
         down()
     }
     async fn sign_round2(
@@ -289,7 +361,10 @@ impl PeerApi for DownPeer {
     ) -> DaemonResult<Vec<u8>> {
         down()
     }
-    async fn fetch_key(&self, _: &str) -> DaemonResult<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {
+    async fn fetch_key(
+        &self,
+        _: &str,
+    ) -> DaemonResult<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {
         down()
     }
     async fn list_keys(&self) -> DaemonResult<Vec<(String, String, Vec<u8>)>> {
@@ -310,7 +385,9 @@ fn a_bundle_whose_package_records_min_signers_is_refused() {
         *pkp.verifying_key(),
         Some(T),
     );
-    let err = sites[0].import(&bundles[0], &fingerprint).expect_err("refused");
+    let err = sites[0]
+        .import(&bundles[0], &fingerprint)
+        .expect_err("refused");
     assert!(err.to_string().contains("min_signers"), "{err}");
     // The untouched bundle of another node still installs.
     sites[1].import(&bundles[1], &fingerprint).unwrap();
@@ -339,12 +416,20 @@ async fn any_two_nodes_sign_with_the_third_down() {
         let leader = &nodes[(dead + 1) % 3];
         let msg = rutli_frost_core::dealer::canton_test_message(format!("down {dead}").as_bytes());
         let sig = sign(leader, &peers, KEY, &msg).await.unwrap();
-        assert!(verifies(&public, &msg, &sig), "quorum without node {}", dead + 1);
+        assert!(
+            verifies(&public, &msg, &sig),
+            "quorum without node {}",
+            dead + 1
+        );
         // A refresh needs everyone: refused with a node down, nothing changes.
         assert!(run_refresh(&peers, KEY).await.is_err());
     }
     let report = verify_key(&nodes, &local_peers(&nodes), &fingerprint, false).await;
-    assert!(report.ok && report.refresh_count == Some(0), "{:?}", report.problems);
+    assert!(
+        report.ok && report.refresh_count == Some(0),
+        "{:?}",
+        report.problems
+    );
 }
 
 #[tokio::test]
@@ -355,28 +440,46 @@ async fn a_half_finished_install_signs_refuses_refresh_and_changes_nothing() {
     sites[0].import(&bundles[0], &fingerprint).unwrap();
     sites[1].import(&bundles[1], &fingerprint).unwrap();
     let share_file = |i: usize| sites[i].data_dir.join("keys").join(format!("{KEY}.json"));
-    let before: Vec<Vec<u8>> = (0..2).map(|i| std::fs::read(share_file(i)).unwrap()).collect();
+    let before: Vec<Vec<u8>> = (0..2)
+        .map(|i| std::fs::read(share_file(i)).unwrap())
+        .collect();
 
     let nodes: Vec<Arc<Node>> = sites.iter().map(Site::node).collect();
     let peers = local_peers(&nodes);
 
     // Two installed shares are a quorum: signing works (node 3 answers UnknownKey and is skipped).
     let msg = rutli_frost_core::dealer::canton_test_message(b"two of three installed");
-    assert!(verifies(&public, &msg, &sign(&nodes[0], &peers, KEY, &msg).await.unwrap()));
+    assert!(verifies(
+        &public,
+        &msg,
+        &sign(&nodes[0], &peers, KEY, &msg).await.unwrap()
+    ));
     // But node 3 cannot LEAD a sign for a key it does not hold (NOT_FOUND, on which the driver
     // does not fail over) — which is why the runbook installs on every node before cutover.
-    assert!(matches!(sign(&nodes[2], &peers, KEY, &msg).await, Err(DaemonError::UnknownKey(_))));
+    assert!(matches!(
+        sign(&nodes[2], &peers, KEY, &msg).await,
+        Err(DaemonError::UnknownKey(_))
+    ));
 
     // Refresh is all-or-nothing and node 3 has nothing: refused, and no share was rewritten.
     let err = run_refresh(&peers, KEY).await.unwrap_err();
     assert!(matches!(err, DaemonError::UnknownKey(_)), "got {err:?}");
     for (i, bytes) in before.iter().enumerate() {
-        assert_eq!(&std::fs::read(share_file(i)).unwrap(), bytes, "node {} unchanged", i + 1);
+        assert_eq!(
+            &std::fs::read(share_file(i)).unwrap(),
+            bytes,
+            "node {} unchanged",
+            i + 1
+        );
     }
     assert!(!nodes[2].has_key(KEY));
     // verify-key reports the gap.
     let report = verify_key(&nodes, &peers, &fingerprint, false).await;
-    assert!(!report.ok && report.problems.iter().any(|p| p.starts_with("node 3")), "{:?}", report.problems);
+    assert!(
+        !report.ok && report.problems.iter().any(|p| p.starts_with("node 3")),
+        "{:?}",
+        report.problems
+    );
 
     // No ceremony guard was left behind: finishing the install makes everything work, in the
     // live cluster (the daemon caches nothing for a key it did not have).
@@ -405,14 +508,22 @@ async fn the_sign_test_catches_a_node_with_a_broken_secret_share() {
     let mut b = [0u8; 32];
     b[0] = 42;
     let bad = SigningShare::deserialize(&b).unwrap();
-    share.key_package =
-        KeyPackage::new(*kp.identifier(), bad, *kp.verifying_share(), *kp.verifying_key(), *kp.min_signers());
+    share.key_package = KeyPackage::new(
+        *kp.identifier(),
+        bad,
+        *kp.verifying_share(),
+        *kp.verifying_key(),
+        *kp.min_signers(),
+    );
     ks.save(KEY, &share).unwrap();
 
     let nodes: Vec<Arc<Node>> = sites.iter().map(Site::node).collect();
     let peers = local_peers(&nodes);
     let report = verify_key(&nodes, &peers, &fingerprint, true).await;
-    assert!(!report.ok, "Gate B must not pass with node 3's share broken");
+    assert!(
+        !report.ok,
+        "Gate B must not pass with node 3's share broken"
+    );
     let failed: Vec<_> = report.sign_test.iter().filter(|s| !s.ok).collect();
     assert!(!failed.is_empty(), "{:?}", report.sign_test);
 
@@ -424,7 +535,10 @@ async fn the_sign_test_catches_a_node_with_a_broken_secret_share() {
     ];
     let msg = rutli_frost_core::dealer::canton_test_message(b"node 1 lost");
     let r = sign(&nodes[1], &degraded, KEY, &msg).await;
-    assert!(!r.as_ref().map(|s| verifies(&public, &msg, s)).unwrap_or(false));
+    assert!(!r
+        .as_ref()
+        .map(|s| verifies(&public, &msg, s))
+        .unwrap_or(false));
 }
 
 /// Review MEDIUM-2: the sign test signs one fixed, server-computed digest, only for imported keys,
@@ -439,8 +553,13 @@ async fn the_ceremony_sign_test_signs_only_its_own_digest_with_exactly_the_quoru
     let nodes: Vec<Arc<Node>> = sites.iter().map(Site::node).collect();
     let peers = local_peers(&nodes);
 
-    let (msg, sig) = ceremony_sign_test(&nodes[0], &peers, KEY, &[2, 3]).await.unwrap();
-    assert_eq!(msg, rutli_cosigner::verify_key::verify_message(CEREMONY, KEY));
+    let (msg, sig) = ceremony_sign_test(&nodes[0], &peers, KEY, &[2, 3])
+        .await
+        .unwrap();
+    assert_eq!(
+        msg,
+        rutli_cosigner::verify_key::verify_message(CEREMONY, KEY)
+    );
     assert!(verifies(&public, &msg, &sig));
     // As the daemon wires it, the other members see the leader as `cosigner1`, which then owns the
     // sign-test sessions there; its own share is in process. The test signs the same.
@@ -449,16 +568,27 @@ async fn the_ceremony_sign_test_signs_only_its_own_digest_with_exactly_the_quoru
         .enumerate()
         .map(|(i, n)| {
             let p = LocalPeer::new(n.clone());
-            Arc::new(if i == 0 { p } else { p.on_behalf_of(nodes[0].clone()) }) as Arc<dyn PeerApi>
+            Arc::new(if i == 0 {
+                p
+            } else {
+                p.on_behalf_of(nodes[0].clone())
+            }) as Arc<dyn PeerApi>
         })
         .collect();
-    let (msg, sig) = ceremony_sign_test(&nodes[0], &as_leader, KEY, &[1, 3]).await.unwrap();
+    let (msg, sig) = ceremony_sign_test(&nodes[0], &as_leader, KEY, &[1, 3])
+        .await
+        .unwrap();
     assert!(verifies(&public, &msg, &sig));
     assert!(nodes.iter().all(|n| n.pending_sign_count(KEY) == 0));
 
     // Wrong quorum sizes, duplicates and strangers are refused, not "fixed up".
     for bad in [&[1u16][..], &[1, 2, 3], &[2, 2], &[1, 4]] {
-        assert!(ceremony_sign_test(&nodes[0], &peers, KEY, bad).await.is_err(), "{bad:?}");
+        assert!(
+            ceremony_sign_test(&nodes[0], &peers, KEY, bad)
+                .await
+                .is_err(),
+            "{bad:?}"
+        );
     }
     // No substitution: a requested signer that is down fails the test.
     let degraded: Peers = vec![
@@ -466,11 +596,15 @@ async fn the_ceremony_sign_test_signs_only_its_own_digest_with_exactly_the_quoru
         Arc::new(LocalPeer::new(nodes[1].clone())),
         Arc::new(DownPeer(nodes[2].identifier)),
     ];
-    assert!(ceremony_sign_test(&nodes[0], &degraded, KEY, &[1, 3]).await.is_err());
+    assert!(ceremony_sign_test(&nodes[0], &degraded, KEY, &[1, 3])
+        .await
+        .is_err());
 
     // A DKG key has no ceremony digest: refused.
     run_dkg(&peers, "namespace-dkg").await.unwrap();
-    let err = ceremony_sign_test(&nodes[0], &peers, "namespace-dkg", &[1, 2]).await.unwrap_err();
+    let err = ceremony_sign_test(&nodes[0], &peers, "namespace-dkg", &[1, 2])
+        .await
+        .unwrap_err();
     assert!(matches!(err, DaemonError::Ceremony(_)), "{err:?}");
 }
 
@@ -503,6 +637,12 @@ async fn the_operator_cannot_loop_the_sign_test_into_unbounded_nonce_markers() {
     }
     let dir = sites[0].data_dir.join("keys").join(format!("{KEY}.nonces"));
     let markers = std::fs::read_dir(&dir).unwrap().count();
-    assert!(refused > 0, "200 back-to-back sign tests must hit the rate limit");
-    assert!(markers <= 20, "node 1 holds {markers} nonce markers after 200 operator calls");
+    assert!(
+        refused > 0,
+        "200 back-to-back sign tests must hit the rate limit"
+    );
+    assert!(
+        markers <= 20,
+        "node 1 holds {markers} nonce markers after 200 operator calls"
+    );
 }

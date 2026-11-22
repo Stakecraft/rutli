@@ -55,7 +55,11 @@ impl std::fmt::Display for Finding {
             Level::Required => "required",
             Level::Advisory => "advisory",
         };
-        write!(f, "[{tag}] {}: {} — production requires {}", self.setting, self.found, self.required)
+        write!(
+            f,
+            "[{tag}] {}: {} — production requires {}",
+            self.setting, self.found, self.required
+        )
     }
 }
 
@@ -67,7 +71,12 @@ pub const DOC: &str = "docs/production-profile.md";
 pub fn findings(cfg: &Config) -> Vec<Finding> {
     let mut out = Vec::new();
     let mut req = |setting: &'static str, found: String, required: &'static str| {
-        out.push(Finding { level: Level::Required, setting, found, required })
+        out.push(Finding {
+            level: Level::Required,
+            setting,
+            found,
+            required,
+        })
     };
     let tls = cfg.tls.is_some();
     let p = &cfg.signing_policy;
@@ -80,35 +89,65 @@ pub fn findings(cfg: &Config) -> Vec<Finding> {
         Some(_) => {}
     }
     if cfg.tls.as_ref().is_some_and(|t| !t.peer_pins_required()) {
-        req("tls.require_peer_pins", "false (the explicit opt-out)".into(), "on (unset or true): a pin for every peer");
+        req(
+            "tls.require_peer_pins",
+            "false (the explicit opt-out)".into(),
+            "on (unset or true): a pin for every peer",
+        );
     }
     match &cfg.share_seal {
-        None => req("share_seal", "missing (key files in plaintext)".into(), "share_seal.secret_file (a per-node seal bundle)"),
+        None => req(
+            "share_seal",
+            "missing (key files in plaintext)".into(),
+            "share_seal.secret_file (a per-node seal bundle)",
+        ),
         Some(s) if s.secret_env.is_some() => req(
             "share_seal.secret_env",
             "set (the legacy shared master secret)".into(),
             "share_seal.secret_file (a per-node seal bundle) instead",
         ),
-        Some(s) if s.secret_file.is_none() => {
-            req("share_seal.secret_file", "missing".into(), "a per-node seal bundle")
-        }
+        Some(s) if s.secret_file.is_none() => req(
+            "share_seal.secret_file",
+            "missing".into(),
+            "a per-node seal bundle",
+        ),
         Some(_) => {}
     }
     if signers.is_empty() {
-        req("signer_allowlist", "missing or empty".into(), "the driver certificate CN(s)");
+        req(
+            "signer_allowlist",
+            "missing or empty".into(),
+            "the driver certificate CN(s)",
+        );
     }
     if !listed(&cfg.operator_allowlist) {
-        req("operator_allowlist", "missing or empty".into(), "the operator certificate CN(s)");
+        req(
+            "operator_allowlist",
+            "missing or empty".into(),
+            "the operator certificate CN(s)",
+        );
     }
     if !listed(&cfg.refresh_allowlist) {
-        req("refresh_allowlist", "missing or empty".into(), "the refresh job's certificate CN(s)");
+        req(
+            "refresh_allowlist",
+            "missing or empty".into(),
+            "the refresh job's certificate CN(s)",
+        );
     }
     if p.signer_may_refresh {
-        req("signing_policy.signer_may_refresh", "true (the default)".into(), "false");
+        req(
+            "signing_policy.signer_may_refresh",
+            "true (the default)".into(),
+            "false",
+        );
     }
     // Without TLS the intent switches cannot be on; the `tls` row already says so.
     if tls && !p.intent_required(tls) {
-        req("signing_policy.require_intent", effective(p.require_intent, tls), "on (unset or true, with TLS)");
+        req(
+            "signing_policy.require_intent",
+            effective(p.require_intent, tls),
+            "on (unset or true, with TLS)",
+        );
     }
     if tls && !p.ceremony_intent_required(tls) {
         req(
@@ -118,27 +157,63 @@ pub fn findings(cfg: &Config) -> Vec<Finding> {
         );
     }
     if !p.require_epoch_match {
-        req("signing_policy.require_epoch_match", "false (the default)".into(), "true");
+        req(
+            "signing_policy.require_epoch_match",
+            "false (the default)".into(),
+            "true",
+        );
     }
     if !p.signer_acl_required {
-        req("signing_policy.signer_acl_required", "false (the default)".into(), "true");
+        req(
+            "signing_policy.signer_acl_required",
+            "false (the default)".into(),
+            "true",
+        );
     }
-    let no_acl: Vec<&str> = signers.iter().filter(|cn| !p.signer_acl.contains_key(*cn)).map(String::as_str).collect();
+    let no_acl: Vec<&str> = signers
+        .iter()
+        .filter(|cn| !p.signer_acl.contains_key(*cn))
+        .map(String::as_str)
+        .collect();
     if !no_acl.is_empty() {
-        req("signing_policy.signer_acl", format!("no entry for {}", no_acl.join(", ")), "an entry for every signer_allowlist CN");
+        req(
+            "signing_policy.signer_acl",
+            format!("no entry for {}", no_acl.join(", ")),
+            "an entry for every signer_allowlist CN",
+        );
     }
-    let no_pin: Vec<&str> = signers.iter().filter(|cn| !p.signer_pins.contains_key(*cn)).map(String::as_str).collect();
+    let no_pin: Vec<&str> = signers
+        .iter()
+        .filter(|cn| !p.signer_pins.contains_key(*cn))
+        .map(String::as_str)
+        .collect();
     if !no_pin.is_empty() {
-        req("signing_policy.signer_pins", format!("no pin for {}", no_pin.join(", ")), "a pin for every signer_allowlist CN");
+        req(
+            "signing_policy.signer_pins",
+            format!("no pin for {}", no_pin.join(", ")),
+            "a pin for every signer_allowlist CN",
+        );
     }
     if p.sign_rate_limit_per_min == 0 {
-        req("signing_policy.sign_rate_limit_per_min", "0 (off)".into(), "a limit above 0");
+        req(
+            "signing_policy.sign_rate_limit_per_min",
+            "0 (off)".into(),
+            "a limit above 0",
+        );
     }
     if p.sign_rate_limit_per_day == 0 {
-        req("signing_policy.sign_rate_limit_per_day", "0 (off)".into(), "a limit above 0");
+        req(
+            "signing_policy.sign_rate_limit_per_day",
+            "0 (off)".into(),
+            "a limit above 0",
+        );
     }
-    let unlimited: Vec<&str> =
-        p.rate_limits.iter().filter(|r| r.per_min == 0 || r.per_day == 0).map(|r| r.key_id_prefix.as_str()).collect();
+    let unlimited: Vec<&str> = p
+        .rate_limits
+        .iter()
+        .filter(|r| r.per_min == 0 || r.per_day == 0)
+        .map(|r| r.key_id_prefix.as_str())
+        .collect();
     if !unlimited.is_empty() {
         req(
             "signing_policy.rate_limits",
@@ -147,26 +222,54 @@ pub fn findings(cfg: &Config) -> Vec<Finding> {
         );
     }
     if cfg.ceremony_sign_test_rate_limit_per_min == 0 {
-        req("ceremony_sign_test_rate_limit_per_min", "0 (off)".into(), "a limit above 0");
+        req(
+            "ceremony_sign_test_rate_limit_per_min",
+            "0 (off)".into(),
+            "a limit above 0",
+        );
     }
     if cfg.keyfile.write_version != 2 {
-        req("keyfile.write_version", cfg.keyfile.write_version.to_string(), "2");
+        req(
+            "keyfile.write_version",
+            cfg.keyfile.write_version.to_string(),
+            "2",
+        );
     }
     if cfg.keyfile.cluster_uuid.is_none() {
-        req("keyfile.cluster_uuid", "missing".into(), "the cluster's UUID, the same on every node");
+        req(
+            "keyfile.cluster_uuid",
+            "missing".into(),
+            "the cluster's UUID, the same on every node",
+        );
     }
     if cfg.keyfile.accept_v1 {
-        req("keyfile.accept_v1", "true (the default)".into(), "false, once every key file is v2");
+        req(
+            "keyfile.accept_v1",
+            "true (the default)".into(),
+            "false, once every key file is v2",
+        );
     }
     if cfg.cluster_id.is_none() {
-        req("cluster_id", "derived from tls.ca_cert".into(), "set explicitly, so a CA rotation cannot change it");
+        req(
+            "cluster_id",
+            "derived from tls.ca_cert".into(),
+            "set explicitly, so a CA rotation cannot change it",
+        );
     }
     if cfg.cluster_id_change_allowed {
-        req("cluster_id_change_allowed", "true".into(), "false (only for one deliberate start)");
+        req(
+            "cluster_id_change_allowed",
+            "true".into(),
+            "false (only for one deliberate start)",
+        );
     }
     if let Some(h) = cfg.hosted_keys.as_ref().filter(|h| h.enabled) {
         if h.decrypt_rate_limit_per_min == 0 {
-            req("hosted_keys.decrypt_rate_limit_per_min", "0 (off)".into(), "a limit above 0");
+            req(
+                "hosted_keys.decrypt_rate_limit_per_min",
+                "0 (off)".into(),
+                "a limit above 0",
+            );
         }
         if !h.delete_allowlist.is_empty() && h.delete_approval_threshold == 0 {
             req(
@@ -176,11 +279,19 @@ pub fn findings(cfg: &Config) -> Vec<Finding> {
             );
         }
         if h.commitment_key.is_none() {
-            req("hosted_keys.commitment_key", "missing".into(), "the cluster-wide commitment key");
+            req(
+                "hosted_keys.commitment_key",
+                "missing".into(),
+                "the cluster-wide commitment key",
+            );
         }
     }
 
-    if !p.rules.iter().any(|r| r.mode == "quorum" && covers_namespace_key(&r.key_id_prefix)) {
+    if !p
+        .rules
+        .iter()
+        .any(|r| r.mode == "quorum" && covers_namespace_key(&r.key_id_prefix))
+    {
         out.push(Finding {
             level: Level::Advisory,
             setting: "signing_policy.rules",
@@ -218,7 +329,10 @@ fn effective(set: Option<bool>, _tls: bool) -> String {
 
 /// The required findings of `cfg` (empty when the node meets the profile).
 pub fn required(cfg: &Config) -> Vec<Finding> {
-    findings(cfg).into_iter().filter(|f| f.level == Level::Required).collect()
+    findings(cfg)
+        .into_iter()
+        .filter(|f| f.level == Level::Required)
+        .collect()
 }
 
 /// The refusal message for a production node with required findings: one line per setting.
@@ -239,7 +353,8 @@ pub fn refusal(required: &[Finding]) -> String {
 mod tests {
     use super::*;
     use crate::config::{
-        ApprovalRuleConfig, HostedKeysConfig, KeyFileConfig, RateLimitRule, ShareSealConfig, SigningPolicyConfig,
+        ApprovalRuleConfig, HostedKeysConfig, KeyFileConfig, RateLimitRule, ShareSealConfig,
+        SigningPolicyConfig,
     };
     use std::collections::BTreeMap;
 
@@ -281,7 +396,12 @@ mod tests {
 
     #[test]
     fn a_fully_enforced_config_has_no_finding() {
-        assert_eq!(findings(&enforced()), vec![], "{:#?}", findings(&enforced()));
+        assert_eq!(
+            findings(&enforced()),
+            vec![],
+            "{:#?}",
+            findings(&enforced())
+        );
     }
 
     /// Each break flips one setting; exactly that setting's row must fire, at the given level.
@@ -290,49 +410,123 @@ mod tests {
         type Break = (&'static str, Level, fn(&mut Config));
         let breaks: Vec<Break> = vec![
             ("tls", Level::Required, |c| c.tls = None),
-            ("tls.allow_expired_ca", Level::Required, |c| c.tls.as_mut().unwrap().allow_expired_ca = true),
-            ("tls.require_peer_pins", Level::Required, |c| c.tls.as_mut().unwrap().require_peer_pins = Some(false)),
+            ("tls.allow_expired_ca", Level::Required, |c| {
+                c.tls.as_mut().unwrap().allow_expired_ca = true
+            }),
+            ("tls.require_peer_pins", Level::Required, |c| {
+                c.tls.as_mut().unwrap().require_peer_pins = Some(false)
+            }),
             ("share_seal", Level::Required, |c| c.share_seal = None),
             ("share_seal.secret_env", Level::Required, |c| {
-                c.share_seal = Some(ShareSealConfig { secret_env: Some("SEAL".into()), secret_file: None })
+                c.share_seal = Some(ShareSealConfig {
+                    secret_env: Some("SEAL".into()),
+                    secret_file: None,
+                })
             }),
-            ("share_seal.secret_file", Level::Required, |c| c.share_seal = Some(ShareSealConfig::default())),
-            ("operator_allowlist", Level::Required, |c| c.operator_allowlist = None),
-            ("refresh_allowlist", Level::Required, |c| c.refresh_allowlist = Some(vec![])),
-            ("signing_policy.signer_may_refresh", Level::Required, |c| c.signing_policy.signer_may_refresh = true),
-            ("signing_policy.require_intent", Level::Required, |c| c.signing_policy.require_intent = Some(false)),
-            ("signing_policy.require_ceremony_intent", Level::Required, |c| {
-                c.signing_policy.require_ceremony_intent = Some(false)
+            ("share_seal.secret_file", Level::Required, |c| {
+                c.share_seal = Some(ShareSealConfig::default())
             }),
-            ("signing_policy.require_epoch_match", Level::Required, |c| c.signing_policy.require_epoch_match = false),
-            ("signing_policy.signer_acl_required", Level::Required, |c| c.signing_policy.signer_acl_required = false),
-            ("signing_policy.signer_acl", Level::Required, |c| c.signing_policy.signer_acl = BTreeMap::new()),
-            ("signing_policy.signer_pins", Level::Required, |c| c.signing_policy.signer_pins = BTreeMap::new()),
-            ("signing_policy.sign_rate_limit_per_min", Level::Required, |c| c.signing_policy.sign_rate_limit_per_min = 0),
-            ("signing_policy.sign_rate_limit_per_day", Level::Required, |c| c.signing_policy.sign_rate_limit_per_day = 0),
+            ("operator_allowlist", Level::Required, |c| {
+                c.operator_allowlist = None
+            }),
+            ("refresh_allowlist", Level::Required, |c| {
+                c.refresh_allowlist = Some(vec![])
+            }),
+            ("signing_policy.signer_may_refresh", Level::Required, |c| {
+                c.signing_policy.signer_may_refresh = true
+            }),
+            ("signing_policy.require_intent", Level::Required, |c| {
+                c.signing_policy.require_intent = Some(false)
+            }),
+            (
+                "signing_policy.require_ceremony_intent",
+                Level::Required,
+                |c| c.signing_policy.require_ceremony_intent = Some(false),
+            ),
+            ("signing_policy.require_epoch_match", Level::Required, |c| {
+                c.signing_policy.require_epoch_match = false
+            }),
+            ("signing_policy.signer_acl_required", Level::Required, |c| {
+                c.signing_policy.signer_acl_required = false
+            }),
+            ("signing_policy.signer_acl", Level::Required, |c| {
+                c.signing_policy.signer_acl = BTreeMap::new()
+            }),
+            ("signing_policy.signer_pins", Level::Required, |c| {
+                c.signing_policy.signer_pins = BTreeMap::new()
+            }),
+            (
+                "signing_policy.sign_rate_limit_per_min",
+                Level::Required,
+                |c| c.signing_policy.sign_rate_limit_per_min = 0,
+            ),
+            (
+                "signing_policy.sign_rate_limit_per_day",
+                Level::Required,
+                |c| c.signing_policy.sign_rate_limit_per_day = 0,
+            ),
             ("signing_policy.rate_limits", Level::Required, |c| {
-                c.signing_policy.rate_limits = vec![RateLimitRule { key_id_prefix: "frost-".into(), per_min: 0, per_day: 10 }]
+                c.signing_policy.rate_limits = vec![RateLimitRule {
+                    key_id_prefix: "frost-".into(),
+                    per_min: 0,
+                    per_day: 10,
+                }]
             }),
-            ("ceremony_sign_test_rate_limit_per_min", Level::Required, |c| c.ceremony_sign_test_rate_limit_per_min = 0),
-            ("keyfile.write_version", Level::Required, |c| c.keyfile.write_version = 1),
-            ("keyfile.cluster_uuid", Level::Required, |c| c.keyfile.cluster_uuid = None),
-            ("keyfile.accept_v1", Level::Required, |c| c.keyfile.accept_v1 = true),
+            (
+                "ceremony_sign_test_rate_limit_per_min",
+                Level::Required,
+                |c| c.ceremony_sign_test_rate_limit_per_min = 0,
+            ),
+            ("keyfile.write_version", Level::Required, |c| {
+                c.keyfile.write_version = 1
+            }),
+            ("keyfile.cluster_uuid", Level::Required, |c| {
+                c.keyfile.cluster_uuid = None
+            }),
+            ("keyfile.accept_v1", Level::Required, |c| {
+                c.keyfile.accept_v1 = true
+            }),
             ("cluster_id", Level::Required, |c| c.cluster_id = None),
-            ("cluster_id_change_allowed", Level::Required, |c| c.cluster_id_change_allowed = true),
-            ("hosted_keys.decrypt_rate_limit_per_min", Level::Required, |c| {
-                c.hosted_keys = Some(HostedKeysConfig { decrypt_rate_limit_per_min: 0, ..hosted() })
+            ("cluster_id_change_allowed", Level::Required, |c| {
+                c.cluster_id_change_allowed = true
             }),
-            ("hosted_keys.delete_approval_threshold", Level::Required, |c| {
-                c.hosted_keys = Some(HostedKeysConfig { delete_allowlist: vec!["operator".into()], ..hosted() })
-            }),
+            (
+                "hosted_keys.decrypt_rate_limit_per_min",
+                Level::Required,
+                |c| {
+                    c.hosted_keys = Some(HostedKeysConfig {
+                        decrypt_rate_limit_per_min: 0,
+                        ..hosted()
+                    })
+                },
+            ),
+            (
+                "hosted_keys.delete_approval_threshold",
+                Level::Required,
+                |c| {
+                    c.hosted_keys = Some(HostedKeysConfig {
+                        delete_allowlist: vec!["operator".into()],
+                        ..hosted()
+                    })
+                },
+            ),
             ("hosted_keys.commitment_key", Level::Required, |c| {
-                c.hosted_keys = Some(HostedKeysConfig { commitment_key: None, ..hosted() })
+                c.hosted_keys = Some(HostedKeysConfig {
+                    commitment_key: None,
+                    ..hosted()
+                })
             }),
             ("signing_policy.rules", Level::Advisory, |c| {
-                c.signing_policy.rules = vec![ApprovalRuleConfig { key_id_prefix: "x".into(), mode: "auto".into(), threshold: 0 }]
+                c.signing_policy.rules = vec![ApprovalRuleConfig {
+                    key_id_prefix: "x".into(),
+                    mode: "auto".into(),
+                    threshold: 0,
+                }]
             }),
             // A quorum rule for another key does not cover the namespace key.
-            ("signing_policy.rules", Level::Advisory, |c| c.signing_policy.rules[0].key_id_prefix = "p1-rutli-enc-".into()),
+            ("signing_policy.rules", Level::Advisory, |c| {
+                c.signing_policy.rules[0].key_id_prefix = "p1-rutli-enc-".into()
+            }),
         ];
         // A well-formed hosted-keys block on its own fires nothing.
         let mut ok = enforced();
@@ -362,29 +556,43 @@ mod tests {
         ] {
             assert!(covers_namespace_key(yes), "{yes}");
         }
-        for no in ["p1-", "rutli-", "frost-signing", "p1-frost-signing", "p1-rutli-enc-", "frost-participant1-signing"] {
+        for no in [
+            "p1-",
+            "rutli-",
+            "frost-signing",
+            "p1-frost-signing",
+            "p1-rutli-enc-",
+            "frost-participant1-signing",
+        ] {
             assert!(!covers_namespace_key(no), "{no}");
         }
     }
 
     fn hosted() -> HostedKeysConfig {
-        let mut h: HostedKeysConfig = serde_json::from_value(serde_json::json!({"enabled": true})).unwrap();
+        let mut h: HostedKeysConfig =
+            serde_json::from_value(serde_json::json!({"enabled": true})).unwrap();
         h.commitment_key = Some("11".repeat(32));
         h
     }
 
     #[test]
     fn a_production_node_refuses_to_start_naming_each_gap_and_a_lab_node_does_not() {
-        enforced().validate().expect("a fully enforced production config validates");
+        enforced()
+            .validate()
+            .expect("a fully enforced production config validates");
         let mut c = enforced();
         c.signing_policy.require_epoch_match = false;
         c.keyfile.accept_v1 = true;
         let err = c.validate().unwrap_err().to_string();
-        assert!(err.contains("signing_policy.require_epoch_match") && err.contains("keyfile.accept_v1"), "{err}");
+        assert!(
+            err.contains("signing_policy.require_epoch_match") && err.contains("keyfile.accept_v1"),
+            "{err}"
+        );
         c.profile = Some(Profile::Lab);
         c.validate().expect("lab: findings do not refuse");
         c.profile = None;
-        c.validate().expect("unset: findings do not refuse (until 0.6)");
+        c.validate()
+            .expect("unset: findings do not refuse (until 0.6)");
         // Advisory findings never refuse, not even under production.
         let mut a = enforced();
         a.signing_policy.rules.clear();
@@ -399,20 +607,30 @@ mod tests {
         c.tls = None;
         c.signer_allowlist = None;
         let names: Vec<_> = findings(&c).iter().map(|f| f.setting).collect();
-        assert_eq!(names, vec!["tls", "signer_allowlist"], "the tls row covers the intent switches");
+        assert_eq!(
+            names,
+            vec!["tls", "signer_allowlist"],
+            "the tls row covers the intent switches"
+        );
     }
 
     #[test]
     fn the_refusal_names_each_setting_and_points_to_the_doc() {
         let mut c = enforced();
         c.keyfile = KeyFileConfig::default();
-        c.signing_policy = SigningPolicyConfig { rules: c.signing_policy.rules.clone(), ..Default::default() };
+        c.signing_policy = SigningPolicyConfig {
+            rules: c.signing_policy.rules.clone(),
+            ..Default::default()
+        };
         let r = required(&c);
         let msg = refusal(&r);
         for f in &r {
             assert!(msg.contains(f.setting), "{msg}");
         }
         assert!(msg.contains(DOC) && msg.contains("check-config"), "{msg}");
-        assert!(msg.contains("keyfile.write_version: 1 — production requires 2"), "{msg}");
+        assert!(
+            msg.contains("keyfile.write_version: 1 — production requires 2"),
+            "{msg}"
+        );
     }
 }

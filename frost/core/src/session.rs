@@ -39,10 +39,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use frost_ed25519 as frost;
 use frost::round1::{SigningCommitments, SigningNonces};
 use frost::round2::SignatureShare;
 use frost::{Identifier, SigningPackage};
+use frost_ed25519 as frost;
 use rand::rngs::OsRng;
 
 use crate::nonce_store::NonceStore;
@@ -66,7 +66,10 @@ pub struct SessionBinding {
 
 impl SessionBinding {
     pub fn new(key_id: impl Into<String>) -> Self {
-        Self { key_id: key_id.into(), ..Default::default() }
+        Self {
+            key_id: key_id.into(),
+            ..Default::default()
+        }
     }
 
     /// Bind the message the session will sign.
@@ -101,7 +104,11 @@ impl SessionBinding {
         if self.message_digest.is_some_and(|d| d != sha256(message)) {
             return Err("another message than the leader declared");
         }
-        if self.signers.as_ref().is_some_and(|s| !s.iter().eq(commitments.keys())) {
+        if self
+            .signers
+            .as_ref()
+            .is_some_and(|s| !s.iter().eq(commitments.keys()))
+        {
             return Err("another signer set than the leader declared");
         }
         if self.intent_digest.as_ref() != intent_digest {
@@ -135,7 +142,9 @@ impl std::fmt::Display for SessionOwner {
         match self {
             SessionOwner::Local => f.write_str("this node's own leader"),
             SessionOwner::Peer(cn) => write!(f, "peer '{cn}'"),
-            SessionOwner::Unidentified => f.write_str("an unidentified peer (no client certificate)"),
+            SessionOwner::Unidentified => {
+                f.write_str("an unidentified peer (no client certificate)")
+            }
         }
     }
 }
@@ -181,7 +190,11 @@ pub struct PendingCaps {
 
 impl PendingCaps {
     /// No caps (the TTL still bounds how long a session lives).
-    pub const NONE: PendingCaps = PendingCaps { per_key: usize::MAX, per_owner: usize::MAX, per_request: usize::MAX };
+    pub const NONE: PendingCaps = PendingCaps {
+        per_key: usize::MAX,
+        per_owner: usize::MAX,
+        per_request: usize::MAX,
+    };
 }
 
 /// One in-flight session: its nonces, the commitments round 1 returned, when, its binding, who
@@ -204,7 +217,13 @@ fn check_room(
     request: Option<&str>,
     caps: PendingCaps,
 ) -> Result<()> {
-    let full = |cap_kind, open, cap| Err(CoreError::SessionsFull { cap_kind, open, cap });
+    let full = |cap_kind, open, cap| {
+        Err(CoreError::SessionsFull {
+            cap_kind,
+            open,
+            cap,
+        })
+    };
     let (mut mine, mut this_request) = (0usize, 0usize);
     for p in pending.values().filter(|p| &p.owner == owner) {
         mine += 1;
@@ -270,7 +289,12 @@ impl Cosigner {
         public_key_package: frost::keys::PublicKeyPackage,
         nonce_store: NonceStore,
     ) -> Self {
-        Self { key_package, public_key_package, nonce_store, pending: Mutex::new(BTreeMap::new()) }
+        Self {
+            key_package,
+            public_key_package,
+            nonce_store,
+            pending: Mutex::new(BTreeMap::new()),
+        }
     }
 
     /// The in-flight session map, recovered if a holder panicked (audit L3).
@@ -312,7 +336,13 @@ impl Cosigner {
     /// nonces — the leader generates a fresh UUID per attempt), and a binding that cannot be
     /// honoured: a declared signer set without this cosigner or smaller than the threshold.
     pub fn round1(&self, session_id: &str, binding: SessionBinding) -> Result<SigningCommitments> {
-        self.round1_owned(session_id, binding, SessionOwner::Local, None, PendingCaps::NONE)
+        self.round1_owned(
+            session_id,
+            binding,
+            SessionOwner::Local,
+            None,
+            PendingCaps::NONE,
+        )
     }
 
     /// [`Cosigner::round1`] for `owner`, who alone may then send the session's round 2 or abort
@@ -328,7 +358,9 @@ impl Cosigner {
         caps: PendingCaps,
     ) -> Result<SigningCommitments> {
         if let Some(signers) = &binding.signers {
-            if !signers.contains(&self.identifier()) || signers.len() < usize::from(self.min_signers()) {
+            if !signers.contains(&self.identifier())
+                || signers.len() < usize::from(self.min_signers())
+            {
                 return Err(CoreError::InvalidBinding(format!(
                     "the declared signer set has {} member(s) and must include this cosigner and at \
                      least {} signers",
@@ -354,7 +386,14 @@ impl Cosigner {
             frost::round1::commit(self.key_package.signing_share(), &mut OsRng);
         pending.insert(
             session_id.to_string(),
-            Pending { nonces, commitments, started: Instant::now(), binding, owner, request },
+            Pending {
+                nonces,
+                commitments,
+                started: Instant::now(),
+                binding,
+                owner,
+                request,
+            },
         );
         Ok(commitments)
     }
@@ -362,7 +401,12 @@ impl Cosigner {
     /// Whether a round 1 by `owner` for `request` would find room under `caps`, after dropping
     /// expired sessions. A snapshot for refusing early, before the costlier checks; the check that
     /// holds is the one in [`Cosigner::round1_owned`].
-    pub fn check_room(&self, owner: &SessionOwner, request: Option<&str>, caps: PendingCaps) -> Result<()> {
+    pub fn check_room(
+        &self,
+        owner: &SessionOwner,
+        request: Option<&str>,
+        caps: PendingCaps,
+    ) -> Result<()> {
         let mut pending = self.pending();
         pending.retain(|_, p| p.started.elapsed() < PENDING_TTL);
         check_room(&pending, owner, request, caps)
@@ -383,7 +427,14 @@ impl Cosigner {
         commitments: &BTreeMap<Identifier, SigningCommitments>,
         intent_digest: Option<&[u8; 32]>,
     ) -> Result<SignatureShare> {
-        self.round2_guarded(session_id, key_id, message, commitments, intent_digest, || Ok(()))
+        self.round2_guarded(
+            session_id,
+            key_id,
+            message,
+            commitments,
+            intent_digest,
+            || Ok(()),
+        )
     }
 
     /// [`Cosigner::round2`] with a `guard` run **after** every binding check passed and **before**
@@ -403,7 +454,15 @@ impl Cosigner {
         intent_digest: Option<&[u8; 32]>,
         guard: impl FnOnce() -> std::result::Result<(), E>,
     ) -> std::result::Result<SignatureShare, E> {
-        self.round2_guarded_as(&SessionOwner::Local, session_id, key_id, message, commitments, intent_digest, guard)
+        self.round2_guarded_as(
+            &SessionOwner::Local,
+            session_id,
+            key_id,
+            message,
+            commitments,
+            intent_digest,
+            guard,
+        )
     }
 
     /// [`Cosigner::round2_guarded`] sent by `caller`. A live session that another caller opened is
@@ -427,7 +486,9 @@ impl Cosigner {
                 Some(p) if &p.owner != caller && p.started.elapsed() < PENDING_TTL => {
                     return Err(not_owner(session_id, &p.owner, caller).into());
                 }
-                Some(_) => pending.remove(session_id).expect("the entry was just found"),
+                Some(_) => pending
+                    .remove(session_id)
+                    .expect("the entry was just found"),
             }
         };
         // An entry past the TTL is dead even if no sweep removed it yet: the marker-pruning proof
@@ -435,10 +496,17 @@ impl Cosigner {
         if p.started.elapsed() >= PENDING_TTL {
             return Err(CoreError::UnknownSession(format!("{session_id} (expired)")).into());
         }
-        let mismatch = |what| CoreError::BindingMismatch { session: session_id.to_string(), what };
-        p.binding.check(key_id, message, commitments, intent_digest).map_err(mismatch)?;
+        let mismatch = |what| CoreError::BindingMismatch {
+            session: session_id.to_string(),
+            what,
+        };
+        p.binding
+            .check(key_id, message, commitments, intent_digest)
+            .map_err(mismatch)?;
         if commitments.get(&self.identifier()) != Some(&p.commitments) {
-            return Err(mismatch("this cosigner's own round-1 commitment is missing or altered").into());
+            return Err(
+                mismatch("this cosigner's own round-1 commitment is missing or altered").into(),
+            );
         }
         if commitments.len() < usize::from(self.min_signers()) {
             return Err(mismatch("fewer signers than the threshold").into());
@@ -450,7 +518,8 @@ impl Cosigner {
         self.nonce_store.consume(session_id)?;
 
         let signing_package = SigningPackage::new(commitments.clone(), message);
-        let share = frost::round2::sign(&signing_package, &p.nonces, &self.key_package).map_err(CoreError::from)?;
+        let share = frost::round2::sign(&signing_package, &p.nonces, &self.key_package)
+            .map_err(CoreError::from)?;
         Ok(share)
     }
 
@@ -516,7 +585,11 @@ impl Cosigner {
 }
 
 fn not_owner(session_id: &str, owner: &SessionOwner, caller: &SessionOwner) -> CoreError {
-    CoreError::NotSessionOwner { session: session_id.to_string(), owner: owner.to_string(), caller: caller.to_string() }
+    CoreError::NotSessionOwner {
+        session: session_id.to_string(),
+        owner: owner.to_string(),
+        caller: caller.to_string(),
+    }
 }
 
 /// Leader-side aggregation: combine ≥ `min_signers` shares into the final 64-byte RFC 8032
@@ -558,14 +631,23 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let c = cosigner(tmp.path());
         let mine = c.round1("old", SessionBinding::new("k")).unwrap();
-        let Some(long_ago) = Instant::now().checked_sub(PENDING_TTL + Duration::from_secs(1)) else {
+        let Some(long_ago) = Instant::now().checked_sub(PENDING_TTL + Duration::from_secs(1))
+        else {
             return; // monotonic clock too close to its origin to backdate
         };
         c.pending.lock().unwrap().get_mut("old").unwrap().started = long_ago;
         let commitments = BTreeMap::from([(c.identifier(), mine)]);
-        let err = c.round2("old", "k", &[0; 34], &commitments, None).unwrap_err();
-        assert!(matches!(err, CoreError::UnknownSession(ref s) if s.contains("expired")), "{err:?}");
-        assert!(!c.nonce_store.is_consumed("old").unwrap(), "an expired session is not burned");
+        let err = c
+            .round2("old", "k", &[0; 34], &commitments, None)
+            .unwrap_err();
+        assert!(
+            matches!(err, CoreError::UnknownSession(ref s) if s.contains("expired")),
+            "{err:?}"
+        );
+        assert!(
+            !c.nonce_store.is_consumed("old").unwrap(),
+            "an expired session is not burned"
+        );
         assert_eq!(c.pending_count(), 0);
     }
 
@@ -577,16 +659,30 @@ mod tests {
         let c = cosigner(tmp.path());
         c.round1("old", SessionBinding::new("k")).unwrap();
         c.round1("live", SessionBinding::new("k")).unwrap();
-        assert!(c.holds_session("old") && c.holds_session("live") && !c.holds_session("never opened"));
-        assert_eq!(c.pending_count(), 2, "asking changes nothing while the sessions are live");
-        let Some(long_ago) = Instant::now().checked_sub(PENDING_TTL + Duration::from_secs(1)) else {
+        assert!(
+            c.holds_session("old") && c.holds_session("live") && !c.holds_session("never opened")
+        );
+        assert_eq!(
+            c.pending_count(),
+            2,
+            "asking changes nothing while the sessions are live"
+        );
+        let Some(long_ago) = Instant::now().checked_sub(PENDING_TTL + Duration::from_secs(1))
+        else {
             return; // monotonic clock too close to its origin to backdate
         };
         c.pending.lock().unwrap().get_mut("old").unwrap().started = long_ago;
         assert!(!c.holds_session("old"), "an expired session is not held");
-        assert_eq!(c.pending_count(), 1, "the expired entry is gone, the live one is not");
+        assert_eq!(
+            c.pending_count(),
+            1,
+            "the expired entry is gone, the live one is not"
+        );
         assert!(c.holds_session("live"));
-        assert!(!c.nonce_store.is_consumed("old").unwrap(), "nothing is burned for it");
+        assert!(
+            !c.nonce_store.is_consumed("old").unwrap(),
+            "nothing is burned for it"
+        );
     }
 
     /// The round-2 guard runs only once every binding check passed, before the marker burns; a
@@ -598,7 +694,9 @@ mod tests {
         let msg = [7u8; 34];
 
         // Binding mismatch: the guard is never called.
-        let mine = c.round1("s1", SessionBinding::new("k").with_message(&msg)).unwrap();
+        let mine = c
+            .round1("s1", SessionBinding::new("k").with_message(&msg))
+            .unwrap();
         let commitments = BTreeMap::from([(c.identifier(), mine)]);
         let called = std::cell::Cell::new(false);
         let err = c
@@ -618,14 +716,21 @@ mod tests {
             pkp,
             NonceStore::open(tmp2.path()).unwrap(),
         );
-        let mine = c.round1("s2", SessionBinding::new("k").with_message(&msg)).unwrap();
+        let mine = c
+            .round1("s2", SessionBinding::new("k").with_message(&msg))
+            .unwrap();
         let theirs = other.round1("s2", SessionBinding::new("k")).unwrap();
         let commitments = BTreeMap::from([(c.identifier(), mine), (other.identifier(), theirs)]);
         let err = c
-            .round2_guarded("s2", "k", &msg, &commitments, None, || Err(CoreError::Dealer("refused".into())))
+            .round2_guarded("s2", "k", &msg, &commitments, None, || {
+                Err(CoreError::Dealer("refused".into()))
+            })
             .unwrap_err();
         assert!(matches!(err, CoreError::Dealer(_)), "{err:?}");
-        assert!(!c.nonce_store.is_consumed("s2").unwrap(), "a refused round 2 burns no marker");
+        assert!(
+            !c.nonce_store.is_consumed("s2").unwrap(),
+            "a refused round 2 burns no marker"
+        );
         assert_eq!(c.pending_count(), 0);
     }
 
@@ -641,9 +746,17 @@ mod tests {
         for presented in [None, Some(&[2u8; 32])] {
             let mine = c.round1("s", binding.clone()).unwrap();
             let commitments = BTreeMap::from([(c.identifier(), mine)]);
-            let err = c.round2("s", "k", &msg, &commitments, presented).unwrap_err();
+            let err = c
+                .round2("s", "k", &msg, &commitments, presented)
+                .unwrap_err();
             assert!(
-                matches!(err, CoreError::BindingMismatch { what: "another signing intent", .. }),
+                matches!(
+                    err,
+                    CoreError::BindingMismatch {
+                        what: "another signing intent",
+                        ..
+                    }
+                ),
                 "{presented:?}: {err:?}"
             );
             assert!(!c.nonce_store.is_consumed("s").unwrap());
@@ -659,7 +772,8 @@ mod tests {
             c.round1(s, SessionBinding::new("k")).unwrap();
         }
         assert_eq!(c.prune_expired(), 0, "nothing is old yet");
-        let Some(long_ago) = Instant::now().checked_sub(PENDING_TTL + Duration::from_secs(1)) else {
+        let Some(long_ago) = Instant::now().checked_sub(PENDING_TTL + Duration::from_secs(1))
+        else {
             return; // monotonic clock too close to its origin to backdate
         };
         for s in ["old-1", "old-2"] {
@@ -669,7 +783,10 @@ mod tests {
         assert_eq!(c.pending_count(), 1);
         assert!(c.holds_session("live"));
         assert_eq!(c.prune_expired(), 0);
-        assert!(!c.nonce_store.is_consumed("old-1").unwrap(), "a sweep burns nothing");
+        assert!(
+            !c.nonce_store.is_consumed("old-1").unwrap(),
+            "a sweep burns nothing"
+        );
     }
 
     /// The marker-pruning proof (`NonceStore::prune_older_than`) needs markers kept at least three
@@ -719,23 +836,44 @@ mod tests {
         let c = cosigner(tmp.path());
         let other = second_cosigner(tmp.path());
         let msg = [3u8; 34];
-        let (b, mallory) = (SessionOwner::Peer("cosigner2".into()), SessionOwner::Peer("cosigner3".into()));
+        let (b, mallory) = (
+            SessionOwner::Peer("cosigner2".into()),
+            SessionOwner::Peer("cosigner3".into()),
+        );
         let binding = || SessionBinding::new("k").with_message(&msg);
-        let mine = c.round1_owned("s", binding(), b.clone(), None, PendingCaps::NONE).unwrap();
+        let mine = c
+            .round1_owned("s", binding(), b.clone(), None, PendingCaps::NONE)
+            .unwrap();
         let theirs = other.round1("s", binding()).unwrap();
         let commitments = BTreeMap::from([(c.identifier(), mine), (other.identifier(), theirs)]);
 
         for caller in [&mallory, &SessionOwner::Local, &SessionOwner::Unidentified] {
-            assert!(matches!(c.check_owner("s", caller), Err(CoreError::NotSessionOwner { .. })));
-            assert!(matches!(c.abort_as("s", caller), Err(CoreError::NotSessionOwner { .. })), "{caller}");
+            assert!(matches!(
+                c.check_owner("s", caller),
+                Err(CoreError::NotSessionOwner { .. })
+            ));
+            assert!(
+                matches!(
+                    c.abort_as("s", caller),
+                    Err(CoreError::NotSessionOwner { .. })
+                ),
+                "{caller}"
+            );
             let err = c
                 .round2_guarded_as::<CoreError>(caller, "s", "k", &msg, &commitments, None, || {
                     panic!("a refused round 2 never reaches the guard")
                 })
                 .unwrap_err();
             match err {
-                CoreError::NotSessionOwner { ref owner, caller: ref who, .. } => {
-                    assert_eq!((owner.as_str(), who.as_str()), ("peer 'cosigner2'", caller.to_string().as_str()));
+                CoreError::NotSessionOwner {
+                    ref owner,
+                    caller: ref who,
+                    ..
+                } => {
+                    assert_eq!(
+                        (owner.as_str(), who.as_str()),
+                        ("peer 'cosigner2'", caller.to_string().as_str())
+                    );
                 }
                 other => panic!("{other:?}"),
             }
@@ -744,15 +882,20 @@ mod tests {
         assert!(!c.nonce_store.is_consumed("s").unwrap());
 
         // The opener signs with the same request.
-        c.round2_guarded_as::<CoreError>(&b, "s", "k", &msg, &commitments, None, || Ok(())).unwrap();
+        c.round2_guarded_as::<CoreError>(&b, "s", "k", &msg, &commitments, None, || Ok(()))
+            .unwrap();
         assert!(c.nonce_store.is_consumed("s").unwrap());
         assert_eq!(c.pending_count(), 0);
 
         // And the opener's abort drops its session; a second abort finds nothing to refuse.
-        c.round1_owned("t", binding(), b.clone(), None, PendingCaps::NONE).unwrap();
+        c.round1_owned("t", binding(), b.clone(), None, PendingCaps::NONE)
+            .unwrap();
         c.check_owner("t", &b).unwrap();
         assert!(c.abort_as("t", &b).unwrap());
-        assert!(!c.abort_as("t", &mallory).unwrap(), "nothing left to refuse");
+        assert!(
+            !c.abort_as("t", &mallory).unwrap(),
+            "nothing left to refuse"
+        );
         assert_eq!(c.pending_count(), 0);
     }
 
@@ -768,18 +911,47 @@ mod tests {
             .checked_sub(PENDING_TTL + Duration::from_secs(1))
             .expect("the monotonic clock can be backdated by the TTL");
         let commitments = |m| BTreeMap::from([(c.identifier(), m)]);
-        let mine = c.round1_owned("old", SessionBinding::new("k"), owner.clone(), None, PendingCaps::NONE).unwrap();
+        let mine = c
+            .round1_owned(
+                "old",
+                SessionBinding::new("k"),
+                owner.clone(),
+                None,
+                PendingCaps::NONE,
+            )
+            .unwrap();
         c.pending.lock().unwrap().get_mut("old").unwrap().started = long_ago;
         c.check_owner("old", &other).unwrap();
         let err = c
-            .round2_guarded_as::<CoreError>(&other, "old", "k", &[0; 34], &commitments(mine), None, || Ok(()))
+            .round2_guarded_as::<CoreError>(
+                &other,
+                "old",
+                "k",
+                &[0; 34],
+                &commitments(mine),
+                None,
+                || Ok(()),
+            )
             .unwrap_err();
-        assert!(matches!(err, CoreError::UnknownSession(ref s) if s.contains("expired")), "{err:?}");
+        assert!(
+            matches!(err, CoreError::UnknownSession(ref s) if s.contains("expired")),
+            "{err:?}"
+        );
         assert_eq!(c.pending_count(), 0);
 
-        c.round1_owned("old2", SessionBinding::new("k"), owner, None, PendingCaps::NONE).unwrap();
+        c.round1_owned(
+            "old2",
+            SessionBinding::new("k"),
+            owner,
+            None,
+            PendingCaps::NONE,
+        )
+        .unwrap();
         c.pending.lock().unwrap().get_mut("old2").unwrap().started = long_ago;
-        assert!(c.abort_as("old2", &other).unwrap(), "an expired entry is dropped, not refused");
+        assert!(
+            c.abort_as("old2", &other).unwrap(),
+            "an expired entry is dropped, not refused"
+        );
         assert_eq!(c.pending_count(), 0);
         assert!(!c.nonce_store.is_consumed("old2").unwrap());
     }
@@ -791,25 +963,58 @@ mod tests {
     fn round1_caps_per_request_per_opener_and_per_key() {
         let tmp = tempfile::tempdir().unwrap();
         let c = cosigner(tmp.path());
-        let caps = PendingCaps { per_key: 6, per_owner: 3, per_request: 2 };
-        let (a, b, d) =
-            (SessionOwner::Peer("a".into()), SessionOwner::Peer("b".into()), SessionOwner::Local);
+        let caps = PendingCaps {
+            per_key: 6,
+            per_owner: 3,
+            per_request: 2,
+        };
+        let (a, b, d) = (
+            SessionOwner::Peer("a".into()),
+            SessionOwner::Peer("b".into()),
+            SessionOwner::Local,
+        );
         let open = |id: &str, who: &SessionOwner, req: Option<&str>| {
-            c.round1_owned(id, SessionBinding::new("k"), who.clone(), req.map(str::to_owned), caps)
+            c.round1_owned(
+                id,
+                SessionBinding::new("k"),
+                who.clone(),
+                req.map(str::to_owned),
+                caps,
+            )
         };
         let full = |r: Result<SigningCommitments>| match r {
-            Err(CoreError::SessionsFull { cap_kind, open, cap }) => (cap_kind, open, cap),
+            Err(CoreError::SessionsFull {
+                cap_kind,
+                open,
+                cap,
+            }) => (cap_kind, open, cap),
             other => panic!("{other:?}"),
         };
         open("a1", &a, Some("r1")).unwrap();
         open("a2", &a, Some("r1")).unwrap();
-        assert_eq!(full(open("a3", &a, Some("r1"))), (PendingCap::Request, 2, 2));
+        assert_eq!(
+            full(open("a3", &a, Some("r1"))),
+            (PendingCap::Request, 2, 2)
+        );
         // Another opener with the same request id is not counted against a's.
         open("b1", &b, Some("r1")).unwrap();
         open("a3", &a, Some("r2")).unwrap();
         assert_eq!(full(open("a4", &a, None)), (PendingCap::Opener, 3, 3));
         assert!(c.check_room(&a, None, caps).is_err());
-        assert!(matches!(c.check_room(&b, Some("r1"), PendingCaps { per_request: 1, ..caps }), Err(CoreError::SessionsFull { cap_kind: PendingCap::Request, .. })));
+        assert!(matches!(
+            c.check_room(
+                &b,
+                Some("r1"),
+                PendingCaps {
+                    per_request: 1,
+                    ..caps
+                }
+            ),
+            Err(CoreError::SessionsFull {
+                cap_kind: PendingCap::Request,
+                ..
+            })
+        ));
         c.check_room(&b, None, caps).unwrap();
         open("b2", &b, None).unwrap();
         open("d1", &d, None).unwrap();
@@ -821,7 +1026,12 @@ mod tests {
         assert_eq!(c.pending_count(), 6);
         c.abort_as("a1", &a).unwrap();
         open("d2", &d, None).unwrap();
-        let msg = CoreError::SessionsFull { cap_kind: PendingCap::Opener, open: 3, cap: 3 }.to_string();
+        let msg = CoreError::SessionsFull {
+            cap_kind: PendingCap::Opener,
+            open: 3,
+            cap: 3,
+        }
+        .to_string();
         assert!(msg.contains("from this opener"), "{msg}");
     }
 }

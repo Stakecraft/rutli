@@ -52,7 +52,10 @@ pub struct TrustAnchor {
 impl TrustAnchor {
     /// One log/print line: `subject=… notAfter=… sha256=…`.
     pub fn describe(&self) -> String {
-        format!("subject={:?} notAfter={} sha256={}", self.subject, self.not_after, self.sha256)
+        format!(
+            "subject={:?} notAfter={} sha256={}",
+            self.subject, self.not_after, self.sha256
+        )
     }
 }
 
@@ -90,7 +93,8 @@ pub fn load_trust_anchors(pem: &[u8], allow_expired: bool) -> Result<Vec<TrustAn
                 cert.validity().not_after
             ));
         }
-        let days_left = (cert.validity().not_after.timestamp() - now.timestamp()).div_euclid(86_400);
+        let days_left =
+            (cert.validity().not_after.timestamp() - now.timestamp()).div_euclid(86_400);
         out.push(TrustAnchor {
             der: der.to_vec(),
             subject,
@@ -175,9 +179,15 @@ pub fn pem_blocks(text: &[u8]) -> Result<Vec<PemBlock>, String> {
         let label = after[..label_end].to_string();
         let body_start = &after[label_end + 5..];
         let end_marker = format!("-----END {label}-----");
-        let body_end = body_start.find(&end_marker).ok_or("unterminated PEM block")?;
-        let body: Zeroizing<String> =
-            Zeroizing::new(body_start[..body_end].chars().filter(|c| !c.is_whitespace()).collect());
+        let body_end = body_start
+            .find(&end_marker)
+            .ok_or("unterminated PEM block")?;
+        let body: Zeroizing<String> = Zeroizing::new(
+            body_start[..body_end]
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect(),
+        );
         let der = base64::engine::general_purpose::STANDARD
             .decode(body.as_bytes())
             .map_err(|_| "PEM body is not base64".to_string())?;
@@ -194,9 +204,13 @@ mod tests {
     fn ca(f: impl FnOnce(&mut rcgen::CertificateParams)) -> (rcgen::Certificate, rcgen::KeyPair) {
         let key = rcgen::KeyPair::generate().unwrap();
         let mut p = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
-        p.distinguished_name.push(rcgen::DnType::CommonName, "test-ca");
+        p.distinguished_name
+            .push(rcgen::DnType::CommonName, "test-ca");
         p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        p.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign, rcgen::KeyUsagePurpose::CrlSign];
+        p.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
         f(&mut p);
         (p.self_signed(&key).unwrap(), key)
     }
@@ -206,7 +220,8 @@ mod tests {
         let (a, _) = ca(|_| {});
         let (b, _) = ca(|p| {
             p.distinguished_name = rcgen::DistinguishedName::new();
-            p.distinguished_name.push(rcgen::DnType::CommonName, "other-ca");
+            p.distinguished_name
+                .push(rcgen::DnType::CommonName, "other-ca");
         });
         // Text around the blocks, as `openssl pkcs12` writes it, is ignored.
         let pem = format!("Bag Attributes\n{}\n# comment\n{}", a.pem(), b.pem());
@@ -217,7 +232,10 @@ mod tests {
         assert_eq!(anchors[0].sha256, hex::encode(Sha256::digest(a.der())));
         assert!(anchors.iter().all(|a| a.valid_now && a.days_left > 365));
         let again = load_trust_anchors(to_pem(&anchors).as_bytes(), false).unwrap();
-        assert_eq!(again.iter().map(|a| &a.der).collect::<Vec<_>>(), anchors.iter().map(|a| &a.der).collect::<Vec<_>>());
+        assert_eq!(
+            again.iter().map(|a| &a.der).collect::<Vec<_>>(),
+            anchors.iter().map(|a| &a.der).collect::<Vec<_>>()
+        );
         assert!(anchors[0].describe().contains("notAfter="));
     }
 
@@ -227,10 +245,12 @@ mod tests {
         let leaf = {
             let key = rcgen::KeyPair::generate().unwrap();
             let mut p = rcgen::CertificateParams::new(vec!["x".into()]).unwrap();
-            p.distinguished_name.push(rcgen::DnType::CommonName, "cosigner1");
+            p.distinguished_name
+                .push(rcgen::DnType::CommonName, "cosigner1");
             p.signed_by(&key, &good, &good_key).unwrap()
         };
-        let (no_cert_sign, _) = ca(|p| p.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature]);
+        let (no_cert_sign, _) =
+            ca(|p| p.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature]);
         let (explicit_not_ca, _) = ca(|p| p.is_ca = rcgen::IsCa::ExplicitNoCa);
         let (no_bc, _) = ca(|p| p.is_ca = rcgen::IsCa::NoCa);
         for (what, bad, needle) in [
@@ -239,20 +259,35 @@ mod tests {
             ("CA=false", explicit_not_ca.pem(), "not a CA"),
             ("no basicConstraints", no_bc.pem(), "not a CA"),
         ] {
-            for (pem, index) in [(format!("{}{bad}", good.pem()), 1), (format!("{bad}{}", good.pem()), 0)] {
+            for (pem, index) in [
+                (format!("{}{bad}", good.pem()), 1),
+                (format!("{bad}{}", good.pem()), 0),
+            ] {
                 let e = load_trust_anchors(pem.as_bytes(), true).unwrap_err();
-                assert!(e.contains(needle) && e.contains(&format!("certificate {index}")), "{what}: {e}");
+                assert!(
+                    e.contains(needle) && e.contains(&format!("certificate {index}")),
+                    "{what}: {e}"
+                );
             }
         }
         // Not PEM certificates at all.
         let key = rcgen::KeyPair::generate().unwrap().serialize_pem();
         let e = load_trust_anchors(format!("{}{key}", good.pem()).as_bytes(), false).unwrap_err();
-        assert!(e.contains("PEM block 1") && e.contains("PRIVATE KEY"), "{e}");
+        assert!(
+            e.contains("PEM block 1") && e.contains("PRIVATE KEY"),
+            "{e}"
+        );
         let garbage = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
-        assert!(load_trust_anchors(garbage.as_bytes(), false).unwrap_err().contains("malformed"));
+        assert!(load_trust_anchors(garbage.as_bytes(), false)
+            .unwrap_err()
+            .contains("malformed"));
         let open = "-----BEGIN CERTIFICATE-----\nAAAA\n";
-        assert!(load_trust_anchors(open.as_bytes(), false).unwrap_err().contains("unterminated"));
-        assert!(load_trust_anchors(b"", false).unwrap_err().contains("no CERTIFICATE"));
+        assert!(load_trust_anchors(open.as_bytes(), false)
+            .unwrap_err()
+            .contains("unterminated"));
+        assert!(load_trust_anchors(b"", false)
+            .unwrap_err()
+            .contains("no CERTIFICATE"));
     }
 
     #[test]
@@ -264,7 +299,10 @@ mod tests {
         let (good, _) = ca(|_| {});
         let pem = format!("{}{}", expired.pem(), good.pem());
         let e = load_trust_anchors(pem.as_bytes(), false).unwrap_err();
-        assert!(e.contains("certificate 0") && e.contains("expired") && e.contains("allow_expired_ca"), "{e}");
+        assert!(
+            e.contains("certificate 0") && e.contains("expired") && e.contains("allow_expired_ca"),
+            "{e}"
+        );
         let anchors = load_trust_anchors(pem.as_bytes(), true).unwrap();
         assert!(!anchors[0].valid_now && anchors[0].days_left < 0);
         assert!(anchors[1].valid_now);

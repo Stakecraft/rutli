@@ -91,13 +91,23 @@ fn secret(k: &CantonPrivateKey) -> Vec<u8> {
 
 fn check(k: &CantonPrivateKey, v: &Vector) {
     assert_eq!(k.fingerprint(), v.fingerprint, "{}: fingerprint", v.name);
-    assert_eq!(k.canton_id.as_deref(), Some(v.fingerprint.as_str()), "{}: id", v.name);
+    assert_eq!(
+        k.canton_id.as_deref(),
+        Some(v.fingerprint.as_str()),
+        "{}: id",
+        v.name
+    );
     assert_eq!(k.spec(), v.spec, "{}: spec", v.name);
     assert_eq!(k.purpose, Some(v.purpose), "{}: purpose", v.name);
     let mut usage = k.usage.clone();
     usage.sort();
     assert_eq!(usage, v.usage, "{}: usage", v.name);
-    assert_eq!(k.format, Some(CryptoKeyFormat::DerPkcs8), "{}: Canton 3.6.1 writes PKCS#8", v.name);
+    assert_eq!(
+        k.format,
+        Some(CryptoKeyFormat::DerPkcs8),
+        "{}: Canton 3.6.1 writes PKCS#8",
+        v.name
+    );
 }
 
 #[test]
@@ -109,8 +119,12 @@ fn manifest_covers_every_key_spec_and_the_three_node_keys() {
     for name in ["namespace", "signing", "sequencer-auth", "encryption"] {
         assert!(keys.iter().any(|v| v.name == name), "no {name} vector");
     }
-    assert!(keys.iter().any(|v| v.spec == KeySpec::EcP256 && v.purpose == KeyPurpose::Signing));
-    assert!(keys.iter().any(|v| v.spec == KeySpec::EcP256 && v.purpose == KeyPurpose::Encryption));
+    assert!(keys
+        .iter()
+        .any(|v| v.spec == KeySpec::EcP256 && v.purpose == KeyPurpose::Signing));
+    assert!(keys
+        .iter()
+        .any(|v| v.spec == KeySpec::EcP256 && v.purpose == KeyPurpose::Encryption));
 }
 
 #[test]
@@ -129,7 +143,11 @@ fn every_stored_key_parses_and_matches_cantons_fingerprint() {
             KeyPurpose::Signing => KeyPurpose::Encryption,
             KeyPurpose::Encryption => KeyPurpose::Signing,
         };
-        assert!(parse_stored(&bytes, Some(other)).is_err(), "{}: wrong purpose accepted", v.name);
+        assert!(
+            parse_stored(&bytes, Some(other)).is_err(),
+            "{}: wrong purpose accepted",
+            v.name
+        );
     }
 }
 
@@ -138,12 +156,28 @@ fn every_export_parses_and_matches_the_stored_key() {
     for v in manifest().0 {
         let stored = parse_stored(&read(&format!("{}.stored.bin", v.name)), None).unwrap();
         let bytes = read(&format!("{}.export.bin", v.name));
-        for k in [parse(&bytes, None).unwrap(), parse_export(&bytes, None).unwrap()] {
+        for k in [
+            parse(&bytes, None).unwrap(),
+            parse_export(&bytes, None).unwrap(),
+        ] {
             check(&k, &v);
-            assert_eq!(k.source, Source::Export { password_protected: false });
-            assert_eq!(secret(&k), secret(&stored), "{}: export and stored differ", v.name);
+            assert_eq!(
+                k.source,
+                Source::Export {
+                    password_protected: false
+                }
+            );
+            assert_eq!(
+                secret(&k),
+                secret(&stored),
+                "{}: export and stored differ",
+                v.name
+            );
         }
-        assert!(matches!(parse(&bytes, Some(b"x")), Err(Error::NotPasswordProtected)));
+        assert!(matches!(
+            parse(&bytes, Some(b"x")),
+            Err(Error::NotPasswordProtected)
+        ));
     }
 }
 
@@ -156,11 +190,24 @@ fn every_password_protected_export_needs_the_right_password() {
 
         let k = parse(&bytes, Some(&pw)).unwrap();
         check(&k, &v);
-        assert_eq!(k.source, Source::Export { password_protected: true });
-        assert_eq!(secret(&k), secret(&stored), "{}: decrypted export differs", v.name);
+        assert_eq!(
+            k.source,
+            Source::Export {
+                password_protected: true
+            }
+        );
+        assert_eq!(
+            secret(&k),
+            secret(&stored),
+            "{}: decrypted export differs",
+            v.name
+        );
 
         assert!(matches!(parse(&bytes, None), Err(Error::PasswordRequired)));
-        assert!(matches!(parse_export(&bytes, None), Err(Error::PasswordRequired)));
+        assert!(matches!(
+            parse_export(&bytes, None),
+            Err(Error::PasswordRequired)
+        ));
         assert!(matches!(
             parse(&bytes, Some(b"rutli-test-vector-passwore")),
             Err(Error::WrongPasswordOrCorrupt)
@@ -172,7 +219,12 @@ fn every_password_protected_export_needs_the_right_password() {
 fn derived_public_keys_equal_cantons_public_keys() {
     for v in manifest().0 {
         let canton = parse_public_key(&read(&format!("{}.pub.bin", v.name))).unwrap();
-        assert_eq!(canton.fingerprint(), v.fingerprint, "{}: our fingerprint of Canton's key", v.name);
+        assert_eq!(
+            canton.fingerprint(),
+            v.fingerprint,
+            "{}: our fingerprint of Canton's key",
+            v.name
+        );
         assert_eq!(canton.purpose, v.purpose);
         let mut usage = canton.usage.clone();
         usage.sort();
@@ -182,7 +234,10 @@ fn derived_public_keys_equal_cantons_public_keys() {
         assert_eq!(ours.public, canton.public, "{}: derived public key", v.name);
         // Our SPKI encoding is byte-identical to Canton's (BouncyCastle's).
         assert_eq!(ours.public.spki_der(), canton.public.spki_der());
-        assert_eq!(PublicKey::from_spki_der(&ours.public.spki_der()).unwrap(), ours.public);
+        assert_eq!(
+            PublicKey::from_spki_der(&ours.public.spki_der()).unwrap(),
+            ours.public
+        );
     }
 }
 
@@ -197,8 +252,15 @@ fn stored_pkcs8(name: &str) -> Vec<u8> {
 
 fn pem(der: &[u8]) -> String {
     let b64 = base64::engine::general_purpose::STANDARD.encode(der);
-    let body: Vec<&str> = b64.as_bytes().chunks(64).map(|c| std::str::from_utf8(c).unwrap()).collect();
-    format!("-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n", body.join("\n"))
+    let body: Vec<&str> = b64
+        .as_bytes()
+        .chunks(64)
+        .map(|c| std::str::from_utf8(c).unwrap())
+        .collect();
+    format!(
+        "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+        body.join("\n")
+    )
 }
 
 #[test]
@@ -219,7 +281,10 @@ fn plain_pkcs8_der_and_pem_parse_for_every_spec() {
                 };
                 assert_eq!(k.purpose, implied);
             }
-            assert!(matches!(parse(&input, Some(b"pw")), Err(Error::NotPasswordProtected)));
+            assert!(matches!(
+                parse(&input, Some(b"pw")),
+                Err(Error::NotPasswordProtected)
+            ));
         }
     }
 }
@@ -232,12 +297,16 @@ fn ed25519_pkcs8_holds_the_rfc8032_seed() {
     assert_eq!(der.len(), 48);
     assert_eq!(hex::encode(&der[..16]), "302e020100300506032b657004220420");
     let k = parse_pkcs8(&der).unwrap();
-    let PrivateKeyMaterial::Ed25519 { seed } = &k.material else { panic!() };
+    let PrivateKeyMaterial::Ed25519 { seed } = &k.material else {
+        panic!()
+    };
     assert_eq!(&seed[..], &der[16..]);
     // And the seed signs under the namespace key, so it really is the seed (RFC 8032 keygen).
     use ed25519_dalek::{Signer, Verifier};
     let sk = ed25519_dalek::SigningKey::from_bytes(seed);
-    let PublicKey::Ed25519(pk) = k.public else { panic!() };
+    let PublicKey::Ed25519(pk) = k.public else {
+        panic!()
+    };
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).unwrap();
     vk.verify(b"m", &sk.sign(b"m")).unwrap();
 }
@@ -261,21 +330,33 @@ fn pkcs8_v2_with_a_matching_public_key_is_accepted_and_a_wrong_one_refused() {
         d.extend_from_slice(pk);
         d
     };
-    assert_eq!(parse_pkcs8(&v2(&pk_ok)).unwrap().fingerprint(), vector("namespace").fingerprint);
-    assert!(matches!(parse_pkcs8(&v2(&pk_bad)), Err(Error::PublicKeyMismatch(_))));
+    assert_eq!(
+        parse_pkcs8(&v2(&pk_ok)).unwrap().fingerprint(),
+        vector("namespace").fingerprint
+    );
+    assert!(matches!(
+        parse_pkcs8(&v2(&pk_bad)),
+        Err(Error::PublicKeyMismatch(_))
+    ));
 }
 
 #[test]
 fn sec1_embedded_public_key_must_match_the_scalar() {
     let mut der = stored_pkcs8("encryption");
-    let other = match parse_pkcs8(&stored_pkcs8("extra-ecp256-signing")).unwrap().public {
+    let other = match parse_pkcs8(&stored_pkcs8("extra-ecp256-signing"))
+        .unwrap()
+        .public
+    {
         PublicKey::EcP256(p) => p,
         _ => unreachable!(),
     };
     // The embedded point is the last 65 bytes of the structure.
     let n = der.len();
     der[n - 65..].copy_from_slice(&other);
-    assert!(matches!(parse_pkcs8(&der), Err(Error::PublicKeyMismatch(_))));
+    assert!(matches!(
+        parse_pkcs8(&der),
+        Err(Error::PublicKeyMismatch(_))
+    ));
 }
 
 #[test]
@@ -286,11 +367,19 @@ fn pkcs8_trailing_bytes_and_truncation_are_refused() {
         trailing.push(0);
         assert!(parse_pkcs8(&trailing).is_err(), "{}: trailing byte", v.name);
         for len in 0..der.len() {
-            assert!(parse_pkcs8(&der[..len]).is_err(), "{}: truncated to {len}", v.name);
+            assert!(
+                parse_pkcs8(&der[..len]).is_err(),
+                "{}: truncated to {len}",
+                v.name
+            );
         }
         let mut p = pem(&der);
         p.push_str("junk\n");
-        assert!(parse_pkcs8(p.as_bytes()).is_err(), "{}: data after PEM", v.name);
+        assert!(
+            parse_pkcs8(p.as_bytes()).is_err(),
+            "{}: data after PEM",
+            v.name
+        );
     }
 }
 
@@ -300,7 +389,10 @@ fn other_pem_labels_are_refused_with_a_hint() {
     let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
     for label in ["ENCRYPTED PRIVATE KEY", "EC PRIVATE KEY", "PUBLIC KEY"] {
         let p = format!("-----BEGIN {label}-----\n{b64}\n-----END {label}-----\n");
-        assert!(matches!(parse_pkcs8(p.as_bytes()), Err(Error::Unsupported(_))), "{label}");
+        assert!(
+            matches!(parse_pkcs8(p.as_bytes()), Err(Error::Unsupported(_))),
+            "{label}"
+        );
     }
 }
 
@@ -313,13 +405,29 @@ fn every_truncation_of_every_container_fails_cleanly() {
         for kind in ["stored", "export"] {
             let bytes = read(&format!("{}.{kind}.bin", v.name));
             for len in 0..bytes.len() {
-                assert!(parse(&bytes[..len], None).is_err(), "{} {kind} truncated to {len}", v.name);
+                assert!(
+                    parse(&bytes[..len], None).is_err(),
+                    "{} {kind} truncated to {len}",
+                    v.name
+                );
             }
         }
         // Password-protected: a few cut points (each attempt runs Argon2).
         let bytes = read(&format!("{}.export-pw.bin", v.name));
-        for len in [0, 1, 2, 10, bytes.len() / 2, bytes.len() - 20, bytes.len() - 1] {
-            assert!(parse(&bytes[..len], Some(&pw)).is_err(), "{} export-pw truncated to {len}", v.name);
+        for len in [
+            0,
+            1,
+            2,
+            10,
+            bytes.len() / 2,
+            bytes.len() - 20,
+            bytes.len() - 1,
+        ] {
+            assert!(
+                parse(&bytes[..len], Some(&pw)).is_err(),
+                "{} export-pw truncated to {len}",
+                v.name
+            );
         }
     }
 }
@@ -330,11 +438,19 @@ fn trailing_or_unknown_fields_are_refused() {
         for kind in ["stored", "export"] {
             let mut bytes = read(&format!("{}.{kind}.bin", v.name));
             bytes.push(0);
-            assert!(parse(&bytes, None).is_err(), "{} {kind}: trailing zero byte", v.name);
+            assert!(
+                parse(&bytes, None).is_err(),
+                "{} {kind}: trailing zero byte",
+                v.name
+            );
             bytes.pop();
             // A well-formed extra field 3 (varint) on the versioned wrapper.
             bytes.extend_from_slice(&[0x18, 0x01]);
-            assert!(parse(&bytes, None).is_err(), "{} {kind}: unknown field", v.name);
+            assert!(
+                parse(&bytes, None).is_err(),
+                "{} {kind}: unknown field",
+                v.name
+            );
         }
     }
 }
@@ -353,7 +469,12 @@ fn no_single_bit_flip_yields_a_different_key() {
                     let mut b = bytes.clone();
                     b[i] ^= 1 << bit;
                     if let Ok(k) = parse(&b, None) {
-                        assert_eq!(k.fingerprint(), reference.fingerprint(), "{} {kind} byte {i} bit {bit}", v.name);
+                        assert_eq!(
+                            k.fingerprint(),
+                            reference.fingerprint(),
+                            "{} {kind} byte {i} bit {bit}",
+                            v.name
+                        );
                         assert_eq!(secret(&k), secret(&reference));
                     }
                 }
@@ -467,10 +588,19 @@ fn legacy_raw_ed25519_and_legacy_der_keys_are_accepted() {
 
     // Legacy deprecated `scheme` instead of key_spec.
     let legacy_scheme = versioned(
-        &[enc_len(1, ns.fingerprint.as_bytes()), enc_varint(2, 3), enc_len(3, seed), enc_varint(4, 1), enc_len(5, &[1])]
-            .concat(),
+        &[
+            enc_len(1, ns.fingerprint.as_bytes()),
+            enc_varint(2, 3),
+            enc_len(3, seed),
+            enc_varint(4, 1),
+            enc_len(5, &[1]),
+        ]
+        .concat(),
     );
-    assert_eq!(parse(&legacy_scheme, None).unwrap().fingerprint(), ns.fingerprint);
+    assert_eq!(
+        parse(&legacy_scheme, None).unwrap().fingerprint(),
+        ns.fingerprint
+    );
 
     let ec = vector("extra-ecp256-signing");
     let der = stored_pkcs8(&ec.name);
@@ -481,7 +611,13 @@ fn legacy_raw_ed25519_and_legacy_der_keys_are_accepted() {
 
     let rsa = vector("extra-rsa2048-encryption");
     let der = stored_pkcs8(&rsa.name);
-    let msg = [enc_len(1, rsa.fingerprint.as_bytes()), enc_varint(2, 2), enc_len(3, &der), enc_varint(5, 2)].concat();
+    let msg = [
+        enc_len(1, rsa.fingerprint.as_bytes()),
+        enc_varint(2, 2),
+        enc_len(3, &der),
+        enc_varint(5, 2),
+    ]
+    .concat();
     let k = parse_stored(&versioned(&msg), Some(KeyPurpose::Encryption)).unwrap();
     assert_eq!(k.fingerprint(), rsa.fingerprint);
 }
@@ -493,7 +629,10 @@ fn a_wrong_id_is_a_public_key_mismatch() {
     let other = vector("signing");
     let der = stored_pkcs8("namespace");
     let doctored = versioned(&signing_key_msg(&other.fingerprint, 5, &der, &[1], 1));
-    assert!(matches!(parse(&doctored, None), Err(Error::PublicKeyMismatch(_))));
+    assert!(matches!(
+        parse(&doctored, None),
+        Err(Error::PublicKeyMismatch(_))
+    ));
     // Sanity: the same message with the right id parses.
     let good = versioned(&signing_key_msg(&ns.fingerprint, 5, &der, &[1], 1));
     assert_eq!(parse(&good, None).unwrap().fingerprint(), ns.fingerprint);
@@ -512,7 +651,10 @@ fn key_spec_must_match_the_key_material() {
     // Unsupported specs are refused, not mis-parsed.
     for spec in [3, 4, 5, 99] {
         let wrong = versioned(&signing_key_msg(&ns.fingerprint, 5, &der, &[1], spec));
-        assert!(matches!(parse(&wrong, None), Err(Error::Unsupported(_))), "spec {spec}");
+        assert!(
+            matches!(parse(&wrong, None), Err(Error::Unsupported(_))),
+            "spec {spec}"
+        );
     }
 }
 
@@ -537,12 +679,34 @@ fn unknown_password_schemes_are_refused_loudly() {
     let ct = proto_field(pbe, 1);
     let salt = proto_field(pbe, 4);
     for (sym, kdf) in [(2, 1), (1, 2), (0, 1), (1, 0)] {
-        let m = versioned(&[enc_len(1, ct), enc_varint(2, sym), enc_varint(3, kdf), enc_len(4, salt)].concat());
-        assert!(matches!(parse(&m, Some(&password())), Err(Error::Unsupported(_))), "{sym}/{kdf}");
+        let m = versioned(
+            &[
+                enc_len(1, ct),
+                enc_varint(2, sym),
+                enc_varint(3, kdf),
+                enc_len(4, salt),
+            ]
+            .concat(),
+        );
+        assert!(
+            matches!(parse(&m, Some(&password())), Err(Error::Unsupported(_))),
+            "{sym}/{kdf}"
+        );
     }
     // And the unmodified rebuild still decrypts, so the test exercises the scheme check only.
-    let m = versioned(&[enc_len(1, ct), enc_varint(2, 1), enc_varint(3, 1), enc_len(4, salt)].concat());
-    assert_eq!(parse(&m, Some(&password())).unwrap().fingerprint(), vector("namespace").fingerprint);
+    let m = versioned(
+        &[
+            enc_len(1, ct),
+            enc_varint(2, 1),
+            enc_varint(3, 1),
+            enc_len(4, salt),
+        ]
+        .concat(),
+    );
+    assert_eq!(
+        parse(&m, Some(&password())).unwrap().fingerprint(),
+        vector("namespace").fingerprint
+    );
 }
 
 #[test]
@@ -571,12 +735,20 @@ fn rsa_material_decrypts_what_cantons_public_key_encrypts() {
         .unwrap()
         .to_vec();
 
-    let k = parse(&read("extra-rsa2048-encryption.export-pw.bin"), Some(&password())).unwrap();
-    let PrivateKeyMaterial::Rsa2048 { pkcs8_der } = &k.material else { panic!() };
+    let k = parse(
+        &read("extra-rsa2048-encryption.export-pw.bin"),
+        Some(&password()),
+    )
+    .unwrap();
+    let PrivateKeyMaterial::Rsa2048 { pkcs8_der } = &k.material else {
+        panic!()
+    };
     let sk = OaepPrivateDecryptingKey::new(PrivateDecryptingKey::from_pkcs8(pkcs8_der).unwrap())
         .unwrap();
     let mut out = vec![0u8; 256];
-    let pt = sk.decrypt(&OAEP_SHA256_MGF1SHA256, &ct, &mut out, None).unwrap();
+    let pt = sk
+        .decrypt(&OAEP_SHA256_MGF1SHA256, &ct, &mut out, None)
+        .unwrap();
     assert_eq!(pt, b"view key");
 }
 
@@ -584,19 +756,28 @@ fn rsa_material_decrypts_what_cantons_public_key_encrypts() {
 fn ecies_scalar_agrees_with_cantons_public_point() {
     use aws_lc_rs::agreement::{agree, PrivateKey, UnparsedPublicKey, ECDH_P256};
     let canton = parse_public_key(&read("encryption.pub.bin")).unwrap();
-    let PublicKey::EcP256(point) = canton.public else { panic!() };
+    let PublicKey::EcP256(point) = canton.public else {
+        panic!()
+    };
 
     let k = parse(&read("encryption.stored.bin"), None).unwrap();
-    let PrivateKeyMaterial::EcP256 { scalar } = &k.material else { panic!() };
+    let PrivateKeyMaterial::EcP256 { scalar } = &k.material else {
+        panic!()
+    };
     let ours = PrivateKey::from_private_key(&ECDH_P256, scalar.as_slice()).unwrap();
 
     let eph = PrivateKey::generate(&ECDH_P256).unwrap();
     let eph_pub = eph.compute_public_key().unwrap();
-    let z1 = agree(&eph, UnparsedPublicKey::new(&ECDH_P256, point), (), |z| Ok(z.to_vec()))
-        .unwrap();
-    let z2 = agree(&ours, UnparsedPublicKey::new(&ECDH_P256, eph_pub.as_ref()), (), |z| {
+    let z1 = agree(&eph, UnparsedPublicKey::new(&ECDH_P256, point), (), |z| {
         Ok(z.to_vec())
     })
+    .unwrap();
+    let z2 = agree(
+        &ours,
+        UnparsedPublicKey::new(&ECDH_P256, eph_pub.as_ref()),
+        (),
+        |z| Ok(z.to_vec()),
+    )
     .unwrap();
     assert_eq!(z1, z2);
 }

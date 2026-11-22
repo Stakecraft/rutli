@@ -48,7 +48,9 @@ pub enum CoreError {
     #[error("nonce store: {0}")]
     NonceStore(String),
 
-    #[error("nonce for session {0} was already used — refusing to sign (reuse leaks the key share)")]
+    #[error(
+        "nonce for session {0} was already used — refusing to sign (reuse leaks the key share)"
+    )]
     NonceReuse(String),
 
     #[error("unknown signing session: {0}")]
@@ -60,13 +62,23 @@ pub enum CoreError {
     /// A round 2 or an abort for a live session that another caller opened
     /// ([`session::SessionOwner`]). Refused before anything is taken: the session keeps its
     /// nonces for the caller that opened it.
-    #[error("sign session {session} was opened by {owner}; refusing a round 2 or abort from {caller}")]
-    NotSessionOwner { session: String, owner: String, caller: String },
+    #[error(
+        "sign session {session} was opened by {owner}; refusing a round 2 or abort from {caller}"
+    )]
+    NotSessionOwner {
+        session: String,
+        owner: String,
+        caller: String,
+    },
 
     /// Round 1 refused because one of the caps on sessions waiting for round 2 is reached
     /// ([`session::PendingCaps`]). Nothing was opened.
     #[error("{open} sign sessions are waiting for round 2 {}; at most {cap} — refusing more", .cap_kind.what())]
-    SessionsFull { cap_kind: session::PendingCap, open: usize, cap: usize },
+    SessionsFull {
+        cap_kind: session::PendingCap,
+        open: usize,
+        cap: usize,
+    },
 
     /// Round 2 for a session does not match what its round 1 was bound to (key, message, signer
     /// set, this cosigner's own commitment, or — later — the signing intent). Refused before the

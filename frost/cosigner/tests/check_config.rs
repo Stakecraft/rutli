@@ -39,8 +39,16 @@ fn enforced() -> serde_json::Value {
 fn run(dir: &Path, cfg: &serde_json::Value, args: &[&str]) -> (i32, String) {
     let path = dir.join("cosigner.json");
     std::fs::write(&path, serde_json::to_string_pretty(cfg).unwrap()).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_rutli-cosigner")).arg("--config").arg(&path).args(args).output().unwrap();
-    (out.status.code().unwrap(), String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr))
+    let out = Command::new(env!("CARGO_BIN_EXE_rutli-cosigner"))
+        .arg("--config")
+        .arg(&path)
+        .args(args)
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap(),
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr),
+    )
 }
 
 #[test]
@@ -50,7 +58,11 @@ fn check_config_lists_findings_under_any_profile_and_the_node_refuses_under_prod
     // Every required setting on; no approval rule is advisory only.
     let (code, out) = run(tmp.path(), &enforced(), &["check-config"]);
     assert_eq!(code, 0, "{out}");
-    assert!(out.contains("0 required and 1 advisory") && out.contains("[advisory] signing_policy.rules"), "{out}");
+    assert!(
+        out.contains("0 required and 1 advisory")
+            && out.contains("[advisory] signing_policy.rules"),
+        "{out}"
+    );
     assert!(out.contains("meets the production profile"), "{out}");
 
     // Two gaps: listed by check-config (exit 1), and the node refuses to load the config at all,
@@ -60,12 +72,22 @@ fn check_config_lists_findings_under_any_profile_and_the_node_refuses_under_prod
     gaps["keyfile"]["accept_v1"] = true.into();
     let (code, out) = run(tmp.path(), &gaps, &["check-config"]);
     assert_eq!(code, 1, "{out}");
-    assert!(out.contains("[required] signing_policy.require_epoch_match: false"), "{out}");
+    assert!(
+        out.contains("[required] signing_policy.require_epoch_match: false"),
+        "{out}"
+    );
     assert!(out.contains("[required] keyfile.accept_v1"), "{out}");
     let (code, out) = run(tmp.path(), &gaps, &["health"]);
     assert_eq!(code, 1, "{out}");
-    assert!(out.contains("profile is \"production\"") && out.contains("2 enforcement setting(s)"), "{out}");
-    assert!(out.contains("signing_policy.require_epoch_match") && out.contains("docs/production-profile.md"), "{out}");
+    assert!(
+        out.contains("profile is \"production\"") && out.contains("2 enforcement setting(s)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("signing_policy.require_epoch_match")
+            && out.contains("docs/production-profile.md"),
+        "{out}"
+    );
 
     // The same file as lab: check-config still lists the gaps; the node loads it.
     gaps["profile"] = "lab".into();

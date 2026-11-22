@@ -95,7 +95,10 @@ impl Gates {
     fn poll_pass(&self, cx: &Context<'_>) -> Poll<std::io::Result<()>> {
         match self.state() {
             GateState::Open => Poll::Ready(Ok(())),
-            GateState::Refused => Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset (memnet fault)"))),
+            GateState::Refused => Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "connection reset (memnet fault)",
+            ))),
             GateState::Blackhole => {
                 for g in &self.0 {
                     g.park(cx);
@@ -104,7 +107,10 @@ impl Gates {
                 match self.state() {
                     GateState::Blackhole => Poll::Pending,
                     GateState::Open => Poll::Ready(Ok(())),
-                    GateState::Refused => Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset (memnet fault)"))),
+                    GateState::Refused => Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "connection reset (memnet fault)",
+                    ))),
                 }
             }
         }
@@ -127,7 +133,11 @@ impl Drop for GatedIo {
 }
 
 impl AsyncRead for GatedIo {
-    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         match self.gates.poll_pass(cx) {
             Poll::Ready(Ok(())) => Pin::new(&mut self.io).poll_read(cx, buf),
             other => other,
@@ -136,9 +146,16 @@ impl AsyncRead for GatedIo {
 }
 
 impl AsyncWrite for GatedIo {
-    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
         if self.gates.state() == GateState::Refused {
-            return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset (memnet fault)")));
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "connection reset (memnet fault)",
+            )));
         }
         Pin::new(&mut self.io).poll_write(cx, buf)
     }
@@ -156,18 +173,29 @@ pub struct MemIo(GatedIo);
 impl Connected for MemIo {
     type ConnectInfo = TcpConnectInfo;
     fn connect_info(&self) -> TcpConnectInfo {
-        TcpConnectInfo { local_addr: None, remote_addr: None }
+        TcpConnectInfo {
+            local_addr: None,
+            remote_addr: None,
+        }
     }
 }
 
 impl AsyncRead for MemIo {
-    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.0).poll_read(cx, buf)
     }
 }
 
 impl AsyncWrite for MemIo {
-    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
         Pin::new(&mut self.0).poll_write(cx, buf)
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
@@ -209,15 +237,27 @@ impl MemNet {
 
     /// Listen at `authority` (`host:port`); replaces whatever listened there (a node restarted
     /// with other material, or an impostor taking over the address).
-    pub fn listen(&self, authority: &str) -> tokio_stream::wrappers::UnboundedReceiverStream<std::io::Result<MemIo>> {
+    pub fn listen(
+        &self,
+        authority: &str,
+    ) -> tokio_stream::wrappers::UnboundedReceiverStream<std::io::Result<MemIo>> {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.net.lock().unwrap().routes.insert(authority.to_string(), Route { incoming: tx, gate: Arc::default() });
+        self.net.lock().unwrap().routes.insert(
+            authority.to_string(),
+            Route {
+                incoming: tx,
+                gate: Arc::default(),
+            },
+        );
         tokio_stream::wrappers::UnboundedReceiverStream::new(rx)
     }
 
     /// A new server under `authority`: the connections to the old one stay blackholed for good
     /// (no heal reaches them), new dials reach the new listener.
-    pub fn relisten(&self, authority: &str) -> tokio_stream::wrappers::UnboundedReceiverStream<std::io::Result<MemIo>> {
+    pub fn relisten(
+        &self,
+        authority: &str,
+    ) -> tokio_stream::wrappers::UnboundedReceiverStream<std::io::Result<MemIo>> {
         if let Some(old) = self.net.lock().unwrap().routes.get(authority) {
             old.gate.set(Fault::Blackhole);
         }
@@ -238,27 +278,51 @@ impl MemNet {
     }
 
     fn link(&self, from: &str, authority: &str) -> Arc<Gate> {
-        self.net.lock().unwrap().links.entry((from.to_string(), authority.to_string())).or_default().clone()
+        self.net
+            .lock()
+            .unwrap()
+            .links
+            .entry((from.to_string(), authority.to_string()))
+            .or_default()
+            .clone()
     }
 
     /// How many connections dialler `from` ("" for [`MemNet::dialer`]) opened to `authority`.
     pub fn dials(&self, from: &str, authority: &str) -> usize {
-        self.net.lock().unwrap().dials.get(&format!("{from}->{authority}")).copied().unwrap_or(0)
+        self.net
+            .lock()
+            .unwrap()
+            .dials
+            .get(&format!("{from}->{authority}"))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Client ends of `from` to `authority` still open (dropped when the client's connection ends).
     pub fn live(&self, from: &str, authority: &str) -> usize {
-        self.net.lock().unwrap().live.get(&format!("{from}->{authority}")).map(|l| l.load(Ordering::SeqCst)).unwrap_or(0)
+        self.net
+            .lock()
+            .unwrap()
+            .live
+            .get(&format!("{from}->{authority}"))
+            .map(|l| l.load(Ordering::SeqCst))
+            .unwrap_or(0)
     }
 
     /// A connector that opens a new in-memory connection to the listener at the URI's authority.
     pub fn dialer(&self) -> MemDial {
-        MemDial { net: self.clone(), from: None }
+        MemDial {
+            net: self.clone(),
+            from: None,
+        }
     }
 
     /// [`MemNet::dialer`] as dialler `from`, whose links [`MemNet::fault_link`] can cut.
     pub fn dialer_from(&self, from: &str) -> MemDial {
-        MemDial { net: self.clone(), from: Some(from.to_string()) }
+        MemDial {
+            net: self.clone(),
+            from: Some(from.to_string()),
+        }
     }
 }
 
@@ -281,7 +345,8 @@ impl std::future::Future for Passable {
 impl tonic::codegen::Service<Uri> for MemDial {
     type Response = TokioIo<GatedIo>;
     type Error = std::io::Error;
-    type Future = Pin<Box<dyn std::future::Future<Output = std::io::Result<TokioIo<GatedIo>>> + Send>>;
+    type Future =
+        Pin<Box<dyn std::future::Future<Output = std::io::Result<TokioIo<GatedIo>>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Poll::Ready(Ok(()))
@@ -293,17 +358,32 @@ impl tonic::codegen::Service<Uri> for MemDial {
         let counter = format!("{}->{authority}", self.from.as_deref().unwrap_or(""));
         let net = self.net.clone();
         Box::pin(async move {
-            let gate = net.net.lock().unwrap().routes.get(&authority).map(|r| r.gate.clone());
+            let gate = net
+                .net
+                .lock()
+                .unwrap()
+                .routes
+                .get(&authority)
+                .map(|r| r.gate.clone());
             let Some(gate) = gate else {
-                return Err(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, format!("nothing listens at {authority}")));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    format!("nothing listens at {authority}"),
+                ));
             };
             let gates = Gates(std::iter::once(gate).chain(link).collect());
             match gates.state() {
                 GateState::Refused => {
-                    return Err(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused (memnet fault)"))
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        "connection refused (memnet fault)",
+                    ))
                 }
                 GateState::Blackhole => Passable(gates.clone()).await.map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused (memnet fault)")
+                    std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        "connection refused (memnet fault)",
+                    )
                 })?,
                 GateState::Open => {}
             }
@@ -312,21 +392,42 @@ impl tonic::codegen::Service<Uri> for MemDial {
                 let mut n = net.net.lock().unwrap();
                 *n.dials.entry(counter.clone()).or_default() += 1;
                 let live = n.live.entry(counter).or_default().clone();
-                let route = n.routes.get(&authority).map(|r| (r.incoming.clone(), r.gate.clone()));
+                let route = n
+                    .routes
+                    .get(&authority)
+                    .map(|r| (r.incoming.clone(), r.gate.clone()));
                 let Some((tx, gate)) = route else {
-                    return Err(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, format!("nothing listens at {authority}")));
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        format!("nothing listens at {authority}"),
+                    ));
                 };
                 (tx, gate, live)
             };
-            let gates = Gates(std::iter::once(gate).chain(gates.0.into_iter().skip(1)).collect());
+            let gates = Gates(
+                std::iter::once(gate)
+                    .chain(gates.0.into_iter().skip(1))
+                    .collect(),
+            );
             let (client, server) = tokio::io::duplex(64 * 1024);
-            let server = MemIo(GatedIo { io: server, gates: gates.clone(), live: None });
+            let server = MemIo(GatedIo {
+                io: server,
+                gates: gates.clone(),
+                live: None,
+            });
             match tx.send(Ok(server)) {
                 Ok(()) => {
                     live.fetch_add(1, Ordering::SeqCst);
-                    Ok(TokioIo::new(GatedIo { io: client, gates, live: Some(live) }))
+                    Ok(TokioIo::new(GatedIo {
+                        io: client,
+                        gates,
+                        live: Some(live),
+                    }))
                 }
-                Err(_) => Err(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "listener closed")),
+                Err(_) => Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "listener closed",
+                )),
             }
         })
     }

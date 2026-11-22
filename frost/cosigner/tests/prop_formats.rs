@@ -10,7 +10,9 @@ use zeroize::Zeroizing;
 
 use rutli_cosigner::export;
 use rutli_cosigner::hosted::{HostedKey, HostedSpec};
-use rutli_cosigner::seal::{self, header_aad, KeyFileBinding, KeyFileHeader, NodeSealBundle, RecordKind, RecordMeta, Sealer};
+use rutli_cosigner::seal::{
+    self, header_aad, KeyFileBinding, KeyFileHeader, NodeSealBundle, RecordKind, RecordMeta, Sealer,
+};
 use rutli_cosigner::share_delivery::{canonical_fingerprint, ed25519_fingerprint};
 
 /// `cases` per test, unless `PROPTEST_CASES` is set (a longer local run).
@@ -23,7 +25,12 @@ fn config(cases: u32) -> ProptestConfig {
     c
 }
 
-const KINDS: [RecordKind; 4] = [RecordKind::FrostShare, RecordKind::HostedKey, RecordKind::Tombstone, RecordKind::Recipient];
+const KINDS: [RecordKind; 4] = [
+    RecordKind::FrostShare,
+    RecordKind::HostedKey,
+    RecordKind::Tombstone,
+    RecordKind::Recipient,
+];
 
 fn kind() -> impl Strategy<Value = RecordKind> {
     prop::sample::select(KINDS.to_vec())
@@ -45,18 +52,28 @@ fn sealer(dek: [u8; 32], node: u16, write_version: u8) -> Sealer {
 }
 
 fn header() -> impl Strategy<Value = KeyFileHeader> {
-    (".{0,12}", ".{0,12}", any::<u16>(), ".{0,12}", ".{0,12}", any::<u64>(), "[0-9a-f]{0,16}", "[0-9a-f]{0,8}").prop_map(
-        |(fmt, cluster, node, key_id, kind, epoch, digest, dek_id)| KeyFileHeader {
-            fmt,
-            cluster,
-            node,
-            key_id,
-            kind,
-            epoch,
-            digest,
-            dek_id,
-        },
+    (
+        ".{0,12}",
+        ".{0,12}",
+        any::<u16>(),
+        ".{0,12}",
+        ".{0,12}",
+        any::<u64>(),
+        "[0-9a-f]{0,16}",
+        "[0-9a-f]{0,8}",
     )
+        .prop_map(
+            |(fmt, cluster, node, key_id, kind, epoch, digest, dek_id)| KeyFileHeader {
+                fmt,
+                cluster,
+                node,
+                key_id,
+                kind,
+                epoch,
+                digest,
+                dek_id,
+            },
+        )
 }
 
 proptest! {

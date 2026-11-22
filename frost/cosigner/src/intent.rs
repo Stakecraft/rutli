@@ -121,18 +121,29 @@ impl DeleteGrants {
     /// Load `path`, compare every delete-role CN's capability fingerprint under `policy` and
     /// `approvers`, record what changed as of `now_ms`, and write the file back (atomically) if
     /// anything did.
-    pub fn load_and_update(path: &std::path::Path, policy: &DeletePolicy, approvers: &SigningPolicyConfig, now_ms: u64) -> Result<Self> {
+    pub fn load_and_update(
+        path: &std::path::Path,
+        policy: &DeletePolicy,
+        approvers: &SigningPolicyConfig,
+        now_ms: u64,
+    ) -> Result<Self> {
         let existing: Option<GrantsFile> = match std::fs::read(path) {
             Ok(bytes) => Some(serde_json::from_slice(&bytes).map_err(|e| {
-                DaemonError::Config(format!("{} does not parse ({e}) — move it aside to reset it", path.display()))
+                DaemonError::Config(format!(
+                    "{} does not parse ({e}) — move it aside to reset it",
+                    path.display()
+                ))
             })?),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e.into()),
         };
         let first = existing.is_none();
         let old = existing.unwrap_or_default();
-        let mut approver_keys: Vec<(String, String)> =
-            approvers.approvers.iter().map(|a| (a.id.clone(), a.public_key_spki_b64.trim().to_string())).collect();
+        let mut approver_keys: Vec<(String, String)> = approvers
+            .approvers
+            .iter()
+            .map(|a| (a.id.clone(), a.public_key_spki_b64.trim().to_string()))
+            .collect();
         approver_keys.sort();
         let mut new = GrantsFile::default();
         for cn in &policy.allowlist {
@@ -141,14 +152,21 @@ impl DeleteGrants {
                 a.sort();
             }
             let fingerprint = hex::encode(Sha256::digest(
-                serde_json::to_vec(&(acl, policy.approval_threshold, &approver_keys)).expect("serializes"),
+                serde_json::to_vec(&(acl, policy.approval_threshold, &approver_keys))
+                    .expect("serializes"),
             ));
             let since_ms = match old.signers.get(cn) {
                 Some(e) if e.fingerprint == fingerprint => e.since_ms,
                 _ if first => 0,
                 _ => now_ms,
             };
-            new.signers.insert(cn.clone(), GrantEntry { fingerprint, since_ms });
+            new.signers.insert(
+                cn.clone(),
+                GrantEntry {
+                    fingerprint,
+                    since_ms,
+                },
+            );
         }
         if first || new.signers != old.signers {
             for (cn, e) in &new.signers {
@@ -172,7 +190,13 @@ impl DeleteGrants {
                 std::fs::File::open(dir)?.sync_all()?;
             }
         }
-        Ok(Self { since_ms: new.signers.into_iter().map(|(cn, e)| (cn, e.since_ms)).collect() })
+        Ok(Self {
+            since_ms: new
+                .signers
+                .into_iter()
+                .map(|(cn, e)| (cn, e.since_ms))
+                .collect(),
+        })
     }
 
     /// For tests: explicit grant times.
@@ -236,12 +260,18 @@ pub const DELETE_APPROVAL_KEY_PREFIX: &str = "delete:";
 /// [`approval_request_id`]`("delete:" ‖ key_id, delete_digest, nonce)`. Sign approvals keep the
 /// driver's format unchanged.
 pub fn delete_approval_request_id(key_id: &str, delete_digest: &[u8], nonce: &[u8]) -> String {
-    approval_request_id(&format!("{DELETE_APPROVAL_KEY_PREFIX}{key_id}"), delete_digest, nonce)
+    approval_request_id(
+        &format!("{DELETE_APPROVAL_KEY_PREFIX}{key_id}"),
+        delete_digest,
+        nonce,
+    )
 }
 
 /// DER prefix of an Ed25519 SubjectPublicKeyInfo (RFC 8410): SEQUENCE { SEQUENCE { 1.3.101.112 },
 /// BIT STRING 0x00 ‖ key }.
-const ED25519_SPKI_PREFIX: [u8; 12] = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+const ED25519_SPKI_PREFIX: [u8; 12] = [
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+];
 
 /// The raw 32-byte Ed25519 key of an approver, from the base64 DER SubjectPublicKeyInfo the
 /// driver's approval policy also uses.
@@ -259,7 +289,10 @@ pub fn ed25519_key_from_spki_b64(b64: &str) -> std::result::Result<[u8; 32], Str
 
 /// Sign `intent` with `signer` (an mTLS identity): what the driver does with its own key. For
 /// tests and tools; the driver has its own implementation (FrostBackend, Scala).
-pub fn sign_intent(signer: &crate::request_auth::NodeSigner, intent: &pb::SignIntent) -> Result<pb::SignedIntent> {
+pub fn sign_intent(
+    signer: &crate::request_auth::NodeSigner,
+    intent: &pb::SignIntent,
+) -> Result<pb::SignedIntent> {
     let bytes = intent.encode_to_vec();
     let mut msg = INTENT_CONTEXT.to_vec();
     msg.extend_from_slice(&bytes);
@@ -291,15 +324,20 @@ pub fn ceremony_id_for(kind: CeremonyKind, request_id: &[u8; REQUEST_ID_LEN]) ->
 /// itself ([`IntentVerifier::verify_ceremony`]), so a leader that derives another id is refused.
 pub fn ceremony_id_of(signed: &pb::SignedIntent, kind: CeremonyKind) -> Result<String> {
     if signed.intent.is_empty() || signed.intent.len() > MAX_INTENT_BYTES {
-        return Err(refused_ceremony("malformed", format!("intent of {} bytes", signed.intent.len())));
+        return Err(refused_ceremony(
+            "malformed",
+            format!("intent of {} bytes", signed.intent.len()),
+        ));
     }
     let intent = pb::SignIntent::decode(signed.intent.as_slice())
         .map_err(|e| refused_ceremony("malformed", format!("intent does not decode: {e}")))?;
-    let request_id: [u8; REQUEST_ID_LEN] = intent
-        .request_id
-        .as_slice()
-        .try_into()
-        .map_err(|_| refused_ceremony("malformed", format!("request id of {} bytes", intent.request_id.len())))?;
+    let request_id: [u8; REQUEST_ID_LEN] =
+        intent.request_id.as_slice().try_into().map_err(|_| {
+            refused_ceremony(
+                "malformed",
+                format!("request id of {} bytes", intent.request_id.len()),
+            )
+        })?;
     Ok(ceremony_id_for(kind, &request_id))
 }
 
@@ -315,15 +353,20 @@ pub fn generate_ceremony_id(request_id: &[u8; REQUEST_ID_LEN]) -> String {
 /// binding itself ([`IntentVerifier::verify_generate`]).
 pub fn generate_ceremony_id_of(signed: &pb::SignedIntent) -> Result<String> {
     if signed.intent.is_empty() || signed.intent.len() > MAX_INTENT_BYTES {
-        return Err(refused_ceremony("malformed", format!("intent of {} bytes", signed.intent.len())));
+        return Err(refused_ceremony(
+            "malformed",
+            format!("intent of {} bytes", signed.intent.len()),
+        ));
     }
     let intent = pb::SignIntent::decode(signed.intent.as_slice())
         .map_err(|e| refused_ceremony("malformed", format!("intent does not decode: {e}")))?;
-    let request_id: [u8; REQUEST_ID_LEN] = intent
-        .request_id
-        .as_slice()
-        .try_into()
-        .map_err(|_| refused_ceremony("malformed", format!("request id of {} bytes", intent.request_id.len())))?;
+    let request_id: [u8; REQUEST_ID_LEN] =
+        intent.request_id.as_slice().try_into().map_err(|_| {
+            refused_ceremony(
+                "malformed",
+                format!("request id of {} bytes", intent.request_id.len()),
+            )
+        })?;
     Ok(generate_ceremony_id(&request_id))
 }
 
@@ -523,7 +566,12 @@ impl IntentVerifier {
         self.check_acl_with(cn, key_id, refused)
     }
 
-    fn check_acl_with(&self, cn: &str, key_id: &str, refuse: fn(&'static str, String) -> DaemonError) -> Result<()> {
+    fn check_acl_with(
+        &self,
+        cn: &str,
+        key_id: &str,
+        refuse: fn(&'static str, String) -> DaemonError,
+    ) -> Result<()> {
         match self.acl.get(cn) {
             Some(prefixes) if prefixes.iter().any(|p| key_id.starts_with(p.as_str())) => Ok(()),
             Some(_) => Err(refuse(
@@ -579,17 +627,27 @@ impl IntentVerifier {
         refuse: fn(&'static str, String) -> DaemonError,
     ) -> Result<(String, [u8; 32], pb::SignIntent)> {
         if signed.intent.is_empty() || signed.intent.len() > MAX_INTENT_BYTES {
-            return Err(refuse("malformed", format!("intent of {} bytes", signed.intent.len())));
+            return Err(refuse(
+                "malformed",
+                format!("intent of {} bytes", signed.intent.len()),
+            ));
         }
-        let leaf = crate::request_auth::verify_chain(&signed.signer_chain, &self.ca_pem, self.allow_expired_ca)
-            .map_err(|e| refuse("certificate", format!("certificate: {e}")))?;
+        let leaf = crate::request_auth::verify_chain(
+            &signed.signer_chain,
+            &self.ca_pem,
+            self.allow_expired_ca,
+        )
+        .map_err(|e| refuse("certificate", format!("certificate: {e}")))?;
         if leaf.client_auth == Some(false) {
             return Err(refuse(
                 "certificate",
                 "the signing certificate's extendedKeyUsage lacks clientAuth".into(),
             ));
         }
-        let cn = leaf.cn.clone().ok_or_else(|| refuse("certificate", "the signing certificate has no CN".into()))?;
+        let cn = leaf
+            .cn
+            .clone()
+            .ok_or_else(|| refuse("certificate", "the signing certificate has no CN".into()))?;
         role(&cn).map_err(|why| refuse("signer", why))?;
         self.check_pin_with(&cn, &leaf.spki_sha256, refuse)?;
         let mut msg = Vec::with_capacity(INTENT_CONTEXT.len() + signed.intent.len());
@@ -600,12 +658,18 @@ impl IntentVerifier {
         let intent = pb::SignIntent::decode(signed.intent.as_slice())
             .map_err(|e| refuse("malformed", format!("intent does not decode: {e}")))?;
         if intent.version != INTENT_VERSION {
-            return Err(refuse("malformed", format!("intent version {} (this node knows 1)", intent.version)));
+            return Err(refuse(
+                "malformed",
+                format!("intent version {} (this node knows 1)", intent.version),
+            ));
         }
         if intent.cluster_id != self.cluster_id {
             return Err(refuse(
                 "cluster",
-                format!("intent is for cluster {:?}, this is {}", intent.cluster_id, self.cluster_id),
+                format!(
+                    "intent is for cluster {:?}, this is {}",
+                    intent.cluster_id, self.cluster_id
+                ),
             ));
         }
         Ok((cn, leaf.spki_sha256, intent))
@@ -616,7 +680,13 @@ impl IntentVerifier {
     /// cluster, purpose `delete-key`, this key and its [`delete_digest`], within its validity
     /// (or, for [`Expiry::Propagated`], as of the delete — see there), the delete ACL, and the delete
     /// approvals. Every failure is [`DaemonError::PolicyRefused`].
-    pub fn verify_delete(&self, signed: &pb::SignedIntent, key_id: &str, now_ms: u64, expiry: Expiry) -> Result<VerifiedIntent> {
+    pub fn verify_delete(
+        &self,
+        signed: &pb::SignedIntent,
+        key_id: &str,
+        now_ms: u64,
+        expiry: Expiry,
+    ) -> Result<VerifiedIntent> {
         if !self.deletes_enabled() {
             return Err(refused_delete(
                 "disabled",
@@ -635,21 +705,40 @@ impl IntentVerifier {
             refused_delete,
         )?;
         if intent.purpose != PURPOSE_DELETE_KEY {
-            return Err(refused_delete("purpose", format!("intent purpose {:?}, expected \"delete-key\"", intent.purpose)));
+            return Err(refused_delete(
+                "purpose",
+                format!(
+                    "intent purpose {:?}, expected \"delete-key\"",
+                    intent.purpose
+                ),
+            ));
         }
         if intent.key_id != key_id {
-            return Err(refused_delete("key", format!("intent deletes {}, not {key_id}", intent.key_id)));
+            return Err(refused_delete(
+                "key",
+                format!("intent deletes {}, not {key_id}", intent.key_id),
+            ));
         }
         if intent.digest != delete_digest(key_id) {
-            return Err(refused_delete("malformed", "intent digest is not the delete digest of the key".into()));
+            return Err(refused_delete(
+                "malformed",
+                "intent digest is not the delete digest of the key".into(),
+            ));
         }
-        let request_id: [u8; REQUEST_ID_LEN] = intent
-            .request_id
-            .as_slice()
-            .try_into()
-            .map_err(|_| refused_delete("malformed", format!("request id of {} bytes", intent.request_id.len())))?;
+        let request_id: [u8; REQUEST_ID_LEN] =
+            intent.request_id.as_slice().try_into().map_err(|_| {
+                refused_delete(
+                    "malformed",
+                    format!("request id of {} bytes", intent.request_id.len()),
+                )
+            })?;
         match expiry {
-            Expiry::Enforce => self.check_times_with(intent.issued_at_ms, intent.not_after_ms, now_ms, refused_delete)?,
+            Expiry::Enforce => self.check_times_with(
+                intent.issued_at_ms,
+                intent.not_after_ms,
+                now_ms,
+                refused_delete,
+            )?,
             // Long expired is fine for a propagated tombstone; a validity window that was never
             // acceptable, an issue time in the future, or a deletion outside the window is not.
             Expiry::Propagated { deleted_at_ms } => {
@@ -657,7 +746,10 @@ impl IntentVerifier {
                     || intent.not_after_ms - intent.issued_at_ms > self.max_lifetime_ms
                     || intent.issued_at_ms > now_ms.saturating_add(self.skew_ms)
                 {
-                    return Err(refused_delete("expiry", "the intent's validity window is not acceptable".into()));
+                    return Err(refused_delete(
+                        "expiry",
+                        "the intent's validity window is not acceptable".into(),
+                    ));
                 }
                 if deleted_at_ms.saturating_add(self.skew_ms) < intent.issued_at_ms
                     || deleted_at_ms > intent.not_after_ms.saturating_add(self.skew_ms)
@@ -698,7 +790,11 @@ impl IntentVerifier {
         let approvers = match self.delete.approval_threshold {
             0 => Vec::new(),
             t => {
-                let request_id = delete_approval_request_id(&intent.key_id, &intent.digest, &intent.approval_nonce);
+                let request_id = delete_approval_request_id(
+                    &intent.key_id,
+                    &intent.digest,
+                    &intent.approval_nonce,
+                );
                 self.count_approvals(&intent, &request_id, t, refused_delete)?
             }
         };
@@ -766,7 +862,10 @@ impl IntentVerifier {
         if intent.key_id != key_id {
             return Err(refused_ceremony(
                 "key",
-                format!("intent is for key {}, the ceremony is for {key_id}", intent.key_id),
+                format!(
+                    "intent is for key {}, the ceremony is for {key_id}",
+                    intent.key_id
+                ),
             ));
         }
         if !intent.digest.is_empty()
@@ -777,15 +876,23 @@ impl IntentVerifier {
         {
             return Err(refused_ceremony(
                 "malformed",
-                "a ceremony intent carries no digest, no approvals, no hosted spec and no leader".into(),
+                "a ceremony intent carries no digest, no approvals, no hosted spec and no leader"
+                    .into(),
             ));
         }
-        let request_id: [u8; REQUEST_ID_LEN] = intent
-            .request_id
-            .as_slice()
-            .try_into()
-            .map_err(|_| refused_ceremony("malformed", format!("request id of {} bytes", intent.request_id.len())))?;
-        self.check_times_with(intent.issued_at_ms, intent.not_after_ms, now_ms, refused_ceremony)?;
+        let request_id: [u8; REQUEST_ID_LEN] =
+            intent.request_id.as_slice().try_into().map_err(|_| {
+                refused_ceremony(
+                    "malformed",
+                    format!("request id of {} bytes", intent.request_id.len()),
+                )
+            })?;
+        self.check_times_with(
+            intent.issued_at_ms,
+            intent.not_after_ms,
+            now_ms,
+            refused_ceremony,
+        )?;
         if role == CeremonyRole::Signer {
             self.check_acl_with(&cn, key_id, refused_ceremony)?;
         }
@@ -839,19 +946,28 @@ impl IntentVerifier {
         if intent.purpose != PURPOSE_GENERATE_KEY {
             return Err(refused_ceremony(
                 "purpose",
-                format!("intent purpose {:?}, expected \"generate-key\"", intent.purpose),
+                format!(
+                    "intent purpose {:?}, expected \"generate-key\"",
+                    intent.purpose
+                ),
             ));
         }
         if intent.key_id != key_id {
             return Err(refused_ceremony(
                 "key",
-                format!("intent is for key {}, the generation is for {key_id}", intent.key_id),
+                format!(
+                    "intent is for key {}, the generation is for {key_id}",
+                    intent.key_id
+                ),
             ));
         }
         if intent.hosted_spec != spec {
             return Err(refused_ceremony(
                 "spec",
-                format!("intent creates a {:?} key, the generation is of {spec:?}", intent.hosted_spec),
+                format!(
+                    "intent creates a {:?} key, the generation is of {spec:?}",
+                    intent.hosted_spec
+                ),
             ));
         }
         if u32::from(leader) != intent.leader {
@@ -864,18 +980,28 @@ impl IntentVerifier {
                 ),
             ));
         }
-        if !intent.digest.is_empty() || !intent.approval_nonce.is_empty() || !intent.approvals.is_empty() {
+        if !intent.digest.is_empty()
+            || !intent.approval_nonce.is_empty()
+            || !intent.approvals.is_empty()
+        {
             return Err(refused_ceremony(
                 "malformed",
                 "a generate intent carries no digest and no approvals".into(),
             ));
         }
-        let request_id: [u8; REQUEST_ID_LEN] = intent
-            .request_id
-            .as_slice()
-            .try_into()
-            .map_err(|_| refused_ceremony("malformed", format!("request id of {} bytes", intent.request_id.len())))?;
-        self.check_times_with(intent.issued_at_ms, intent.not_after_ms, now_ms, refused_ceremony)?;
+        let request_id: [u8; REQUEST_ID_LEN] =
+            intent.request_id.as_slice().try_into().map_err(|_| {
+                refused_ceremony(
+                    "malformed",
+                    format!("request id of {} bytes", intent.request_id.len()),
+                )
+            })?;
+        self.check_times_with(
+            intent.issued_at_ms,
+            intent.not_after_ms,
+            now_ms,
+            refused_ceremony,
+        )?;
         self.check_acl_with(&cn, key_id, refused_ceremony)?;
         let named = generate_ceremony_id(&request_id);
         if ceremony_id != named {
@@ -899,7 +1025,12 @@ impl IntentVerifier {
 
     /// Verify `signed` for a signature with `key_id` at `now_ms` (Unix epoch milliseconds). Every
     /// failure is [`DaemonError::PolicyRefused`].
-    pub fn verify(&self, signed: &pb::SignedIntent, key_id: &str, now_ms: u64) -> Result<VerifiedIntent> {
+    pub fn verify(
+        &self,
+        signed: &pb::SignedIntent,
+        key_id: &str,
+        now_ms: u64,
+    ) -> Result<VerifiedIntent> {
         // 1–2. Who signed it (a client certificate of this cluster on the signer allowlist) and
         // the signature, over exactly these bytes; version and cluster.
         let (cn, spki, intent) = self.verify_signer(
@@ -908,26 +1039,42 @@ impl IntentVerifier {
                 if self.signers.contains(cn) {
                     Ok(())
                 } else {
-                    Err(format!("signed by {cn:?}, which is not on this node's signer_allowlist"))
+                    Err(format!(
+                        "signed by {cn:?}, which is not on this node's signer_allowlist"
+                    ))
                 }
             },
             refused,
         )?;
         // 3. What it authorizes.
         if intent.purpose != PURPOSE_SIGN {
-            return Err(refused("purpose", format!("intent purpose {:?}, expected \"sign\"", intent.purpose)));
+            return Err(refused(
+                "purpose",
+                format!("intent purpose {:?}, expected \"sign\"", intent.purpose),
+            ));
         }
         if intent.key_id != key_id {
-            return Err(refused("key", format!("intent is for key {}, the round is for {key_id}", intent.key_id)));
+            return Err(refused(
+                "key",
+                format!(
+                    "intent is for key {}, the round is for {key_id}",
+                    intent.key_id
+                ),
+            ));
         }
         if intent.digest.len() != crate::orchestrator::CANTON_DIGEST_LEN {
-            return Err(refused("malformed", format!("intent digest of {} bytes", intent.digest.len())));
+            return Err(refused(
+                "malformed",
+                format!("intent digest of {} bytes", intent.digest.len()),
+            ));
         }
-        let request_id: [u8; REQUEST_ID_LEN] = intent
-            .request_id
-            .as_slice()
-            .try_into()
-            .map_err(|_| refused("malformed", format!("request id of {} bytes", intent.request_id.len())))?;
+        let request_id: [u8; REQUEST_ID_LEN] =
+            intent.request_id.as_slice().try_into().map_err(|_| {
+                refused(
+                    "malformed",
+                    format!("request id of {} bytes", intent.request_id.len()),
+                )
+            })?;
         // 4. When.
         self.check_times(intent.issued_at_ms, intent.not_after_ms, now_ms)?;
         // 5. Which keys this client may use.
@@ -936,7 +1083,8 @@ impl IntentVerifier {
         let approvers = match self.policy.approval_threshold_for(key_id) {
             None => Vec::new(),
             Some(threshold) => {
-                let request_id = approval_request_id(&intent.key_id, &intent.digest, &intent.approval_nonce);
+                let request_id =
+                    approval_request_id(&intent.key_id, &intent.digest, &intent.approval_nonce);
                 self.count_approvals(&intent, &request_id, threshold, refused)?
             }
         };
@@ -1012,7 +1160,9 @@ impl IntentVerifier {
             .iter()
             .filter(|a| {
                 self.approvers.get(&a.approver_id).is_some_and(|key| {
-                    UnparsedPublicKey::new(&ED25519, key).verify(request_id.as_bytes(), &a.signature).is_ok()
+                    UnparsedPublicKey::new(&ED25519, key)
+                        .verify(request_id.as_bytes(), &a.signature)
+                        .is_ok()
                 })
             })
             .map(|a| a.approver_id.clone())
@@ -1118,7 +1268,9 @@ pub fn agree_on_cluster_id(answers: &[String], roster_len: usize) -> Option<Stri
     let mut ranked: Vec<(&str, usize)> = counts.into_iter().collect();
     ranked.sort_by_key(|r| std::cmp::Reverse(r.1));
     match ranked.as_slice() {
-        [(id, n), rest @ ..] if *n >= required && rest.first().is_none_or(|(_, m)| m < n) => Some(id.to_string()),
+        [(id, n), rest @ ..] if *n >= required && rest.first().is_none_or(|(_, m)| m < n) => {
+            Some(id.to_string())
+        }
         _ => None,
     }
 }
@@ -1150,7 +1302,11 @@ mod tests {
         spki.extend_from_slice(&[7u8; 32]);
         assert_eq!(ed25519_key_from_spki_b64(&b64(&spki)).unwrap(), [7u8; 32]);
         for bad in [&b""[..], &spki[..11], &spki[..12], &spki[..43]] {
-            assert!(ed25519_key_from_spki_b64(&b64(bad)).is_err(), "{} bytes", bad.len());
+            assert!(
+                ed25519_key_from_spki_b64(&b64(bad)).is_err(),
+                "{} bytes",
+                bad.len()
+            );
         }
         let mut long = spki.clone();
         long.push(0);
@@ -1173,13 +1329,26 @@ mod tests {
     }
 
     fn verifier_with(policy: &SigningPolicyConfig) -> IntentVerifier {
-        IntentVerifier::new(Vec::new(), false, "cluster-a".into(), Vec::<String>::new(), policy).unwrap()
+        IntentVerifier::new(
+            Vec::new(),
+            false,
+            "cluster-a".into(),
+            Vec::<String>::new(),
+            policy,
+        )
+        .unwrap()
     }
 
     #[test]
     fn the_intent_digest_is_the_sha256_of_the_intent_bytes() {
-        let a = pb::SignedIntent { intent: b"one".to_vec(), ..Default::default() };
-        let b = pb::SignedIntent { intent: b"two".to_vec(), ..Default::default() };
+        let a = pb::SignedIntent {
+            intent: b"one".to_vec(),
+            ..Default::default()
+        };
+        let b = pb::SignedIntent {
+            intent: b"two".to_vec(),
+            ..Default::default()
+        };
         assert_eq!(intent_digest(&a), <[u8; 32]>::from(Sha256::digest(b"one")));
         assert_ne!(intent_digest(&a), intent_digest(&b));
     }
@@ -1194,7 +1363,10 @@ mod tests {
     fn deletes_are_enabled_only_for_listed_clients() {
         let v = verifier_with(&SigningPolicyConfig::default());
         assert!(!v.deletes_enabled() && !v.may_delete("ops"));
-        let policy = DeletePolicy { allowlist: ["ops".to_string()].into(), ..Default::default() };
+        let policy = DeletePolicy {
+            allowlist: ["ops".to_string()].into(),
+            ..Default::default()
+        };
         let v = v.with_delete_policy(policy);
         assert!(v.deletes_enabled() && v.may_delete("ops") && !v.may_delete("driver"));
         assert!(v.delete_policy().allowlist.contains("ops"));
@@ -1213,8 +1385,14 @@ mod tests {
         assert_eq!(ed25519_key_from_spki_b64(&b64(&der)).unwrap(), [9; 32]);
         let mut wrong_oid = der.clone();
         wrong_oid[8] ^= 1;
-        assert!(ed25519_key_from_spki_b64(&b64(&wrong_oid)).is_err(), "right length, wrong prefix");
-        assert!(ed25519_key_from_spki_b64(&b64(&der[..43])).is_err(), "right prefix, wrong length");
+        assert!(
+            ed25519_key_from_spki_b64(&b64(&wrong_oid)).is_err(),
+            "right length, wrong prefix"
+        );
+        assert!(
+            ed25519_key_from_spki_b64(&b64(&der[..43])).is_err(),
+            "right prefix, wrong length"
+        );
         assert!(ed25519_key_from_spki_b64("not base64!").is_err());
     }
 
@@ -1223,23 +1401,40 @@ mod tests {
         let err = ceremony_id_of(&pb::SignedIntent::default(), CeremonyKind::Dkg).unwrap_err();
         assert!(err.to_string().contains("intent of 0 bytes"), "{err}");
         // Exactly the size limit is still read; one byte more is not.
-        let mut intent = pb::SignIntent { request_id: vec![1; REQUEST_ID_LEN], ..Default::default() };
+        let mut intent = pb::SignIntent {
+            request_id: vec![1; REQUEST_ID_LEN],
+            ..Default::default()
+        };
         let base = intent.encoded_len();
         intent.key_id = "k".repeat(MAX_INTENT_BYTES - base - 3); // tag + 2-byte length prefix
         let bytes = intent.encode_to_vec();
         assert_eq!(bytes.len(), MAX_INTENT_BYTES);
-        let signed = pb::SignedIntent { intent: bytes, ..Default::default() };
-        assert_eq!(ceremony_id_of(&signed, CeremonyKind::Dkg).unwrap(), ceremony_id_for(CeremonyKind::Dkg, &[1; REQUEST_ID_LEN]));
+        let signed = pb::SignedIntent {
+            intent: bytes,
+            ..Default::default()
+        };
+        assert_eq!(
+            ceremony_id_of(&signed, CeremonyKind::Dkg).unwrap(),
+            ceremony_id_for(CeremonyKind::Dkg, &[1; REQUEST_ID_LEN])
+        );
         let mut longer = signed.clone();
         longer.intent.push(0);
         let err = ceremony_id_of(&longer, CeremonyKind::Dkg).unwrap_err();
-        assert!(err.to_string().contains(&format!("intent of {} bytes", MAX_INTENT_BYTES + 1)), "{err}");
+        assert!(
+            err.to_string()
+                .contains(&format!("intent of {} bytes", MAX_INTENT_BYTES + 1)),
+            "{err}"
+        );
     }
 
     /// The validity window is closed at both ends, and the clock skew stretches it on both sides.
     #[test]
     fn intent_validity_boundaries() {
-        let policy = SigningPolicyConfig { intent_max_lifetime_secs: 60, clock_skew_secs: 5, ..Default::default() };
+        let policy = SigningPolicyConfig {
+            intent_max_lifetime_secs: 60,
+            clock_skew_secs: 5,
+            ..Default::default()
+        };
         let v = verifier_with(&policy);
         assert_eq!(v.skew_ms(), 5_000);
         assert_eq!(v.cluster_id(), "cluster-a");
@@ -1249,7 +1444,10 @@ mod tests {
         assert!(!ok(t, t - 1, t), "a negative window");
         assert!(ok(t, t + 60_000, t), "exactly the maximum lifetime");
         assert!(!ok(t, t + 60_001, t), "longer than the maximum lifetime");
-        assert!(ok(t, t + 1_000, t - 5_000), "issued exactly the skew in the future");
+        assert!(
+            ok(t, t + 1_000, t - 5_000),
+            "issued exactly the skew in the future"
+        );
         assert!(!ok(t, t + 1_000, t - 5_001));
         assert!(ok(t, t + 1_000, t + 6_000), "expired exactly the skew ago");
         assert!(!ok(t, t + 1_000, t + 6_001));
@@ -1265,24 +1463,43 @@ mod tests {
             approvers: vec![],
         };
         v.check_live(&live, t + 500).unwrap();
-        assert!(matches!(v.check_live(&live, t + 6_001), Err(DaemonError::PolicyRefused(_))));
+        assert!(matches!(
+            v.check_live(&live, t + 6_001),
+            Err(DaemonError::PolicyRefused(_))
+        ));
     }
 
     #[test]
     fn the_key_acl_limits_listed_clients_and_unlisted_ones_only_when_required() {
-        let acl = std::collections::BTreeMap::from([("driver".to_string(), vec!["frost-p1-".to_string()])]);
-        let open = verifier_with(&SigningPolicyConfig { signer_acl: acl.clone(), ..Default::default() });
+        let acl = std::collections::BTreeMap::from([(
+            "driver".to_string(),
+            vec!["frost-p1-".to_string()],
+        )]);
+        let open = verifier_with(&SigningPolicyConfig {
+            signer_acl: acl.clone(),
+            ..Default::default()
+        });
         open.check_acl("driver", "frost-p1-namespace").unwrap();
-        assert!(matches!(open.check_acl("driver", "frost-p2-namespace"), Err(DaemonError::PolicyRefused(_))));
+        assert!(matches!(
+            open.check_acl("driver", "frost-p2-namespace"),
+            Err(DaemonError::PolicyRefused(_))
+        ));
         open.check_acl("other", "frost-p2-namespace").unwrap();
-        let strict =
-            verifier_with(&SigningPolicyConfig { signer_acl: acl, signer_acl_required: true, ..Default::default() });
+        let strict = verifier_with(&SigningPolicyConfig {
+            signer_acl: acl,
+            signer_acl_required: true,
+            ..Default::default()
+        });
         strict.check_acl("driver", "frost-p1-namespace").unwrap();
-        assert!(matches!(strict.check_acl("other", "frost-p1-namespace"), Err(DaemonError::PolicyRefused(_))));
+        assert!(matches!(
+            strict.check_acl("other", "frost-p1-namespace"),
+            Err(DaemonError::PolicyRefused(_))
+        ));
     }
 
     /// The vector both test trees pin (see the test above).
-    pub const GOLDEN_REQUEST_ID: &str = "e51b7d9a70d36a6b10e31ab7cf1da987175195c3862bf25f43f2a33a27a096cf";
+    pub const GOLDEN_REQUEST_ID: &str =
+        "e51b7d9a70d36a6b10e31ab7cf1da987175195c3862bf25f43f2a33a27a096cf";
 
     /// Audit F6: a delete approval's request id is domain-separated from every sign approval's —
     /// the key field carries `delete:` — while the sign format stays the driver's (golden vector
@@ -1293,12 +1510,20 @@ mod tests {
         let digest = delete_digest(key);
         let nonce = [0x02; 16];
         let delete = delete_approval_request_id(key, &digest, &nonce);
-        assert_eq!(delete, approval_request_id("delete:participant1-rutli-enc-golden", &digest, &nonce));
-        assert_ne!(delete, approval_request_id(key, &digest, &nonce), "never the sign id over the same digest");
+        assert_eq!(
+            delete,
+            approval_request_id("delete:participant1-rutli-enc-golden", &digest, &nonce)
+        );
+        assert_ne!(
+            delete,
+            approval_request_id(key, &digest, &nonce),
+            "never the sign id over the same digest"
+        );
         assert_eq!(delete, GOLDEN_DELETE_REQUEST_ID);
     }
 
-    pub const GOLDEN_DELETE_REQUEST_ID: &str = "5d1234a946bdaaad6c6103902b7fa4b6a92468e9dba71346504832a6f6335c1a";
+    pub const GOLDEN_DELETE_REQUEST_ID: &str =
+        "5d1234a946bdaaad6c6103902b7fa4b6a92468e9dba71346504832a6f6335c1a";
 
     /// Audit F7: the grant ledger counts a CN present at first write as "since 0", every later
     /// change of its delete capability (granted, ACL, threshold, approvers) from the start that saw
@@ -1317,19 +1542,38 @@ mod tests {
         assert_eq!(g.since("operator"), 0, "present at first write");
         let g = DeleteGrants::load_and_update(&path, &policy(&["operator"], 0), &cfg, 200).unwrap();
         assert_eq!(g.since("operator"), 0, "unchanged");
-        let g = DeleteGrants::load_and_update(&path, &policy(&["operator", "driver"], 0), &cfg, 300).unwrap();
-        assert_eq!((g.since("operator"), g.since("driver")), (0, 300), "a grant");
-        let g = DeleteGrants::load_and_update(&path, &policy(&["operator", "driver"], 1), &cfg, 400).unwrap();
-        assert_eq!((g.since("operator"), g.since("driver")), (400, 400), "the threshold changed for everyone");
+        let g =
+            DeleteGrants::load_and_update(&path, &policy(&["operator", "driver"], 0), &cfg, 300)
+                .unwrap();
+        assert_eq!(
+            (g.since("operator"), g.since("driver")),
+            (0, 300),
+            "a grant"
+        );
+        let g =
+            DeleteGrants::load_and_update(&path, &policy(&["operator", "driver"], 1), &cfg, 400)
+                .unwrap();
+        assert_eq!(
+            (g.since("operator"), g.since("driver")),
+            (400, 400),
+            "the threshold changed for everyone"
+        );
         let mut acl = policy(&["operator", "driver"], 1);
         acl.acl.insert("driver".into(), vec!["rutli-a-".into()]);
         let g = DeleteGrants::load_and_update(&path, &acl, &cfg, 500).unwrap();
-        assert_eq!((g.since("operator"), g.since("driver")), (400, 500), "an ACL change");
+        assert_eq!(
+            (g.since("operator"), g.since("driver")),
+            (400, 500),
+            "an ACL change"
+        );
         DeleteGrants::load_and_update(&path, &policy(&["operator"], 1), &cfg, 600).unwrap();
         let g = DeleteGrants::load_and_update(&path, &acl, &cfg, 700).unwrap();
         assert_eq!(g.since("driver"), 700, "removed, then granted again");
         std::fs::write(&path, b"{ torn").unwrap();
-        assert!(DeleteGrants::load_and_update(&path, &acl, &cfg, 800).is_err(), "never silently reset");
+        assert!(
+            DeleteGrants::load_and_update(&path, &acl, &cfg, 800).is_err(),
+            "never silently reset"
+        );
     }
 
     /// Parity with the driver: `FrostIntentSigner.ceremonyIntent("c2testcluster000", "refresh",
@@ -1340,15 +1584,38 @@ mod tests {
     #[test]
     fn ceremony_intents_match_the_drivers_golden_vector() {
         let rid = [0x01; REQUEST_ID_LEN];
-        let refresh =
-            ceremony_intent("c2testcluster000", CeremonyKind::Refresh, "participant1-frost-golden", rid, 1_700_000_000_000, 120_000);
+        let refresh = ceremony_intent(
+            "c2testcluster000",
+            CeremonyKind::Refresh,
+            "participant1-frost-golden",
+            rid,
+            1_700_000_000_000,
+            120_000,
+        );
         assert_eq!(hex::encode(refresh.encode_to_vec()), GOLDEN_REFRESH_INTENT);
-        assert_eq!(ceremony_id_for(CeremonyKind::Refresh, &rid), "refresh-01010101010101010101010101010101");
-        let dkg = ceremony_intent("c2testcluster000", CeremonyKind::Dkg, "participant1-frost-golden", rid, 1_700_000_000_000, 120_000);
+        assert_eq!(
+            ceremony_id_for(CeremonyKind::Refresh, &rid),
+            "refresh-01010101010101010101010101010101"
+        );
+        let dkg = ceremony_intent(
+            "c2testcluster000",
+            CeremonyKind::Dkg,
+            "participant1-frost-golden",
+            rid,
+            1_700_000_000_000,
+            120_000,
+        );
         assert_eq!(hex::encode(dkg.encode_to_vec()), GOLDEN_DKG_INTENT);
-        assert_eq!(ceremony_id_for(CeremonyKind::Dkg, &rid), "dkg-01010101010101010101010101010101");
+        assert_eq!(
+            ceremony_id_for(CeremonyKind::Dkg, &rid),
+            "dkg-01010101010101010101010101010101"
+        );
         // Every derived id is a valid ceremony id (charset, length).
-        crate::keystore::validate_ceremony_id(&ceremony_id_for(CeremonyKind::Refresh, &[0xff; REQUEST_ID_LEN])).unwrap();
+        crate::keystore::validate_ceremony_id(&ceremony_id_for(
+            CeremonyKind::Refresh,
+            &[0xff; REQUEST_ID_LEN],
+        ))
+        .unwrap();
     }
 
     pub const GOLDEN_REFRESH_INTENT: &str = "08011210633274657374636c75737465723030301a077265667265736822197061727469636970616e74312d66726f73742d676f6c64656e3210010101010101010101010101010101013880d095ffbc3140c0f99cffbc31";
@@ -1358,26 +1625,69 @@ mod tests {
     #[test]
     fn the_leader_derives_the_ceremony_id_from_the_intent() {
         let i = ceremony_intent("c", CeremonyKind::Dkg, "k", [0xab; REQUEST_ID_LEN], 1, 2);
-        let signed = pb::SignedIntent { intent: i.encode_to_vec(), ..Default::default() };
-        assert_eq!(ceremony_id_of(&signed, CeremonyKind::Dkg).unwrap(), format!("dkg-{}", "ab".repeat(16)));
-        assert_eq!(ceremony_id_of(&signed, CeremonyKind::Refresh).unwrap(), format!("refresh-{}", "ab".repeat(16)));
-        let short = pb::SignIntent { request_id: vec![1; 8], ..i };
-        let signed = pb::SignedIntent { intent: short.encode_to_vec(), ..Default::default() };
-        assert!(matches!(ceremony_id_of(&signed, CeremonyKind::Dkg), Err(DaemonError::PolicyRefused(_))));
+        let signed = pb::SignedIntent {
+            intent: i.encode_to_vec(),
+            ..Default::default()
+        };
+        assert_eq!(
+            ceremony_id_of(&signed, CeremonyKind::Dkg).unwrap(),
+            format!("dkg-{}", "ab".repeat(16))
+        );
+        assert_eq!(
+            ceremony_id_of(&signed, CeremonyKind::Refresh).unwrap(),
+            format!("refresh-{}", "ab".repeat(16))
+        );
+        let short = pb::SignIntent {
+            request_id: vec![1; 8],
+            ..i
+        };
+        let signed = pb::SignedIntent {
+            intent: short.encode_to_vec(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            ceremony_id_of(&signed, CeremonyKind::Dkg),
+            Err(DaemonError::PolicyRefused(_))
+        ));
         assert!(ceremony_id_of(&pb::SignedIntent::default(), CeremonyKind::Dkg).is_err());
-        assert!(ceremony_id_of(&pb::SignedIntent { intent: vec![0xff; 3], ..Default::default() }, CeremonyKind::Dkg).is_err());
+        assert!(ceremony_id_of(
+            &pb::SignedIntent {
+                intent: vec![0xff; 3],
+                ..Default::default()
+            },
+            CeremonyKind::Dkg
+        )
+        .is_err());
     }
 
     /// `rutli-cosigner refresh` learns the cluster id like the driver: a majority of at least two.
     #[test]
     fn the_cluster_id_is_what_a_majority_of_the_roster_reports() {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        assert_eq!(agree_on_cluster_id(&s(&["a", "a", "a"]), 3).as_deref(), Some("a"));
-        assert_eq!(agree_on_cluster_id(&s(&["a", "a", "b"]), 3).as_deref(), Some("a"));
-        assert_eq!(agree_on_cluster_id(&s(&["a", ""]), 3), None, "one answer is one cosigner's word");
+        assert_eq!(
+            agree_on_cluster_id(&s(&["a", "a", "a"]), 3).as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            agree_on_cluster_id(&s(&["a", "a", "b"]), 3).as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            agree_on_cluster_id(&s(&["a", ""]), 3),
+            None,
+            "one answer is one cosigner's word"
+        );
         assert_eq!(agree_on_cluster_id(&s(&["a", "b"]), 3), None);
-        assert_eq!(agree_on_cluster_id(&s(&["a", "a", "b", "b"]), 5), None, "a tie is no majority");
-        assert_eq!(agree_on_cluster_id(&s(&["a"]), 1).as_deref(), Some("a"), "a one-node dev roster");
+        assert_eq!(
+            agree_on_cluster_id(&s(&["a", "a", "b", "b"]), 5),
+            None,
+            "a tie is no majority"
+        );
+        assert_eq!(
+            agree_on_cluster_id(&s(&["a"]), 1).as_deref(),
+            Some("a"),
+            "a one-node dev roster"
+        );
         assert_eq!(agree_on_cluster_id(&s(&[]), 3), None);
     }
 
@@ -1398,11 +1708,21 @@ mod tests {
             120_000,
         );
         assert_eq!(hex::encode(g.encode_to_vec()), GOLDEN_GENERATE_INTENT);
-        assert_eq!(generate_ceremony_id(&rid), "genkey-01010101010101010101010101010101");
-        crate::keystore::validate_ceremony_id(&generate_ceremony_id(&[0xff; REQUEST_ID_LEN])).unwrap();
+        assert_eq!(
+            generate_ceremony_id(&rid),
+            "genkey-01010101010101010101010101010101"
+        );
+        crate::keystore::validate_ceremony_id(&generate_ceremony_id(&[0xff; REQUEST_ID_LEN]))
+            .unwrap();
         // The leader derives the id from the (unverified) intent, like a ceremony's.
-        let signed = pb::SignedIntent { intent: g.encode_to_vec(), ..Default::default() };
-        assert_eq!(generate_ceremony_id_of(&signed).unwrap(), "genkey-01010101010101010101010101010101");
+        let signed = pb::SignedIntent {
+            intent: g.encode_to_vec(),
+            ..Default::default()
+        };
+        assert_eq!(
+            generate_ceremony_id_of(&signed).unwrap(),
+            "genkey-01010101010101010101010101010101"
+        );
         assert!(generate_ceremony_id_of(&pb::SignedIntent::default()).is_err());
     }
 
