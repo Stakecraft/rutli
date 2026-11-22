@@ -2304,7 +2304,12 @@ mod strict_parse_tests {
     /// deploy/k8s/cosigner.yaml.
     #[test]
     fn every_shipped_config_loads() {
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        // scripts/mutants.sh runs the tests in a copy of frost/ that has no deploy/ beside it and
+        // says where the real tree is.
+        let repo = std::env::var_os("RUTLI_REPO_ROOT").map_or_else(
+            || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            std::path::PathBuf::from,
+        );
         let tmp = tempfile::tempdir().unwrap();
         let (mut seen, mut production) = (0, 0);
         for dir in ["deploy/frost/config", "deploy/frost/config-tls"] {
