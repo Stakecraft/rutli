@@ -63,6 +63,7 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import compare
 import diagnose  # noqa: E402  (the diagnostic pass's parsers and verdicts)
 import run as base  # noqa: E402  (the compose suite: Runner, scenarios, key names)
 
@@ -157,6 +158,21 @@ class K8sCluster:
 
     def pvc_of(self, node):
         return f"{self.ns}/data-{self.pod(node)[: -len('-0')]}"
+
+
+def peer_call_entries(results, ramp, diagnosis):
+    """Every place the run read the cosigners' peer calls (#249): each scenario, each ramp step's
+    phase and each diagnosis step, as [{"where", "calls"}] in run order."""
+    out = [{"where": r["name"], "calls": r["peer_calls"]} for r in results if r.get("peer_calls")]
+    for st in (ramp or {}).get("steps", []):
+        for op, o in st.get("ops", {}).items():
+            if o.get("peer_calls"):
+                out.append({"where": f"ramp x{st['factor']:g} {op}", "calls": o["peer_calls"]})
+    for st in (diagnosis or {}).get("steps", []):
+        for op, o in st.get("ops", {}).items():
+            if o.get("peer_calls"):
+                out.append({"where": f"diagnose x{st['factor']:g} {op}", "calls": o["peer_calls"]})
+    return out
 
 
 def node_shares(load):
@@ -592,11 +608,12 @@ class Suite(base.Runner):
             self.skip("partition-isolated", "HOOK_PARTITION is not set")
 
         if os.environ.get("HOOK_NET_DELAY"):
-            ms = str(self.args.net_delay_ms)
             nodes = sorted({c.node_of(n) for n in NODES})
-            self.under_load(f"net-delay-{ms}ms", [], lambda: self.hook("HOOK_NET_DELAY", "start", ms, *nodes),
-                            lambda: self.hook("HOOK_NET_DELAY", "stop", ms, *nodes))
-            self.results[-1]["compare_latency"] = True
+            for delay in self.args.net_delay_ms:
+                ms = str(delay)
+                self.under_load(f"net-delay-{ms}ms", [], lambda ms=ms: self.hook("HOOK_NET_DELAY", "start", ms, *nodes),
+                                lambda ms=ms: self.hook("HOOK_NET_DELAY", "stop", ms, *nodes))
+                self.results[-1]["compare_latency"] = True
             self.slow_node(victim)
         else:
             self.skip("net-delay", "HOOK_NET_DELAY is not set")
@@ -787,6 +804,8 @@ class Suite(base.Runner):
                     o["p95_ms"] = max(o["p95_ms"], lat.get("p95_ms", 0.0))
                     if op == "sign":
                         o["server"] = report.get("server", {}).get("sign_duration")
+                        if report.get("server", {}).get("peer_calls") and "peer_calls" not in o:
+                            o["peer_calls"] = compare.peer_margin(report["server"]["peer_calls"])
                 for key in {op if len(phases) == 1 else f"{op} {ph['name']}" for op, _ in procs}:
                     o = step["ops"].get(key)
                     if o and o["errors"]:
@@ -924,6 +943,8 @@ class Diagnosis:
             srv = rep.get("server", {}).get("sign_duration") if op == "sign" else None
             if srv and (not o.get("server") or (srv.get("p99_ms") or 0) > (o["server"].get("p99_ms") or 0)):
                 o["server"] = srv
+                if rep.get("server", {}).get("peer_calls"):
+                    o["peer_calls"] = compare.peer_margin(rep["server"]["peer_calls"])
         cos = {n: diagnose.derive(before[0].get(n, {}), after[0].get(n, {}), elapsed) for n in NODES}
         gen = {p: diagnose.derive(before[1].get(p, {}), after[1].get(p, {}), elapsed) for p in gens}
         sign = ops.get("sign", {})
@@ -1053,7 +1074,8 @@ def main():
     p.add_argument("--steady-secs", type=int, default=None, help="default: the profile's, else 60")
     p.add_argument("--rate", type=int, default=None, help="steady stream signatures/s; default: the profile's, else 20")
     p.add_argument("--disrupt-secs", type=int, default=120)
-    p.add_argument("--net-delay-ms", type=int, default=50)
+    p.add_argument("--net-delay-ms", type=lambda v: [int(x) for x in v.split(",") if x.strip()], default=[50, 150],
+                   help="the net-delay scenarios' added delays, comma-separated (default 50,150)")
     p.add_argument("--slow-node", type=parse_slow_node, default=parse_slow_node("2500:sticky,2500:rotate,6000:rotate"),
                    help="the slow-node scenarios (with HOOK_NET_DELAY): added delay in ms and leader policy each")
     p.add_argument("--sign-leader", choices=("sticky", "rotate"), default=None,
@@ -1177,6 +1199,7 @@ def main():
         "keys": suite.keys,
         "ramp": suite.ramp,
         "diagnosis": diagnosis,
+        "peer_calls": peer_call_entries(suite.results, suite.ramp, diagnosis),
         "failed": failed,
         "rig_failed": rig_failed,
     }

@@ -314,6 +314,49 @@ class SlowNode(unittest.TestCase):
         self.assertEqual(cluster.node_shares({"client": {"ok": 0}}), {})
 
 
+class PeerCalls(unittest.TestCase):
+    def test_the_generators_margin_is_kept_and_an_older_report_gets_one(self):
+        new = {"sign_round1": {"count": 1e4, "p999_ms": 800.0, "deadline_ms": 2000.0, "within_third": 0.9985,
+                               "margin_3x": False},
+               "local_share": {"count": 1e4, "p999_ms": 9.0, "deadline_ms": None, "within_third": None,
+                               "margin_3x": None}}
+        m = compare.peer_margin(new)
+        self.assertIs(m["sign_round1"]["margin_3x"], False)   # the generator's exact reading, not p99.9
+        self.assertIsNone(m["local_share"]["margin_3x"])
+        old = compare.peer_margin({"abort": {"count": 10, "p999_ms": 300.0}, "control": {"count": 10, "p999_ms": 1200.0}})
+        self.assertEqual((old["abort"]["margin_3x"], old["abort"]["deadline_ms"]), (True, 1000.0))
+        self.assertIs(old["control"]["margin_3x"], False)
+
+    def test_a_miss_is_flagged_in_the_report_not_failed(self):
+        calls = compare.peer_margin({"sign_round1": {"count": 1e4, "p50_ms": 30.0, "p99_ms": 400.0, "p999_ms": 800.0,
+                                                     "deadline_ms": 2000.0, "within_third": 0.9985, "margin_3x": False}})
+        import tempfile
+        cur = cluster_run()
+        cur["peer_calls"] = [{"where": "ramp x100 sign burst", "calls": calls}]
+        with tempfile.TemporaryDirectory() as d:
+            path, md_path = os.path.join(d, "cur.json"), os.path.join(d, "report.md")
+            with open(path, "w") as f:
+                json.dump(cur, f)
+            rc = compare.main([os.path.join(d, "none.json"), path, "--markdown", md_path])
+            with open(md_path) as f:
+                md = f.read()
+        self.assertIn("| ramp x100 sign burst | sign_round1 | 10000 |", md)
+        self.assertIn("99.85%", md)
+        self.assertIn("**NO**", md)
+        self.assertIn("FLAG: 1 call(s) without a 3x margin", md)
+        self.assertEqual(rc, 0)  # flagged, not failed
+
+    def test_every_place_is_listed_in_run_order(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import cluster
+        c = {"abort": {"margin_3x": True}}
+        results = [{"name": "steady", "peer_calls": c}, {"name": "burst"}]
+        ramp = {"steps": [{"factor": 3, "ops": {"sign average": {"peer_calls": c}, "ecdh average": {}}}]}
+        diag = {"steps": [{"factor": 30, "ops": {"sign": {"peer_calls": c}}}]}
+        self.assertEqual([e["where"] for e in cluster.peer_call_entries(results, ramp, diag)],
+                         ["steady", "ramp x3 sign average", "diagnose x30 sign"])
+
+
 class RigOrCluster(unittest.TestCase):
     def test_only_a_cluster_answer_is_the_clusters_failure(self):
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

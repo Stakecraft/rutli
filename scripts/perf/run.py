@@ -305,6 +305,14 @@ class Runner:
             "resources": {"before": before, "after": after},
             "checks": checks,
         }
+        # The cosigners' peer calls during the scenario (#249): from its first load that saw any
+        # (a scenario's main stream; percentiles of several loads do not add up).
+        import compare
+        for load in loads:
+            calls = load.get("server", {}).get("peer_calls")
+            if calls:
+                result["peer_calls"] = compare.peer_margin(calls)
+                break
         self.results.append(result)
         return result, check
 

@@ -59,6 +59,51 @@ def judge(rows, problems, name, metric, was, value, threshold, floor_ms):
         problems.append(f"{name}: {metric} {was:.1f} ms -> {value:.1f} ms ({change:+.0%})")
 
 
+# The cosigners' peer-call deadlines (#238) and the rule of #249: a deadline stays a constant only
+# while the call's p99.9 is at most a third of it. local_share has no deadline.
+PEER_DEADLINES_S = {"sign_round1": 2.0, "sign_round2": 5.0, "abort": 1.0, "control": 3.0}
+
+
+def peer_margin(peer_calls):
+    """The load generator's `server.peer_calls` (#258), each call with its deadline and
+    `margin_3x` (at least 99.9 % of the calls within a third of the deadline, read at the bucket
+    edge there). A report without them (an older generator) gets them from p99.9 against a third
+    of PEER_DEADLINES_S. None where a call has no deadline."""
+    out = {}
+    for call, rep in sorted((peer_calls or {}).items()):
+        entry = dict(rep)
+        if "margin_3x" not in entry:
+            deadline = PEER_DEADLINES_S.get(call)
+            entry["deadline_ms"] = deadline * 1000 if deadline else None
+            entry["margin_3x"] = None if deadline is None else rep.get("p999_ms", 0) <= deadline * 1000 / 3
+        out[call] = entry
+    return out
+
+
+def peer_call_lines(entries):
+    """Markdown: one row per place and call, p99.9 against a third of the deadline."""
+    if not entries:
+        return []
+    lines = ["Peer calls (#249: a deadline stays a constant while p99.9 is at most a third of it):", "",
+             "| where | call | calls | p50 ms | p99 ms | p99.9 ms | deadline ms | within a third | margin 3x |",
+             "|---|---|---|---|---|---|---|---|---|"]
+    misses = 0
+    for e in entries:
+        for call, r in e["calls"].items():
+            p999 = f"{r.get('p999_ms', 0):g}"
+            third = r.get("within_third")
+            third = "" if third is None else f"{third:.2%}"
+            m = r.get("margin_3x")
+            verdict = "" if m is None else ("ok" if m else "**NO**")
+            misses += m is False
+            deadline = r.get("deadline_ms")
+            lines.append(f"| {e['where']} | {call} | {r.get('count', 0):g} | {r.get('p50_ms', 0):g} | "
+                         f"{r.get('p99_ms', 0):g} | {p999} | {'' if deadline is None else f'{deadline:g}'} | {third} | {verdict} |")
+    lines += ["", f"FLAG: {misses} call(s) without a 3x margin (a readout for #249, not a failure)." if misses
+              else "Every call with a deadline has a 3x margin.", ""]
+    return lines
+
+
 def compare_ramp(previous, current, threshold, floor_ms, rows, problems):
     """The cluster suite's scale ramp: the headroom factor must not drop, and each factor both
     runs passed must not be slower (same profile only)."""
@@ -232,6 +277,7 @@ def main(argv=None):
                   f"{dx.get('predicted_ceiling_signs_per_sec')}/s; keys: {dx.get('keys_verdict', 'not run')}", ""]
     if current.get("headroom_factor") is not None:
         lines += [f"Headroom factor: {current['headroom_factor']} (profile {current.get('profile')})", ""]
+    lines += peer_call_lines(current.get("peer_calls") or [])
     real = (current.get("ramp") or {}).get("real_load_headroom") or []
     if real:
         lines += ["Headroom against the real load: " + "; ".join(

@@ -59,7 +59,7 @@ of the same name.
 | `upgrade` | `helm upgrade` from the previous release to `--upgrade-image` under 5 signatures a second | a key is missing or changed afterwards, or does not sign; signatures that fail while the cosigners restart are counted, not forbidden (the chart restarts all three at once) |
 | `scenarios` | the scenarios of [`load-testing.md`](load-testing.md): steady stream, burst, several clients, ECIES, a cosigner pod killed under load, the cold-cache restart, and the limits | as described there |
 | `connect` | N new clients connecting at the same moment (`connect.clients` of the profile: 50, 200, 500), one signature each, with each client's connection time recorded apart from its request (`rutli-loadgen --eager-connect`) and the cosigners' `rutli_grpc_handshake_timeouts_total` | never: a measurement of what many clients connecting together costs, for example every driver reconnecting after a cosigner restart |
-| `disrupt` | under the steady stream: a node lost, a data volume lost, a partition between two cosigners' nodes (`partition`), one cosigner cut off from both others (`partition-isolated`, as when a data centre loses its links), added network delay; afterwards, rounds of signatures until the cluster signs within the SLO again (`recovery_secs`) | a signature fails, a cosigner is not healthy afterwards, or the cluster does not sign normally again within `--settle-secs` (600); a step without its hook is reported as skipped |
+| `disrupt` | under the steady stream: a node lost, a data volume lost, a partition between two cosigners' nodes (`partition`), one cosigner cut off from both others (`partition-isolated`, as when a data centre loses its links), added network delay on every cosigner's node (`--net-delay-ms`, default 50 and 150 ms); afterwards, rounds of signatures until the cluster signs within the SLO again (`recovery_secs`) | a signature fails, a cosigner is not healthy afterwards, or the cluster does not sign normally again within `--settle-secs` (600); a step without its hook is reported as skipped |
 | `keys` | for each key count of the profile (1, 10, 100): that many FROST keys and hosted keys over ten tenant prefixes (`perf-t<n>-…`), sign latency over all of them, and each cosigner's Peer API `ListKeys` time | a setup, signature or listing fails |
 | `upgrade`, `disrupt` (key classes) | with a profile that has `classes` (`production`): during each disruption and during the upgrade's rollout, one signature with each tenant's namespace-class key and one decryption (ECDH) with its hosted key, under the driver's deadlines (5 s a sign attempt, 10 s another call, 30 s a call) | one of them fails or runs out of time: a topology change or a decryption during an incident is the case that matters |
 | `key-classes` | last, with `classes`: the same spot checks at rest, then twice the namespace-class key's per-minute limit plus five at once | a spot check fails, fewer than the limit or more than one and a half times it pass, or the rest is not refused with `RESOURCE_EXHAUSTED` |
@@ -337,6 +337,15 @@ per operation, why it stopped), and these top-level numbers: `headroom_factor`; 
 disruption, `time_to_healthy_secs` (until every cosigner answered Health ok again) and
 `recovery_secs` (until the cluster signed within the SLO again), both from the end of the
 disruption.
+
+`peer_calls` lists every place the run read the cosigners' `rutli_peer_call_duration_seconds`:
+each scenario (from its first load), each ramp step's phase and each diagnosis step. Per call
+class (`sign_round1`, `sign_round2`, `abort`, `control`, `local_share`) it gives the count, the
+p50/p99/p99.9 interpolated in the buckets, the deadline, and the share of calls within a third of
+it. That share is read at the bucket edge there, so it is exact. `margin_3x` holds when at least
+99.9 % of the calls finished within a third of the deadline: the rule by which a deadline stays a
+constant (#249). The report prints the table and flags every call without that margin. A flag is
+a readout, not a failure: it does not change the exit code.
 
 `failed` lists what Rütli failed: a check about the cluster's behaviour. `rig_failed` lists what
 only the test rig failed: a load generator that could not be started, reached or read, a hook or
