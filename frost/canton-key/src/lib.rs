@@ -108,6 +108,8 @@
 // The material enum's variants differ in size (an RSA document vs 32 bytes); they are moved rarely
 // and boxing them would only add indirection around secrets.
 #![allow(clippy::large_enum_variant)]
+// No unsafe code in the key parser; this keeps it that way.
+#![forbid(unsafe_code)]
 
 mod asn1;
 mod canton;
