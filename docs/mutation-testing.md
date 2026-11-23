@@ -49,6 +49,12 @@ allowed:
 MUTANTS_TESTS="--lib --test ceremony_intent" scripts/mutants.sh intent
 ```
 
+In CI, `intent` is the largest module and runs in four shards (`--shard k/4`, one job each; their numbers are added up per file). A manual run can name the modules it wants:
+
+```bash
+gh workflow run mutants.yml --ref main -f modules="intent journal"
+```
+
 Results land in `frost/mutants.out/` (`missed.txt`, `caught.txt`, `outcomes.json`, a diff per
 mutant under `diff/`).
 
@@ -68,6 +74,7 @@ numbers as a table on the run's summary page.
   "runs": 6,
   "baseline_ok": true,
   "unrecognised": 0,
+  "incomplete_runs": 0,
   "modules": {
     "core/src/nonce_store.rs": {
       "caught": 37, "missed": 1, "timeout": 0, "unviable": 3, "total": 41,
@@ -82,9 +89,10 @@ numbers as a table on the run's summary page.
 |---|---|
 | `version` | Schema version. A reader refuses a version it does not know; fields are only ever added within a version. |
 | `commit` | The commit the mutants were made from. |
-| `complete` | Every module's job produced results, every baseline passed, and every outcome was understood (`unrecognised` is 0). A reader that gates on the numbers should require it. The workflow's last step does: a run that is not `complete` ends red. |
+| `complete` | Every module's job produced results, every baseline passed, every outcome was understood (`unrecognised` is 0), and no job stopped early (`incomplete_runs` is 0). A reader that gates on the numbers should require it. The workflow's last step does: a run that is not `complete` ends red. |
 | `runs` | How many `outcomes.json` files went into the report (one per module job). |
 | `baseline_ok` | Every run has one baseline, and the unmutated tests passed in it. |
+| `incomplete_runs` | Runs that ended with fewer verdicts than mutants (a job cut off by its time limit, or cancelled). |
 | `unrecognised` | Outcomes that are no verdict on the tests (a broken build or test tool, a shape this report does not know); listed on the job's log. |
 | `modules` | Keyed by the file's path under `frost/`. |
 | `caught` | A test failed with the mutant in place — good. |

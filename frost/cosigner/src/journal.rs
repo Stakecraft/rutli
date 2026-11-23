@@ -1097,6 +1097,37 @@ mod tests {
         ));
     }
 
+    /// A journal without a torn tail is opened without touching its last segment: a refused charge
+    /// after a restart needs no write access, and the "torn line" warning is not logged for a
+    /// clean one.
+    #[test]
+    fn opening_a_clean_journal_does_not_open_its_segment_for_writing() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let t0 = 1_800_000_000_000u64;
+        {
+            let j = SignJournal::open(tmp.path(), 1, KEEP).unwrap();
+            for (i, r) in ["a", "b", "c"].iter().enumerate() {
+                j.append_charged(entry("k", r), LIMITS, t0 + i as u64)
+                    .unwrap();
+            }
+        }
+        let seg = segments(&tmp.path().join("k")).unwrap().pop().unwrap();
+        std::fs::set_permissions(&seg, std::fs::Permissions::from_mode(0o400)).unwrap();
+        if std::fs::OpenOptions::new().write(true).open(&seg).is_ok() {
+            // root ignores the mode: the check below would prove nothing.
+            eprintln!("skipped: a read-only segment is still writable here");
+            return;
+        }
+        let j = SignJournal::open(tmp.path(), 1, KEEP).unwrap();
+        // The 4th distinct request in the minute is refused by the rate limit, before anything is
+        // written; an open that tried to write the segment would fail with an I/O error instead.
+        assert!(matches!(
+            j.append_charged(entry("k", "d"), LIMITS, t0 + 10),
+            Err(DaemonError::RateLimited(_))
+        ));
+    }
+
     #[test]
     fn segments_rotate_and_retention_deletes_the_oldest_but_the_chain_still_verifies() {
         let tmp = tempfile::tempdir().unwrap();
