@@ -324,7 +324,13 @@ resources:
     memory: 64Mi
   limits:
     cpu: 500m
-    memory: 320Mi # 256Mi working set (167Mi seen at 300 signatures/s) plus the 64Mi memory-backed /tmp
+    # The working set is sized at 1.5 times the highest one the cluster suite measured (167 MB, at
+    # 300 signatures/s, past the throughput knee, with thousands of sign sessions in flight), rounded
+    # up: 256Mi. On top of it comes the 64Mi memory-backed /tmp. A sign session in flight costs about
+    # 75 KB at the peak, so for a cluster that keeps more in flight (more busy keys, more
+    # participants), add that per session. RutliCosignerMemoryNearLimit warns at 80 %
+    # (docs/performance.md, "Memory").
+    memory: 320Mi
 
 # Legacy topology only: the init container that copies this node's TLS files out of the shared
 # source volume. It runs one shell script for a moment.
