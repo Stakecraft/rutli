@@ -47,6 +47,51 @@ use sha2::{Digest, Sha256};
 use crate::journal::{read_key_dir, JournalEntry, PURPOSE_NO_INTENT, PURPOSE_SIGN};
 use crate::{DaemonError, Result};
 
+/// Exit status of the check when nothing was compared at all.
+const EXIT_NOTHING_TO_COMPARE: i32 = 3;
+/// Digits of the fractional second kept when parsing an instant (milliseconds).
+const MILLIS_DIGITS: usize = 3;
+/// Years in one Gregorian era (the 400-year cycle).
+const YEARS_PER_ERA: i64 = 400;
+/// Days in one Gregorian era.
+const DAYS_PER_ERA: i64 = 146_097;
+/// Days in a common year.
+const DAYS_PER_YEAR: i64 = 365;
+/// Years between leap days (without the century rule).
+const YEARS_PER_LEAP_DAY: i64 = 4;
+/// Years in a century (the century rule skips a leap day).
+const YEARS_PER_CENTURY: i64 = 100;
+/// Months in a year.
+const MONTHS_PER_YEAR: i64 = 12;
+/// Shift between a January-based and a March-based month index.
+const MARCH_BASED_MONTH_SHIFT: i64 = 9;
+/// Month number of March, the first month of the March-based year.
+const MARCH_MONTH_NUMBER: i64 = 3;
+/// March-based index of January, the first month that falls in the next civil year.
+const MARCH_BASED_JANUARY: i64 = 10;
+/// Days in a five-month run of the March-based year (March to July).
+const DAYS_PER_FIVE_MONTHS: i64 = 153;
+/// Months in that run.
+const MONTHS_PER_RUN: i64 = 5;
+/// Days from 0000-03-01 to the Unix epoch 1970-01-01.
+const DAYS_FROM_YEAR_ZERO_TO_EPOCH: i64 = 719_468;
+/// Days per four years (the leap-day correction step in the civil-from-days formula).
+const DAYS_PER_FOUR_YEARS: i64 = 1460;
+/// Days per century (the century correction step in the civil-from-days formula).
+const DAYS_PER_CENTURY: i64 = 36_524;
+/// Days per era less one (the era correction step in the civil-from-days formula).
+const DAYS_PER_ERA_LESS_ONE: i64 = 146_096;
+/// Hours in a day.
+const HOURS_PER_DAY: i64 = 24;
+/// Minutes in an hour.
+const MINUTES_PER_HOUR: i64 = 60;
+/// Milliseconds in a second.
+const MILLIS_PER_SECOND: i64 = 1000;
+/// Milliseconds in a minute.
+const MILLIS_PER_MINUTE: i64 = 60_000;
+/// Milliseconds in a day.
+const MILLIS_PER_DAY: i64 = 86_400_000;
+
 /// One `sign` entry of the driver's audit log.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DriverSign {
@@ -258,7 +303,7 @@ impl Verdict {
         match self {
             Verdict::Consistent => 0,
             Verdict::Discrepancies => 1,
-            Verdict::NothingToCompare => 3,
+            Verdict::NothingToCompare => EXIT_NOTHING_TO_COMPARE,
         }
     }
 }
@@ -749,33 +794,41 @@ pub fn parse_instant_ms(ts: &str) -> Option<u64> {
         t.next()?.parse().ok()?,
         t.next()?.parse().ok()?,
     );
-    let millis: i64 = format!("{frac:0<3}").get(..3)?.parse().ok()?;
+    let millis: i64 = format!("{frac:0<3}").get(..MILLIS_DIGITS)?.parse().ok()?;
     // Days from civil (Howard Hinnant).
     let y2 = if m <= 2 { y - 1 } else { y };
-    let era = y2.div_euclid(400);
-    let yoe = y2 - era * 400;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    let ms = ((days * 24 + hh) * 60 + mm) * 60_000 + ss * 1000 + millis;
+    let era = y2.div_euclid(YEARS_PER_ERA);
+    let yoe = y2 - era * YEARS_PER_ERA;
+    let mp = (m + MARCH_BASED_MONTH_SHIFT) % MONTHS_PER_YEAR;
+    let doy = (DAYS_PER_FIVE_MONTHS * mp + 2) / MONTHS_PER_RUN + day - 1;
+    let doe = yoe * DAYS_PER_YEAR + yoe / YEARS_PER_LEAP_DAY - yoe / YEARS_PER_CENTURY + doy;
+    let days = era * DAYS_PER_ERA + doe - DAYS_FROM_YEAR_ZERO_TO_EPOCH;
+    let ms = ((days * HOURS_PER_DAY + hh) * MINUTES_PER_HOUR + mm) * MILLIS_PER_MINUTE
+        + ss * MILLIS_PER_SECOND
+        + millis;
     u64::try_from(ms).ok()
 }
 
 /// Unix epoch milliseconds as `YYYY-MM-DDTHH:MM:SS.mmmZ`.
 pub fn fmt_ms(ms: u64) -> String {
     let ms = ms as i64;
-    let (days, rem) = (ms.div_euclid(86_400_000), ms.rem_euclid(86_400_000));
+    let (days, rem) = (ms.div_euclid(MILLIS_PER_DAY), ms.rem_euclid(MILLIS_PER_DAY));
     // Civil from days (Howard Hinnant).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
+    let z = days + DAYS_FROM_YEAR_ZERO_TO_EPOCH;
+    let era = z.div_euclid(DAYS_PER_ERA);
+    let doe = z - era * DAYS_PER_ERA;
+    let yoe = (doe - doe / DAYS_PER_FOUR_YEARS + doe / DAYS_PER_CENTURY
+        - doe / DAYS_PER_ERA_LESS_ONE)
+        / DAYS_PER_YEAR;
+    let doy = doe - (DAYS_PER_YEAR * yoe + yoe / YEARS_PER_LEAP_DAY - yoe / YEARS_PER_CENTURY);
+    let mp = (MONTHS_PER_RUN * doy + 2) / DAYS_PER_FIVE_MONTHS;
+    let d = doy - (DAYS_PER_FIVE_MONTHS * mp + 2) / MONTHS_PER_RUN + 1;
+    let m = if mp < MARCH_BASED_JANUARY {
+        mp + MARCH_MONTH_NUMBER
+    } else {
+        mp - MARCH_BASED_MONTH_SHIFT
+    };
+    let y = yoe + era * YEARS_PER_ERA + i64::from(m <= 2);
     format!(
         "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{:03}Z",
         rem / 3_600_000,

@@ -54,6 +54,40 @@ use stats::{code_name, Outcome, Recorder};
 /// any request this tool waits for.
 const INTENT_LIFETIME_MS: u64 = 120_000;
 const ECIES_SPEC: &str = "ec-p256-ecies";
+/// The connect timeout of a gRPC channel to a cosigner, in seconds.
+const CONNECT_TIMEOUT_SECS: u64 = 5;
+/// The deadline of one `/metrics` scrape, in seconds.
+const SCRAPE_TIMEOUT_SECS: u64 = 5;
+/// The deadline of one `Health` probe, in seconds.
+const HEALTH_TIMEOUT_SECS: u64 = 5;
+/// The deadline of one DKG call to the leader, in seconds.
+const DKG_TIMEOUT_SECS: u64 = 120;
+/// How many times a hosted key generation is retried while a cosigner answers UNAVAILABLE.
+const GENERATE_KEY_MAX_RETRIES: u64 = 5;
+/// The first retry pause of a ceremony client, in seconds.
+const BACKOFF_FIRST_SECS: f64 = 0.5;
+/// The number of doublings after which the retry pause stops growing.
+const BACKOFF_MAX_DOUBLINGS: u32 = 3;
+/// The longest retry pause of a ceremony client before jitter, in seconds.
+const BACKOFF_MAX_SECS: f64 = 4.0;
+/// The share of the retry pause that is always kept; the rest is randomised.
+const BACKOFF_JITTER_FLOOR: f64 = 0.5;
+/// The randomised share of the retry pause.
+const BACKOFF_JITTER_SPAN: f64 = 0.5;
+/// The length of a SHA-256 digest, in bytes.
+const SHA256_DIGEST_BYTES: usize = 32;
+/// The length of an Ed25519 group key, in bytes.
+const GROUP_KEY_BYTES: usize = 32;
+/// The pause between two samples of the open file descriptor count, in milliseconds.
+const FD_SAMPLE_INTERVAL_MS: u64 = 250;
+/// The length of an uncompressed P-256 point (tag byte and two coordinates), in bytes.
+const P256_UNCOMPRESSED_POINT_BYTES: usize = 65;
+/// The first byte of an uncompressed elliptic curve point.
+const UNCOMPRESSED_POINT_TAG: u8 = 0x04;
+/// Milliseconds in a second, to turn a measured duration into milliseconds.
+const MS_PER_SEC: f64 = 1000.0;
+/// The scale that rounds a value in milliseconds to three decimals.
+const MS_ROUNDING_SCALE: f64 = 1000.0;
 
 #[derive(Parser)]
 #[command(
@@ -288,7 +322,7 @@ impl Ctx {
             .ok_or_else(|| format!("no target {i}"))?;
         let endpoint = Endpoint::from_shared(url.clone())
             .map_err(|e| format!("bad endpoint {url}: {e}"))?
-            .connect_timeout(Duration::from_secs(5))
+            .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
             .tls_config(self.tls.clone().domain_name(name.clone()))?;
         Ok(SignerClient::new(endpoint.connect_lazy()))
     }
@@ -415,8 +449,12 @@ fn contended(s: &tonic::Status) -> bool {
 /// The pause before retry `attempt` (1, 2, ...): 0.5 s doubling to at most 4 s, a random half to
 /// all of it, so that colliding clients spread out.
 fn backoff(attempt: u32) -> Duration {
-    let full = (0.5 * 2f64.powi(attempt.saturating_sub(1).min(3) as i32)).min(4.0);
-    Duration::from_secs_f64(full * (0.5 + 0.5 * rand::random::<f64>()))
+    let full = (BACKOFF_FIRST_SECS
+        * 2f64.powi(attempt.saturating_sub(1).min(BACKOFF_MAX_DOUBLINGS) as i32))
+    .min(BACKOFF_MAX_SECS);
+    Duration::from_secs_f64(
+        full * (BACKOFF_JITTER_FLOOR + BACKOFF_JITTER_SPAN * rand::random::<f64>()),
+    )
 }
 
 impl Client {
@@ -675,7 +713,7 @@ impl Run {
         let (key_id, group) = &keys[(seq % keys.len() as u64) as usize];
         // Canton's sign payload: 0x1220 ‖ a SHA-256 digest (docs/wire-contract.md).
         let mut message = vec![0x12, 0x20];
-        message.extend_from_slice(&random::<32>());
+        message.extend_from_slice(&random::<SHA256_DIGEST_BYTES>());
         let now = intent::now_ms();
         let unsigned = pb::SignIntent {
             version: intent::INTENT_VERSION,
@@ -849,7 +887,7 @@ impl Run {
         first_key: &Mutex<Option<Vec<u8>>>,
         key: &[u8],
     ) -> Option<String> {
-        if key.len() != 32 {
+        if key.len() != GROUP_KEY_BYTES {
             return Some(format!("a group key of {} bytes", key.len()));
         }
         if same_key {
@@ -1088,7 +1126,7 @@ fn spawn_fd_sampler(fd_peak: &Arc<AtomicU64>) -> tokio::task::JoinHandle<()> {
             if let Some(n) = open_fds() {
                 peak.fetch_max(n, Ordering::Relaxed);
             }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            tokio::time::sleep(Duration::from_millis(FD_SAMPLE_INTERVAL_MS)).await;
         }
     })
 }
@@ -1196,7 +1234,7 @@ fn fd_soft_limit() -> Option<u64> {
 async fn scrape(ctx: &Ctx) -> (BTreeMap<String, prom::Scrape>, Vec<String>) {
     let (mut pages, mut errors) = (BTreeMap::new(), Vec::new());
     for (name, url) in &ctx.metrics {
-        match prom::fetch(url, Duration::from_secs(5)).await {
+        match prom::fetch(url, Duration::from_secs(SCRAPE_TIMEOUT_SECS)).await {
             Ok(text) => {
                 pages.insert(name.clone(), prom::parse(&text));
             }
@@ -1211,9 +1249,12 @@ async fn health(ctx: &Ctx) -> BTreeMap<String, bool> {
     let mut out = BTreeMap::new();
     for (i, (name, _)) in ctx.targets.iter().enumerate() {
         let ok = match ctx.connect(i) {
-            Ok(mut c) => bounded(Duration::from_secs(5), c.health(pb::HealthRequest {}))
-                .await
-                .is_ok_and(|h| h.ok),
+            Ok(mut c) => bounded(
+                Duration::from_secs(HEALTH_TIMEOUT_SECS),
+                c.health(pb::HealthRequest {}),
+            )
+            .await
+            .is_ok_and(|h| h.ok),
             Err(_) => false,
         };
         out.insert(name.clone(), ok);
@@ -1470,7 +1511,7 @@ async fn setup_frost_key(
                 key_id: key_id.to_string(),
                 intent: Some(intent::sign_intent(&ctx.signer, &unsigned)?),
             };
-            let reply = bounded(Duration::from_secs(120), leader.dkg(request))
+            let reply = bounded(Duration::from_secs(DKG_TIMEOUT_SECS), leader.dkg(request))
                 .await
                 .map_err(|s| format!("DKG of {key_id}: {:?}: {}", s.code(), s.message()))?;
             (reply.group_verifying_key, true)
@@ -1539,7 +1580,9 @@ async fn generate_hosted_key(
         };
         tokio::time::sleep(Duration::from_secs_f64(1.0 / GENERATIONS_PER_SEC)).await;
         match bounded(ctx.timeout, leader.generate_key(request)).await {
-            Err(s) if s.code() == tonic::Code::Unavailable && attempt < 5 => {
+            Err(s)
+                if s.code() == tonic::Code::Unavailable && attempt < GENERATE_KEY_MAX_RETRIES =>
+            {
                 attempt += 1;
                 eprintln!(
                     "setup: hosted key {key_id}: UNAVAILABLE ({}), retrying in {} s",
@@ -1604,9 +1647,9 @@ async fn ecdh_op(ctx: &Ctx, key_id: &str) -> Result<Op, Fail> {
     let spki = reply.public_key_der;
     let hosted_point = spki
         .len()
-        .checked_sub(65)
+        .checked_sub(P256_UNCOMPRESSED_POINT_BYTES)
         .and_then(|at| spki.get(at..))
-        .filter(|point| point.first() == Some(&0x04))
+        .filter(|point| point.first() == Some(&UNCOMPRESSED_POINT_TAG))
         .ok_or_else(|| {
             format!(
                 "{key_id}: unexpected public key encoding ({} bytes)",
@@ -1776,7 +1819,7 @@ async fn list_keys(
     for (name, url) in &ctx.targets {
         let endpoint = Endpoint::from_shared(url.clone())
             .map_err(|e| format!("bad endpoint {url}: {e}"))?
-            .connect_timeout(Duration::from_secs(5))
+            .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
             .tls_config(tls.clone().domain_name(name.clone()))?;
         let mut client = PeerClient::new(endpoint.connect_lazy());
         let mut t = ListKeysTarget::default();
@@ -1789,7 +1832,7 @@ async fn list_keys(
                     let took = begun.elapsed();
                     total += took;
                     t.keys = reply.keys.len();
-                    t.max_ms = t.max_ms.max(took.as_secs_f64() * 1000.0);
+                    t.max_ms = t.max_ms.max(took.as_secs_f64() * MS_PER_SEC);
                 }
                 Err(status) => {
                     t.errors += 1;
@@ -1801,9 +1844,11 @@ async fn list_keys(
         }
         let ok = t.calls - t.errors;
         if ok > 0 {
-            t.mean_ms = (total.as_secs_f64() * 1000.0 / f64::from(ok) * 1000.0).round() / 1000.0;
+            t.mean_ms = (total.as_secs_f64() * MS_PER_SEC / f64::from(ok) * MS_ROUNDING_SCALE)
+                .round()
+                / MS_ROUNDING_SCALE;
         }
-        t.max_ms = (t.max_ms * 1000.0).round() / 1000.0;
+        t.max_ms = (t.max_ms * MS_ROUNDING_SCALE).round() / MS_ROUNDING_SCALE;
         out.targets.insert(name.clone(), t);
     }
     Ok(out)

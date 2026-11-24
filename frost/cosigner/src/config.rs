@@ -5,6 +5,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// Longest `signing_policy.intent_max_lifetime_secs` accepted (one hour).
+const MAX_INTENT_LIFETIME_SECS: u64 = 3600;
+/// Largest `signing_policy.clock_skew_secs` accepted (one hour).
+const MAX_CLOCK_SKEW_SECS: u64 = 3600;
+/// Milliseconds in one second.
+const MILLIS_PER_SECOND: u64 = 1000;
+/// Smallest `signing_policy.journal_max_mib_per_key` accepted.
+const MIN_JOURNAL_MAX_MIB_PER_KEY: u32 = 4;
+/// Length of a SHA-256 digest of a certificate's public key (`tls_spki_sha256`).
+const SPKI_SHA256_BYTES: usize = 32;
+
 /// Static cluster configuration for one cosigner node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -600,12 +611,14 @@ impl SigningPolicyConfig {
                     .into(),
             ));
         }
-        if self.intent_max_lifetime_secs == 0 || self.intent_max_lifetime_secs > 3600 {
+        if self.intent_max_lifetime_secs == 0
+            || self.intent_max_lifetime_secs > MAX_INTENT_LIFETIME_SECS
+        {
             return Err(Config(
                 "signing_policy.intent_max_lifetime_secs must be 1..=3600".into(),
             ));
         }
-        if self.clock_skew_secs > 3600 {
+        if self.clock_skew_secs > MAX_CLOCK_SKEW_SECS {
             return Err(Config(
                 "signing_policy.clock_skew_secs must be at most 3600".into(),
             ));
@@ -633,7 +646,7 @@ impl SigningPolicyConfig {
                     "signing_policy.refresh_interval_waived_at {at:?} is not a UTC time like 2026-11-19T14:00:00Z"
                 )));
             };
-            if ms > crate::intent::now_ms() + self.clock_skew_secs * 1000 {
+            if ms > crate::intent::now_ms() + self.clock_skew_secs * MILLIS_PER_SECOND {
                 return Err(Config(format!(
                     "signing_policy.refresh_interval_waived_at {at:?} is more than clock_skew_secs ({} s) \
                      ahead of this node's clock: use the time you decided to refresh, not a later one \
@@ -648,7 +661,7 @@ impl SigningPolicyConfig {
     /// The journal size and retention are in range.
     fn check_journal_limits(&self) -> crate::Result<()> {
         use crate::DaemonError::Config;
-        if self.journal_max_mib_per_key < 4 {
+        if self.journal_max_mib_per_key < MIN_JOURNAL_MAX_MIB_PER_KEY {
             return Err(Config(
                 "signing_policy.journal_max_mib_per_key must be at least 4".into(),
             ));
@@ -1035,7 +1048,8 @@ impl Config {
     /// an operator CLI config may leave them out.
     fn validate_peer_pins(&self) -> crate::Result<()> {
         use crate::DaemonError::Config;
-        let mut owner: std::collections::HashMap<[u8; 32], u16> = std::collections::HashMap::new();
+        let mut owner: std::collections::HashMap<[u8; SPKI_SHA256_BYTES], u16> =
+            std::collections::HashMap::new();
         for p in &self.peers {
             let Some(list) = &p.tls_spki_sha256 else {
                 continue;

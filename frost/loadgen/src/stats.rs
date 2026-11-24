@@ -10,6 +10,21 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+/// How many distinct error messages are kept apart; the rest are counted as `(other)`.
+const MAX_DISTINCT_MESSAGES: usize = 31;
+/// Microseconds in a millisecond.
+const MICROS_PER_MS: f64 = 1000.0;
+/// The scale that rounds a value in milliseconds to three decimals.
+const MS_ROUNDING_SCALE: f64 = 1000.0;
+/// The divisor that turns a percentage into a fraction.
+const PERCENT_DIVISOR: f64 = 100.0;
+/// The median, as a percentile.
+const PERCENTILE_P50: f64 = 50.0;
+/// The 95th percentile.
+const PERCENTILE_P95: f64 = 95.0;
+/// The 99th percentile.
+const PERCENTILE_P99: f64 = 99.0;
+
 /// The outcome of one logical request (a driver call: every failover attempt included).
 #[derive(Debug, Clone)]
 pub struct Outcome {
@@ -154,7 +169,9 @@ impl Recorder {
         if let Some(m) = message {
             let key = message_key(outcome.code, &m);
             // 31 messages and `(other)`: at most 32 entries.
-            let key = if self.messages.contains_key(&key) || self.messages.len() < 31 {
+            let key = if self.messages.contains_key(&key)
+                || self.messages.len() < MAX_DISTINCT_MESSAGES
+            {
                 key
             } else {
                 "(other)".into()
@@ -279,11 +296,11 @@ fn leader_reports(leaders: BTreeMap<String, (u64, Vec<u64>)>) -> BTreeMap<String
 }
 
 fn millis(micros: u64) -> f64 {
-    round3(micros as f64 / 1000.0)
+    round3(micros as f64 / MICROS_PER_MS)
 }
 
 fn round3(v: f64) -> f64 {
-    (v * 1000.0).round() / 1000.0
+    (v * MS_ROUNDING_SCALE).round() / MS_ROUNDING_SCALE
 }
 
 /// Percentiles by nearest rank: the smallest sample with at least `p` percent at or below it.
@@ -294,16 +311,16 @@ fn latency(micros: &mut [u64]) -> Latency {
     micros.sort_unstable();
     let rank = |p: f64| {
         let n = micros.len();
-        let idx = ((p / 100.0) * n as f64).ceil() as usize;
+        let idx = ((p / PERCENT_DIVISOR) * n as f64).ceil() as usize;
         micros.get(idx.clamp(1, n) - 1).copied().unwrap_or_default()
     };
     let sum: u128 = micros.iter().map(|&m| u128::from(m)).sum();
     Latency {
         count: micros.len() as u64,
         mean_ms: millis((sum / micros.len() as u128) as u64),
-        p50_ms: millis(rank(50.0)),
-        p95_ms: millis(rank(95.0)),
-        p99_ms: millis(rank(99.0)),
+        p50_ms: millis(rank(PERCENTILE_P50)),
+        p95_ms: millis(rank(PERCENTILE_P95)),
+        p99_ms: millis(rank(PERCENTILE_P99)),
         max_ms: millis(*micros.last().expect("not empty")),
     }
 }

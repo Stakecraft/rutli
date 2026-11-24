@@ -575,10 +575,10 @@ class FrostBackend(
     * never overrides a newer value another call wrote. */
   private def demote(i: Int): Unit = demote(i, (i + 1) % channels.size)
 
-  /** [[demote]] with the endpoint that takes the lead named: `to`, the one that served the call,
-    * for an endpoint whose demotion was held back until the call was served (it said it lacks the
-    * key). The next endpoint in the ring is not known to be good then: it may be one that failed
-    * later in the same walk. */
+  /** [[demote]] with the endpoint that takes the lead named, for an endpoint whose demotion was held
+    * back (it said it lacks the key): `to` is the endpoint that served the call, or for a sign
+    * that ended otherwise the one the lead would have reached (`holdOnlyIfAll`). The next endpoint
+    * in the ring is not known to be good then: it may be one that failed later in the same walk. */
   private def demote(i: Int, to: Int): Unit = {
     // Recorded even when another call already moved the lead: it is still evidence that this node
     // failed just now, and it only delays the first endpoint's recovery. Before the lead moves, so
@@ -671,7 +671,13 @@ class FrostBackend(
     * with the retryable [[unconfirmed]]. Otherwise a lookup of a key that exists nowhere would
     * take the lead from every endpoint, and with it the sign rotation ([[signStart]]) for
     * [[leaderRecovery]]. A failure it does not name costs the lead at once, as `demoteOn` says;
-    * one it names costs the lead later only if `demoteOn` holds for it too. */
+    * one it names costs the lead later only if `demoteOn` holds for it too.
+    *
+    * `holdOnlyIfAll` narrows this for a sign: the endpoints `lacksKey` held back keep the lead only
+    * when every endpoint of the roster was asked and every one was held back. However else the
+    * call ends — the request budget is spent, a failure is thrown at once, the last endpoint fails
+    * over and some endpoint was not held back — they lose the lead after all, and it goes where it
+    * would be had each been demoted as it failed. */
   private def withCheckedFailover[A](
       what: String,
       retryOn: Status => Boolean,
@@ -687,8 +693,14 @@ class FrostBackend(
       budgetEnd: Long,
       wholeRoster: Option[Either[StatusRuntimeException, Rejected] => Option[Boolean]] = None,
       lacksKey: Either[StatusRuntimeException, Rejected] => Boolean = (_: Either[StatusRuntimeException, Rejected]) => false,
+      holdOnlyIfAll: Boolean = false,
   )(op: SignerGrpc.SignerBlockingStub => A): A = {
     val n = channels.size
+    // With `holdOnlyIfAll`: the call ends, and not with every endpoint held back. The endpoints
+    // in `held` (latest first) lose the lead to `to`, where it would be had each been demoted as
+    // it failed.
+    def release(held: List[Int], to: Int): Unit =
+      if (holdOnlyIfAll) held.reverse.foreach(j => demote(j, to))
     // One attempt in flight at a time: the next cosigner is asked only once this attempt has failed
     // or hit its deadline, which cancels it (the RPC is reset). Each attempt's deadline is capped
     // by what is left of the budget, and no attempt starts once less than MinAttempt is left.
@@ -696,6 +708,8 @@ class FrostBackend(
     // `seen`: what the endpoints asked so far in this call failed with (for `wholeRoster`).
     @tailrec def attempt(k: Int, lastReason: String, seen: Seen): A = {
       if (k > 0 && left < MinAttempt.toNanos) {
+        // The call ends before this endpoint was asked: the next call starts at it.
+        release(seen.lackedKeyAt, (from + k) % n)
         logger.warn(s"FROST: $what: request-timeout $requestTimeout spent after $k cosigner(s); last: $lastReason")
         notes.add("request-timeout=spent")
         throw Status.DEADLINE_EXCEEDED
@@ -755,8 +769,13 @@ class FrostBackend(
                 case None         => seen.copy(other = Some(error))
               }
           }
-          val seenNow: Seen = if (deferred) counted.copy(lackedKeyAt = i :: counted.lackedKeyAt) else counted
-          if (loseLead && !deferred) demote(i)
+          // Held back only while the walk goes on: a failure that ends the call costs the lead now.
+          val held: Boolean = deferred && retry
+          val seenNow: Seen = if (held) counted.copy(lackedKeyAt = i :: counted.lackedKeyAt) else counted
+          // A failure that is thrown at once ends the call here: the lead goes to this endpoint,
+          // which keeps it or passes it on in the next line.
+          if (!retry) release(seen.lackedKeyAt, i)
+          if (loseLead && !held) demote(i)
           if (!retry) throw error
           if (k + 1 < n) {
             val next = endpoints((i + 1) % n)
@@ -764,6 +783,9 @@ class FrostBackend(
             notes.add(s"failover=${endpoints(i)}→$next reason=$code")
             attempt(k + 1, reason, seenNow)
           } else {
+            // Every endpoint was asked. Unless every one was held back, the lead has gone round
+            // the ring: it is back at the endpoint the call started at.
+            if (seenNow.lackedKeyAt.size < n) release(seenNow.lackedKeyAt, from)
             logger.warn(s"FROST: $what via ${endpoints(i)} failed ($reason); no cosigner left to try")
             throw (if (wholeRoster.isDefined) rosterVerdict(what, notes, seenNow, error) else error)
           }
@@ -1753,6 +1775,14 @@ class FrostBackend(
                   budgetEnd,
                   // A leader's own "cannot sign" is not the cluster's while a cosigner was unreachable.
                   Some(signAnswerIsLeaderLocal _),
+                  // And it does not cost a leader the lead when every leader answers so (the shares
+                  // are gone, a ceremony holds the key on all of them): none is at fault then, and
+                  // none leaves the rotation. In every other case it costs the lead as before. So
+                  // it does in the retry after the cluster id was learned again: leaders may have
+                  // lost the lead before the refusal, so the retry holds nobody back, and the sign
+                  // as a whole leaves the lead where it would be without holding back.
+                  (failure: Either[StatusRuntimeException, Rejected]) => !relearned && signLeaderCannotSignNow(failure),
+                  holdOnlyIfAll = true,
                 )(_.sign(built))
               catch {
                 // A cosigner says the intent names another cluster: the learned id is wrong (one
@@ -2360,6 +2390,27 @@ object FrostBackend {
       case Right(rejected) => if (rejected.code == BadSignature) Some(true) else None
     }
 
+  /** `lacksKey` of [[withCheckedFailover]] for a sign: the leader's own status that says it cannot
+    * sign this key now ([[signAnswerIsLeaderLocal]]: NOT_FOUND, FAILED_PRECONDITION, ABORTED,
+    * UNIMPLEMENTED). When every leader of the roster answers so, nobody is demoted: otherwise a
+    * sign for a key whose shares are gone, or one that arrives while a ceremony holds the key
+    * everywhere, would take every cosigner out of the sign rotation for [[leaderRecovery]], for
+    * every key.
+    *
+    * That is the only case (`holdOnlyIfAll` of [[withCheckedFailover]]). A leader that answered so
+    * loses the lead when another leader signs, when another leader fails in any other way (it
+    * could not be reached, it failed internally, its signature did not verify), when a later
+    * leader's refusal is returned at once (also a cluster-id refusal, after which the sign is
+    * tried again from the refusing leader), and when the request budget is spent. The lead and
+    * the demotion times then are what they would be had it been demoted as it failed, so a leader
+    * cannot keep the lead, or stay the only sign start, by answering so. The retry after the
+    * cluster id was learned again holds nobody back: there every failing leader is demoted at once.
+    *
+    * A signature that does not verify is not in this set: a leader that returns one is demoted at
+    * once, whether or not another leader signs. So are INTERNAL, UNKNOWN and an unreachable leader. */
+  private def signLeaderCannotSignNow(failure: Either[StatusRuntimeException, Rejected]): Boolean =
+    failure.isLeft && signAnswerIsLeaderLocal(failure).isDefined
+
   /** Which error statuses take the lead from a SIGN leader (see [[withCheckedFailover]]): every
     * status the sign fails over on, and also the refusals returned at once — with an intent.
     *
@@ -2369,6 +2420,9 @@ object FrostBackend {
     * not change what can be signed. Keeping the lead on a refusing node would let one compromised
     * cosigner stop every sign by answering with a refusal while it leads, from process start when
     * it is endpoint 0.
+    *
+    * A leader's own "cannot sign now" costs it the lead like any status the sign fails over on,
+    * except when every leader of the roster answers so ([[signLeaderCannotSignNow]]).
     *
     * Not demoted:
     *   - a cluster-id refusal that makes the driver learn the id again: the stale id was the
@@ -2425,7 +2479,7 @@ object FrostBackend {
       lastOwn: Option[(String, Exception)] = None,
       unreachable: Option[(String, StatusRuntimeException)] = None,
       other: Option[Exception] = None,
-      // Endpoint indices that said they lack the key, latest first: demoted only if the call is served.
+      // Endpoint indices whose demotion is held back (they said they lack the key), latest first.
       lackedKeyAt: List[Int] = Nil,
   )
 

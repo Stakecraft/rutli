@@ -37,6 +37,20 @@ use rutli_cosigner::seal::{KeyFileBinding, RecordKind, RecordMeta, Sealer};
 mod pki;
 
 const KEY: &str = "bench-frost-namespace";
+/// How long the benchmark's signing intent is valid, in milliseconds.
+const INTENT_LIFETIME_MS: u64 = 60_000;
+/// The journal's retention in days.
+const JOURNAL_RETENTION_DAYS: u32 = 90;
+/// The journal's size ceiling per key, in MiB.
+const JOURNAL_MAX_MIB: u64 = 64;
+/// The shift that turns MiB into bytes.
+const MIB_SHIFT: u32 = 20;
+/// The most shares one charge to the rate-limit ledger may cover.
+const MAX_SHARES_PER_CHARGE: u32 = 8;
+/// How far the clock passed to the journal advances per append, in milliseconds.
+const CLOCK_STEP_MS: u64 = 200;
+/// The identifier of the third cosigner of the 2-of-3 key.
+const THIRD_COSIGNER_ID: u16 = 3;
 
 /// Canton's sign payload: `0x1220 ‖ sha256` (34 bytes, docs/wire-contract.md).
 fn message() -> Vec<u8> {
@@ -84,7 +98,7 @@ fn intent_verify(c: &mut Criterion) {
         digest: message(),
         request_id: intent::new_request_id().to_vec(),
         issued_at_ms: now,
-        not_after_ms: now + 60_000,
+        not_after_ms: now + INTENT_LIFETIME_MS,
         ..Default::default()
     };
     let signed = intent::sign_intent(&pki.signer("driver"), &unsigned).unwrap();
@@ -105,8 +119,8 @@ fn journal_append(c: &mut Criterion) {
         dir.path().join("journal"),
         1,
         Retention {
-            days: 90,
-            max_bytes: 64 << 20,
+            days: JOURNAL_RETENTION_DAYS,
+            max_bytes: JOURNAL_MAX_MIB << MIB_SHIFT,
         },
     )
     .unwrap();
@@ -115,7 +129,7 @@ fn journal_append(c: &mut Criterion) {
     let limits = Limits {
         per_min: 0,
         per_day: 0,
-        max_shares_per_charge: 8,
+        max_shares_per_charge: MAX_SHARES_PER_CHARGE,
     };
     let digest = hex::encode(message());
     let mut now = intent::now_ms();
@@ -125,7 +139,7 @@ fn journal_append(c: &mut Criterion) {
     group.bench_function("append_fsync", |bench| {
         bench.iter(|| {
             n += 1;
-            now += 200;
+            now += CLOCK_STEP_MS;
             // A new request id per append, as every driver call has: each one is a new charge.
             let entry = JournalEntry {
                 key_id: KEY.into(),
@@ -146,7 +160,8 @@ fn journal_append(c: &mut Criterion) {
 fn seal_unseal(c: &mut Criterion) {
     // A real share record: what the key store seals for a FROST key.
     let (shares, pkp) =
-        rutli_frost_core::dealer::split_ed25519_seed(&random_32(), &[1, 2, 3], 2).unwrap();
+        rutli_frost_core::dealer::split_ed25519_seed(&random_32(), &[1, 2, THIRD_COSIGNER_ID], 2)
+            .unwrap();
     let share = Share {
         key_package: frost_ed25519::keys::KeyPackage::try_from(shares[0].clone()).unwrap(),
         public_key_package: pkp,

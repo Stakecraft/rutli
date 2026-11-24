@@ -45,6 +45,9 @@ use serde::Serialize;
 
 use crate::pb::KeyStatusReply;
 
+/// Length in bytes of an Ed25519 public key (the FROST group verifying key).
+const ED25519_KEY_BYTES: usize = 32;
+
 /// One node's answer (or the error asking it), as collected by the caller.
 pub struct NodeView {
     pub identifier: u16,
@@ -390,7 +393,7 @@ fn build_report(
     let fingerprint = group_verifying_key
         .as_ref()
         .filter(|_| acc.problems.is_empty())
-        .and_then(|h| <[u8; 32]>::try_from(hex::decode(h).ok()?).ok())
+        .and_then(|h| <[u8; ED25519_KEY_BYTES]>::try_from(hex::decode(h).ok()?).ok())
         .map(|g| crate::share_delivery::ed25519_fingerprint(&g));
     VerifyReport {
         key_id: key_id.into(),
@@ -427,7 +430,7 @@ fn check_one(
     if s.identifier != me.serialize() {
         return Err("answers with a different FROST identifier than it is configured as".into());
     }
-    let group: [u8; 32] = s
+    let group: [u8; ED25519_KEY_BYTES] = s
         .group_verifying_key
         .as_slice()
         .try_into()

@@ -22,6 +22,36 @@ use rutli_cosigner::peer::{GrpcPeer, LocalPeer, PeerApi};
 use rutli_cosigner::service::{PeerPins, PeerSvc, SignerSvc};
 use rutli_cosigner::{DaemonError, Result};
 
+/// The soft open-file limit a container runtime typically starts a process with; below it the
+/// daemon warns, and it is assumed when the limit cannot be read.
+const CONTAINER_DEFAULT_NOFILE_SOFT_LIMIT: u64 = 1024;
+/// How old a key-store create temp must be before the start-up sweep removes it.
+const STALE_CREATE_TEMP_MIN_AGE_SECS: u64 = 300;
+/// Days left on a trust anchor below which start-up warns that it expires soon.
+const TRUST_ANCHOR_EXPIRY_WARN_DAYS: i64 = 30;
+/// Shift that converts mebibytes to bytes.
+const MIB_TO_BYTES_SHIFT: u32 = 20;
+/// How often the key-epoch proof gauge is refreshed.
+const PROOF_GAUGE_INTERVAL_SECS: u64 = 60;
+/// Smallest allowed anti-entropy sweep interval.
+const ANTI_ENTROPY_MIN_INTERVAL_SECS: u64 = 10;
+/// How often the server pings an idle HTTP/2 connection.
+const HTTP2_KEEPALIVE_INTERVAL_SECS: u64 = 60;
+/// How long the server waits for a reply to a keepalive ping before closing the connection.
+const HTTP2_KEEPALIVE_TIMEOUT_SECS: u64 = 20;
+/// Length of a FROST group (verifying) key in bytes.
+const GROUP_KEY_BYTES: usize = 32;
+/// Milliseconds in one day.
+const MILLIS_PER_DAY: u64 = 86_400_000;
+/// Length of a sign intent request id in bytes.
+const INTENT_REQUEST_ID_BYTES: usize = 16;
+/// How long a delete-key intent stays valid after it is issued.
+const DELETE_INTENT_LIFETIME_MS: u64 = 120_000;
+/// Length of an approval nonce in bytes.
+const APPROVAL_NONCE_BYTES: usize = 16;
+/// Number of leading digest bytes shown as the confirmation code of a plaintext migration.
+const MIGRATE_CONFIRM_CODE_BYTES: usize = 8;
+
 #[derive(Parser)]
 #[command(
     name = "rutli-cosigner",
@@ -841,7 +871,7 @@ async fn main() -> Result<()> {
             target = l.target,
             "could not raise the open-file limit to its hard limit"
         ),
-        Some(l) if l.soft < 1024 => tracing::warn!(
+        Some(l) if l.soft < CONTAINER_DEFAULT_NOFILE_SOFT_LIMIT => tracing::warn!(
             soft = l.soft,
             hard = l.hard,
             "the open-file limit is low; raise the container's nofile limit (the gRPC connection cap follows it)"
@@ -927,7 +957,9 @@ async fn main() -> Result<()> {
     // shares. Say so at every start until someone runs one.
     // Temps of a create that crashed before its no-replace move: sealed keys that never became
     // live. Old enough that no concurrent offline create (import-share in the pod) still owns them.
-    match keystore.sweep_stale_create_temps(std::time::Duration::from_secs(300)) {
+    match keystore.sweep_stale_create_temps(std::time::Duration::from_secs(
+        STALE_CREATE_TEMP_MIN_AGE_SECS,
+    )) {
         Ok(removed) => {
             for name in removed {
                 tracing::warn!(file = %name, "removed a stale key-store create temp (interrupted create)");
@@ -988,7 +1020,7 @@ async fn main() -> Result<()> {
                     "trust anchor is expired or not yet valid, accepted because tls.allow_expired_ca \
                      is set — finish the CA rotation and remove the flag"
                 );
-            } else if a.days_left < 30 {
+            } else if a.days_left < TRUST_ANCHOR_EXPIRY_WARN_DAYS {
                 tracing::warn!(
                     index,
                     subject = %a.subject,
@@ -1101,7 +1133,7 @@ async fn main() -> Result<()> {
             cfg.identifier,
             rutli_cosigner::journal::Retention {
                 days: policy.journal_retention_days,
-                max_bytes: u64::from(policy.journal_max_mib_per_key) << 20,
+                max_bytes: u64::from(policy.journal_max_mib_per_key) << MIB_TO_BYTES_SHIFT,
             },
         )?;
         tracing::info!(
@@ -1221,7 +1253,7 @@ async fn main() -> Result<()> {
     // `rutli_key_epoch_proven` / `rutli_key_epoch_age_seconds`: read-only, its own thread.
     rutli_cosigner::proof::spawn_gauge_updater(
         cfg.data_dir.join("keys"),
-        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(PROOF_GAUGE_INTERVAL_SECS),
     );
 
     // Build the peer roster: this node as a local peer, every other as a lazy gRPC client.
@@ -1331,7 +1363,10 @@ async fn main() -> Result<()> {
             );
         }
         let sweep = (node.clone(), peers.clone());
-        let interval = std::time::Duration::from_secs(h.anti_entropy_interval_secs.max(10));
+        let interval = std::time::Duration::from_secs(
+            h.anti_entropy_interval_secs
+                .max(ANTI_ENTROPY_MIN_INTERVAL_SECS),
+        );
         rutli_cosigner::supervise::spawn_supervised(
             "anti_entropy",
             sweep,
@@ -1422,8 +1457,9 @@ async fn main() -> Result<()> {
     // TLS handshake (without TLS: to send its first bytes).
     let listener = rutli_cosigner::accept::bind(addr, rutli_cosigner::accept::LISTEN_BACKLOG)
         .map_err(|e| DaemonError::Config(format!("cannot listen on {addr}: {e}")))?;
-    let connection_limit =
-        rutli_cosigner::accept::connection_limit(fd_limit.map_or(1024, |l| l.soft));
+    let connection_limit = rutli_cosigner::accept::connection_limit(
+        fd_limit.map_or(CONTAINER_DEFAULT_NOFILE_SOFT_LIMIT, |l| l.soft),
+    );
     let incoming = rutli_cosigner::accept::incoming(
         listener,
         connection_limit,
@@ -1453,8 +1489,12 @@ async fn main() -> Result<()> {
     let mut server = tonic::transport::Server::builder()
         // A peer that vanished without closing (host down, a dropped NAT entry) is found by the
         // pings and its connection closed, instead of holding a descriptor and a slot for good.
-        .http2_keepalive_interval(Some(std::time::Duration::from_secs(60)))
-        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(20)));
+        .http2_keepalive_interval(Some(std::time::Duration::from_secs(
+            HTTP2_KEEPALIVE_INTERVAL_SECS,
+        )))
+        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(
+            HTTP2_KEEPALIVE_TIMEOUT_SECS,
+        )));
     if let Some(t) = &tls {
         server = server.tls_config(t.server.clone())?;
     }
@@ -1767,7 +1807,7 @@ async fn discard_partial_key_command(
     confirm_group_key: &str,
 ) -> Result<()> {
     let _lock = rutli_cosigner::instance_lock::InstanceLock::acquire(&cfg.data_dir)?;
-    let confirm: [u8; 32] = hex::decode(confirm_group_key.trim())
+    let confirm: [u8; GROUP_KEY_BYTES] = hex::decode(confirm_group_key.trim())
         .ok()
         .and_then(|b| b.try_into().ok())
         .ok_or_else(|| {
@@ -2564,7 +2604,7 @@ fn backup_retain_command(
     let settings = r::Settings {
         node: cfg.identifier,
         cluster_uuid: cfg.keyfile.cluster_uuid.clone(),
-        min_proof_age_ms: min_proof_age_days.saturating_mul(86_400_000),
+        min_proof_age_ms: min_proof_age_days.saturating_mul(MILLIS_PER_DAY),
         keep_older_epochs,
         keep_count,
     };
@@ -3126,7 +3166,7 @@ fn delete_intent(
     collected: Vec<rutli_cosigner::pb::IntentApproval>,
 ) -> rutli_cosigner::pb::SignIntent {
     let now = rutli_cosigner::intent::now_ms();
-    let mut request_id = [0u8; 16];
+    let mut request_id = [0u8; INTENT_REQUEST_ID_BYTES];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut request_id);
     rutli_cosigner::pb::SignIntent {
         version: rutli_cosigner::intent::INTENT_VERSION,
@@ -3136,7 +3176,7 @@ fn delete_intent(
         digest: digest.to_vec(),
         request_id: request_id.to_vec(),
         issued_at_ms: now,
-        not_after_ms: now + 120_000,
+        not_after_ms: now + DELETE_INTENT_LIFETIME_MS,
         approval_nonce: nonce,
         approvals: collected,
         ..Default::default()
@@ -3153,7 +3193,7 @@ fn collect_delete_approvals(
     threshold: usize,
     timeout: std::time::Duration,
 ) -> Result<(Vec<u8>, Vec<rutli_cosigner::pb::IntentApproval>)> {
-    let mut nonce = [0u8; 16];
+    let mut nonce = [0u8; APPROVAL_NONCE_BYTES];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
     let (request_id, file, approvals_dir) =
         post_delete_request(inbox, key_id, delete_digest, threshold, &nonce)?;
@@ -3535,7 +3575,7 @@ fn keyfile_migrate_plaintext(
         sha2::Sha256::digest(&bytes)
             .iter()
             .copied()
-            .take(8)
+            .take(MIGRATE_CONFIRM_CODE_BYTES)
             .collect::<Vec<u8>>(),
     );
     let what = describe_plaintext_record(keystore, key_id)?;

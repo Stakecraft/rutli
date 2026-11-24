@@ -68,6 +68,8 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
     @volatile var accept: Option[String] = None
     /** Refuse every Sign with this status (a policy refusal, say). */
     @volatile var refuse: Option[Status] = None
+    /** Refuse with this status a Sign that got past the cluster check (see `accept`). */
+    @volatile var refuseOwnCluster: Option[Status] = None
     val signs = new ConcurrentLinkedQueue[SignRequest]()
     /** Sign calls in flight at this cosigner right now, and the most seen at once. */
     val inFlight = new AtomicInteger(0)
@@ -116,6 +118,7 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
             .withDescription(s"signing intent refused: intent is for cluster \"${named.get}\", this is ${accept.get}")
             .asRuntimeException()
         )
+      else if (refuseOwnCluster.isDefined) obs.onError(refuseOwnCluster.get.asRuntimeException())
       else if (failed.getAndIncrement() < failSigns) obs.onError(Status.UNAVAILABLE.withDescription("test: down").asRuntimeException())
       else {
         obs.onNext(SignReply.newBuilder().setSignature(ByteString.copyFrom(ed25519(req.getMessage.toByteArray))).build())
@@ -340,6 +343,69 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
       com.stakecraft.rutli.FrostConfig(signIntents = "off").signIntentsEnabled shouldBe false
       com.stakecraft.rutli.FrostConfig().signIntentsEnabled shouldBe true
       an[IllegalArgumentException] should be thrownBy com.stakecraft.rutli.FrostConfig(signIntents = "maybe").signIntentsEnabled
+    }
+  }
+
+  "a sign leader that answers from its own state (a ceremony holds the key)" should {
+
+    val inCeremony = Status.ABORTED.withDescription(
+      "a refresh ceremony (id refresh-0123456789abcdef0123456789abcdef) is already in progress for key " + Key
+    )
+
+    "lose the lead when a later leader's refusal ends the sign before every leader was asked" in {
+      val recs = Seq(new Recorder(Cluster), new Recorder(Cluster), new Recorder(Cluster))
+      val b = backend(recs.zipWithIndex.map { case (r, i) => serve(s"cosigner${i + 1}", r) -> s"cosigner${i + 1}" })
+      try {
+        recs(0).refuse = Some(inCeremony)
+        recs(1).refuse = Some(Status.PERMISSION_DENIED.withDescription("signing intent refused: test"))
+        val e = intercept[io.grpc.StatusRuntimeException](Await.result(b.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds))
+        e.getStatus.getCode shouldBe Status.Code.PERMISSION_DENIED
+        recs.map(_.signs.size) shouldBe Seq(1, 1, 0) // returned at once: the third was not asked
+        // Both still answer as before. The lead passed both, so the next sign reaches the third.
+        Await.result(b.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds) shouldBe ed25519(Digest)
+        recs.map(_.signs.size) shouldBe Seq(1, 1, 1)
+      } finally b.close()
+    }
+
+    "lose the lead when the sign is served only after the cluster id was learned again" in {
+      val recs = Seq(new Recorder("oldcluster000000"), new Recorder("oldcluster000000"), new Recorder("oldcluster000000"))
+      val b = backend(recs.zipWithIndex.map { case (r, i) => serve(s"cosigner${i + 1}", r) -> s"cosigner${i + 1}" })
+      try {
+        Await.result(b.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds)
+        recs.map(_.signs.size) shouldBe Seq(1, 0, 0)
+        // The cluster's id changes, and the first cosigner cannot sign now.
+        recs.foreach { r => r.clusterId = Cluster; r.accept = Some(Cluster) }
+        recs(0).refuse = Some(inCeremony)
+        val notes = new AuditNotes
+        Await.result(b.withAuditNotes(notes)(b.sign(Digest, Key, SigningAlgoSpec.Ed25519)), 20.seconds) shouldBe ed25519(Digest)
+        notes.render should include("intent-cluster=relearned")
+        // The second refused the stale id, then signed the retry: one sign, and the first lost the lead in it.
+        recs.map(_.signs.size) shouldBe Seq(2, 2, 0)
+        recs(0).refuse = None
+        Await.result(b.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds) shouldBe ed25519(Digest)
+        recs.map(_.signs.size) shouldBe Seq(2, 3, 0)
+      } finally b.close()
+    }
+
+    "lose the lead with every other leader in the retry after the cluster id was learned again" in {
+      // Rotate mode, where it shows: a leader that lost the lead is not a sign start.
+      val recs = Seq(new Recorder("oldcluster000000"), new Recorder("oldcluster000000"), new Recorder("oldcluster000000"))
+      val b = backend(recs.zipWithIndex.map { case (r, i) => serve(s"cosigner${i + 1}", r) -> s"cosigner${i + 1}" }, rotate = true)
+      try {
+        Await.result(b.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds) // turn 0
+        recs.map(_.signs.size) shouldBe Seq(1, 0, 0)
+        // The cluster's id changes, and a ceremony holds the key on every cosigner.
+        recs.foreach { r => r.clusterId = Cluster; r.accept = Some(Cluster); r.refuseOwnCluster = Some(inCeremony) }
+        // Turn 1: the second refuses the stale id; the retry asks the second, the third, the first.
+        val e = intercept[io.grpc.StatusRuntimeException](Await.result(b.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds))
+        e.getStatus.getCode shouldBe Status.Code.ABORTED
+        recs.map(_.signs.size) shouldBe Seq(2, 2, 1)
+        // The retry held nobody back: all three lost the lead, and the lead went from the first to
+        // the second. With no sign start left, every sign starts at the preferred leader.
+        recs.foreach(_.refuseOwnCluster = None)
+        (1 to 6).foreach(_ => Await.result(b.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds) shouldBe ed25519(Digest))
+        recs.map(_.signs.size) shouldBe Seq(2, 8, 1)
+      } finally b.close()
     }
   }
 
