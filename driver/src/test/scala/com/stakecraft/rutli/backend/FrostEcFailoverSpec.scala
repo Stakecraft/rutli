@@ -328,12 +328,17 @@ class FrostEcFailoverSpec extends AnyWordSpec with Matchers {
       await(fresh.getPublicKey(rsa)).spec shouldBe EncryptionKeySpec.Rsa2048
     }
 
-    "still be reported as missing when no cosigner has it" in withRig { r =>
+    "still be reported as missing when no cosigner has it any more" in withRig { r =>
       val b = r.backend()
       val rsa = await(b.generateEncryptionKeyPair(EncryptionKeySpec.Rsa2048, None)) // spec learned
-      val gone = rsa + "-gone"
-      code(await(b.getPublicKey(gone))) shouldBe Status.Code.NOT_FOUND
-      r.old.publicKeyCalls.get should be >= 1
+      r.old.missingEverything = true
+      r.current.forget(rsa)
+      val (oldBefore, currentBefore) = (r.old.publicKeyCalls.get, r.current.publicKeyCalls.get)
+      // The same id, so the read takes the path for a key known to be RSA: every cosigner is
+      // asked once before "not found" stands.
+      code(await(b.getPublicKey(rsa))) shouldBe Status.Code.NOT_FOUND
+      r.old.publicKeyCalls.get shouldBe oldBefore + 1
+      r.current.publicKeyCalls.get shouldBe currentBefore + 1
     }
   }
 }

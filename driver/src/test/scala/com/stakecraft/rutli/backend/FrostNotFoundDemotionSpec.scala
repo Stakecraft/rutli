@@ -263,11 +263,13 @@ class FrostNotFoundDemotionSpec extends AnyWordSpec with Matchers {
     "take the lead from the unreachable cosigners only, not from the one that said \"not found\"" in {
       val down: State = Failing(Status.UNAVAILABLE)
       for (lookup <- lookups) withClue(s"${lookup.name}: ") {
-        withCluster(Seq(Missing, down, down), lookup.learnRsa) { (backend, nodes) =>
+        // The one that said "not found" is the second: were it to lose the lead with the others,
+        // the signs would start at the preferred leader, which then is the first again.
+        withCluster(Seq(down, Missing, down), lookup.learnRsa) { (backend, nodes) =>
           val thrown = intercept[StatusRuntimeException](await(lookup.run(backend)))
           thrown.getStatus.getCode shouldBe Status.Code.UNAVAILABLE
-          // The first cosigner is the only one still healthy for the rotation: every sign starts there.
-          signs(backend, nodes, 6) shouldBe Seq(6, 0, 0)
+          // The second cosigner is the only one still healthy for the rotation: every sign starts there.
+          signs(backend, nodes, 6) shouldBe Seq(0, 6, 0)
         }
       }
     }

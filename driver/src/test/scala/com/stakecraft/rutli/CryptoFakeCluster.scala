@@ -52,6 +52,9 @@ class CryptoFakeCluster(
   /** The spec the fake holds `keyId` under, if any. */
   def specOf(keyId: String): Option[String] = hosted.get(keyId).map(_._1)
 
+  /** Lose the hosted key `keyId`, as a cosigner whose replica is gone. */
+  def forget(keyId: String): Unit = { hosted.remove(keyId); () }
+
   private def reply[A](obs: StreamObserver[A])(a: => A): Unit =
     try { obs.onNext(a); obs.onCompleted() }
     catch { case e: io.grpc.StatusRuntimeException => obs.onError(e) }
