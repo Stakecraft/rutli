@@ -206,12 +206,24 @@ class FrostNotFoundDemotionSpec extends AnyWordSpec with Matchers {
       }
     }
 
-    "take the lead from a cosigner that lacks the key when another one has it" in {
-      withCluster(Nowhere, pin = false) { (backend, nodes) =>
-        nodes(0).frostKeyMissing = true
-        await(backend.keyExistsAndIsActive(FrostKey))
-        // The first sign pins the key from the two cosigners that have it.
-        signs(backend, nodes, 6) shouldBe Seq(0, 4, 2)
+    "change neither the lead nor any cosigner's standing when a cosigner answers after others said NOT_FOUND" in {
+      // The answer for a key that is not pinned is not checked against anything, so it decides
+      // nothing: one cosigner's lone answer, or two cosigners' after the first lacks the key.
+      for (lacking <- Seq(Set(0, 1), Set(0))) withClue(s"cosigners $lacking answer NOT_FOUND: ") {
+        withCluster(Seq(Holds, Holds, Holds), pin = false) { (backend, nodes) =>
+          lacking.foreach(i => nodes(i).frostKeyMissing = true)
+          await(backend.keyExistsAndIsActive(FrostKey))
+
+          // The lead is where it was: the next call that starts at the preferred leader asks the
+          // first cosigner.
+          val before = nodes.map(_.hostedCalls.get)
+          await(backend.encryptSymmetric(Data, HostedKey)) shouldBe Data
+          nodes.map(_.hostedCalls.get).zip(before).map { case (now, prev) => now - prev } shouldBe Seq(1, 0, 0)
+
+          // And no cosigner lost its place in the rotation.
+          nodes.foreach(_.frostKeyMissing = false)
+          signs(backend, nodes, 6) shouldBe Seq(2, 2, 2)
+        }
       }
     }
   }
