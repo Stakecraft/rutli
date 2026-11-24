@@ -148,6 +148,9 @@ gh attestation verify "oci://$IMAGE" --repo Stakecraft/rutli --bundle-from-oci \
   --source-ref "refs/tags/$TAG" --deny-self-hosted-runners
 ```
 
+The driver jar and the dealer binary are signed and attested the same way (their own workflow,
+`release-assets.yml`); how to verify them: [docs/releasing.md](docs/releasing.md#verify-the-release-assets).
+
 The release workflow runs these exact commands as its last step. The first two must succeed; the
 third checks the registry copy and is useful where GitHub's API is unreachable. The certificate
 identity is exact and case-sensitive:
