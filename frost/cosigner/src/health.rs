@@ -476,16 +476,36 @@ pub async fn probe(health: &Arc<KeystoreHealth>) -> std::result::Result<(), Stri
 /// A dedicated thread — a watchdog — and deliberately not a tokio task: the verdict is what makes a
 /// node with a stalled volume turn work away, so it must keep moving when that stall has wedged the
 /// async runtime. Each tick waits for its own probe long enough to publish "unresponsive" itself.
+///
+/// Each tick first samples the load gauges ([`sample_load_gauges`]): when started from inside the
+/// async runtime, that runtime's own metrics. From this thread they stay current while the runtime
+/// is saturated, which is when they are read. (`rutli_signs_in_flight` is not sampled here.)
+///
+/// The `rutli_runtime_*` gauges are sampled only if this is called from inside the Tokio runtime
+/// (it captures that handle's metrics at spawn); called from anywhere else, they are absent.
 pub fn spawn_monitor(node: Arc<Node>, interval: Duration) -> std::thread::JoinHandle<()> {
+    let runtime = tokio::runtime::Handle::try_current()
+        .ok()
+        .map(|h| h.metrics());
     std::thread::Builder::new()
         .name("rutli-keystore-watchdog".into())
         .spawn(move || loop {
+            sample_load_gauges(&node, runtime.as_ref());
             let health = node.keystore_health();
             let _ = health.probe_blocking(health.unresponsive_after.max(PROBE_TIMEOUT));
             node.prune_expired_sign_sessions();
             std::thread::sleep(interval);
         })
         .expect("spawn the key-store watchdog thread")
+}
+
+/// The `rutli_runtime_*` gauges from `runtime` (none outside a runtime). `rutli_signs_in_flight`
+/// is not set here: it has one writer, the increments and decrements of [`crate::liveness::SignLoad`],
+/// so an absolute write from this thread cannot race them.
+pub fn sample_load_gauges(_node: &Node, runtime: Option<&tokio::runtime::RuntimeMetrics>) {
+    if let Some(runtime) = runtime {
+        crate::metrics::refresh_runtime_gauges(runtime);
+    }
 }
 
 #[cfg(test)]
