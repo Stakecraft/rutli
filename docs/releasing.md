@@ -104,6 +104,11 @@ the workflow: if the maintainer attaches one by hand it is unsigned and the note
 without its license file next to it is not a complete release: the MIT and BSD licenses of the
 bundled crates require their notices to travel with the binary.
 
+The jobs of one run share a token for the run's artifacts, so any job could replace another job's
+artifact. Each job that makes a file therefore states its sha256 as a job output (which no other job
+can change), and every job that reads the file compares it with that digest and stops on a
+difference.
+
 What the release workflow may do beyond `publish-image.yml`: the `build` jobs have `contents: read`;
 the `sbom` job (`contents: read`) is the only one that runs a parser tool (syft) on the built files;
 the `sign` job has `id-token: write` (keyless signing) and `attestations: write` (the provenance
@@ -162,7 +167,11 @@ The files are always one set. The builds are not reproducible, so a repeated run
 would sign a second set; it refuses to touch a release that already carries `SHA256SUMS` unless it is
 started with `replace_published`; then it replaces its files and removes its own files that the new
 run no longer produces (other attachments stay). A replacement is not atomic and does not revoke
-anything: signatures, log entries and attestations of the old set stay valid for whoever holds it. The provenance names the tagged
+anything: signatures, log entries and attestations of the old set stay valid for whoever holds it.
+The first refusal runs before anything is built, with read access only, which cannot see a **draft**
+release: a repeated run for a tag whose draft already carries `SHA256SUMS` is refused only by the
+`publish` job, after it has signed a second set. Publish the draft (or start the run with
+`replace_published`) before repeating a run. The provenance names the tagged
 workflow file, whose jobs all run on the hosted runners that file lists; `--deny-self-hosted-runners`
 checks the runner of the signing job.
 

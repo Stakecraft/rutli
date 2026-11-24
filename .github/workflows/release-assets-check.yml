@@ -89,8 +89,13 @@ jobs:
           cp out/rutli-dealer-*-linux-x86_64 art/asset-dealer-x86_64/
           cp out/*.spdx.json art/asset-sbom/
           rm -rf out
+          # As the release: digests stated before the hand-over, compared after it.
+          jar_sha="$(scripts/release-assets.sh digest art/asset-jar jar | cut -d= -f2)"
+          dealer_sha="$(scripts/release-assets.sh digest art/asset-dealer-x86_64 dealer-x86_64 | cut -d= -f2)"
           scripts/release-assets.sh gather art out
           scripts/release-assets.sh gather-sbom art out
+          scripts/release-assets.sh check-digests out jar="$jar_sha" dealer-x86_64="$dealer_sha"
+          echo "$jar_sha" >"$RUNNER_TEMP/jar.sha256"
           scripts/release-assets.sh licenses out
           scripts/release-assets.sh sums out
           scripts/release-assets.sh check-set out ready
@@ -125,4 +130,10 @@ jobs:
           rm -rf tampered; mkdir -p wrong/asset-jar wrong/asset-dealer-x86_64 wrong/asset-sbom
           cp out/rutli-dealer-*-linux-x86_64 wrong/asset-jar/
           if scripts/release-assets.sh gather wrong gathered-wrong; then echo "::error::a dealer in the jar artifact passed gather"; exit 1; fi
-          echo "OK: tampering, an unexpected file and a file from the wrong artifact are detected"
+          # An artifact replaced between its build and the signing job: same name, other bytes.
+          rm -rf swapped; cp -r out swapped
+          printf 'x' >>"swapped/$(basename "$jar")"
+          if scripts/release-assets.sh check-digests swapped jar="$(cat "$RUNNER_TEMP/jar.sha256")"; then
+            echo "::error::a replaced artifact passed check-digests"; exit 1
+          fi
+          echo "OK: tampering, an unexpected file, a file from the wrong artifact and a replaced artifact are detected"

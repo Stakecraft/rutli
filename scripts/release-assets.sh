@@ -15,6 +15,8 @@
 #   scripts/release-assets.sh sbom OUT               SPDX SBOMs: rutli-driver-<version>.spdx.json, rutli-dealer-<version>.spdx.json
 #   scripts/release-assets.sh gather SRC OUT         copy each build artifact (SRC/asset-<kind>/) into OUT, one expected file from each
 #   scripts/release-assets.sh gather-sbom SRC OUT    copy the two SBOMs (SRC/asset-sbom/) into OUT
+#   scripts/release-assets.sh digest OUT KIND        the GITHUB_OUTPUT line sha256=<hex> of the file of KIND in OUT
+#   scripts/release-assets.sh check-digests OUT KIND=SHA256...  each file of KIND in OUT has that digest
 #   scripts/release-assets.sh check-set OUT STAGE    OUT holds exactly the expected files: STAGE built|ready|signed
 #   scripts/release-assets.sh sums OUT               SHA256SUMS of every file in OUT (not the bundles)
 #   scripts/release-assets.sh sign OUT               a cosign bundle OUT/<file>.sigstore.json for every file
@@ -239,6 +241,48 @@ cmd_gather_sbom() {
   echo "OK: the two SBOMs"
 }
 
+# KIND names a file of the release: jar, dealer-<arch>, sbom-driver, sbom-dealer.
+kind_file() { # KIND
+  local v
+  v="$(version)"
+  case "$1" in
+    jar) echo "rutli-driver-${v}.jar" ;;
+    dealer-x86_64 | dealer-aarch64) echo "rutli-dealer-${v}-linux-${1#dealer-}" ;;
+    sbom-driver) echo "rutli-driver-${v}.spdx.json" ;;
+    sbom-dealer) echo "rutli-dealer-${v}.spdx.json" ;;
+    *) die "unknown kind '$1'" ;;
+  esac
+}
+
+# The job that makes a file states its digest as a job output; the jobs that read the file compare.
+# An artifact can be replaced by any job of the run (they share the artifact token); a job's outputs
+# cannot be changed by another job.
+cmd_digest() {
+  [ -d "${1:-}" ] && [ -n "${2:-}" ] || die "usage: $0 digest OUT KIND"
+  local f
+  f="$1/$(kind_file "$2")"
+  [ -f "$f" ] || die "no $f"
+  echo "sha256=$(sha256sum "$f" | cut -d' ' -f1)"
+}
+
+cmd_check_digests() {
+  [ -d "${1:-}" ] || die "usage: $0 check-digests OUT KIND=SHA256..."
+  local out="$1" pair kind want f have n=0
+  shift
+  [ $# -gt 0 ] || die "check-digests: no digests given"
+  for pair in "$@"; do
+    kind="${pair%%=*}"
+    want="${pair#*=}"
+    [[ "$want" =~ ^[0-9a-f]{64}$ ]] || die "check-digests: no valid digest for ${kind} (got '${want}')"
+    f="$out/$(kind_file "$kind")"
+    [ -f "$f" ] || die "check-digests: no $f"
+    have="$(sha256sum "$f" | cut -d' ' -f1)"
+    [ "$have" = "$want" ] || die "$(basename "$f") is not the file its job made (sha256 ${have}, the job stated ${want})"
+    n=$((n + 1))
+  done
+  echo "OK: ${n} files are the ones their jobs made"
+}
+
 cmd_sums() {
   need_out "${1:-}"
   local tmp
@@ -293,7 +337,7 @@ cmd_verify() {
 
 main() {
   local c="${1:-}"
-  [ -n "$c" ] || die "usage: $0 install-tools|version-check|build-jar|build-dealer|licenses|sbom|gather|gather-sbom|check-set|sums|sign|verify [args]"
+  [ -n "$c" ] || die "usage: $0 install-tools|version-check|build-jar|build-dealer|licenses|sbom|gather|gather-sbom|digest|check-digests|check-set|sums|sign|verify [args]"
   shift
   case "$c" in
     install-tools) cmd_install_tools "$@" ;;
@@ -304,6 +348,8 @@ main() {
     sbom) cmd_sbom "$@" ;;
     gather) cmd_gather "$@" ;;
     gather-sbom) cmd_gather_sbom "$@" ;;
+    digest) cmd_digest "$@" ;;
+    check-digests) cmd_check_digests "$@" ;;
     check-set) cmd_check_set "$@" ;;
     sums) cmd_sums "$@" ;;
     sign) cmd_sign "$@" ;;

@@ -7,8 +7,12 @@ name: Release assets
 # and a GitHub build provenance attestation; everything is attached to the release for the tag.
 #   guard   refuses any ref that is not a v* tag (and carries the `release` environment)
 #   precheck stops a run for a release that already carries SHA256SUMS (before anything is signed)
-#   build   the jar (sbt driver/assembly) and the dealer for linux-x86_64 and linux-aarch64
-#   sbom    the two SBOMs, from the built files, in a job without a signing identity or write access
+#   build-* the jar (sbt driver/assembly) and the dealer for linux-x86_64 and linux-aarch64, three
+#           jobs; each states the sha256 of its file as a job output
+#   sbom    the two SBOMs, from the built files, in a job without a signing identity or write access;
+#           checks the build digests, states the SBOM digests
+# Every job that reads another job's file compares it with the digest in that job's outputs: the jobs
+# of a run share the artifact token and could replace each other's artifacts, not each other's outputs.
 #   sign    the only job with a signing identity (id-token, attestations: write): checks that the
 #           build artifacts are exactly the expected files, then SBOMs, SHA256SUMS, signatures,
 #           provenance and the user's verification commands. No write access to the repository.
@@ -82,28 +86,16 @@ jobs:
             exit 1
           fi
 
-  build:
-    name: Build ${{ matrix.name }}
+  # Three build jobs, not a matrix: each states the digest of its file as its own job output (a
+  # matrix shares one set of outputs).
+  build-jar:
+    name: Build driver jar
     needs: [guard, precheck]
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - name: driver jar
-            kind: jar
-            asset: jar
-            runner: ubuntu-24.04
-          - name: dealer linux-x86_64
-            kind: dealer-x86_64
-            asset: dealer
-            runner: ubuntu-24.04
-          - name: dealer linux-aarch64
-            kind: dealer-aarch64
-            asset: dealer
-            runner: ubuntu-24.04-arm
+    outputs:
+      sha256: ${{ steps.digest.outputs.sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -116,24 +108,52 @@ jobs:
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
           scripts/release-assets.sh version-check "$TAG"
 
-      # --- the jar
       - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
-        if: matrix.asset == 'jar'
         with:
           distribution: temurin
           java-version: "17"
       - uses: sbt/setup-sbt@7e114eae4f32ec3f93c851c2793376a77f384409 # v1.5.15
-        if: matrix.asset == 'jar'
       - name: Canton kms-driver-api (published locally, as ci.yml)
-        if: matrix.asset == 'jar'
         run: scripts/publish-canton-deps.sh "$CANTON_TAG"
       - name: Build the driver jar
-        if: matrix.asset == 'jar'
         run: scripts/release-assets.sh build-jar out
 
-      # --- the dealer: the Rust version of frost/rust-toolchain.toml, no build cache
+      # The digest of the file this job made, as a job output: the jobs that use the file compare
+      # against it (an artifact could be replaced by another job of the run; this output cannot).
+      - name: Digest
+        id: digest
+        run: scripts/release-assets.sh digest out jar >>"$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: asset-jar
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
+
+  build-dealer-x86_64:
+    name: Build dealer linux-x86_64
+    needs: [guard, precheck]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.digest.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The tag and the versions in the tree agree
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
+          scripts/release-assets.sh version-check "$TAG"
+
+      # The Rust version of frost/rust-toolchain.toml, no build cache. Keep the two dealer jobs
+      # identical apart from the runner and the names.
       - name: Rust version (frost/rust-toolchain.toml)
-        if: matrix.asset == 'dealer'
         id: rust
         run: |
           set -euo pipefail
@@ -141,16 +161,68 @@ jobs:
           [ -n "$v" ] || { echo "::error::no channel in frost/rust-toolchain.toml"; exit 1; }
           echo "version=${v}" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
-        if: matrix.asset == 'dealer'
         with:
           toolchain: ${{ steps.rust.outputs.version }}
       - name: Build the dealer
-        if: matrix.asset == 'dealer'
         run: scripts/release-assets.sh build-dealer out
+
+      # The digest of the file this job made, as a job output: the jobs that use the file compare
+      # against it (an artifact could be replaced by another job of the run; this output cannot).
+      - name: Digest
+        id: digest
+        run: scripts/release-assets.sh digest out dealer-x86_64 >>"$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: asset-${{ matrix.kind }}
+          name: asset-dealer-x86_64
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
+
+  build-dealer-aarch64:
+    name: Build dealer linux-aarch64
+    needs: [guard, precheck]
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.digest.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The tag and the versions in the tree agree
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
+          scripts/release-assets.sh version-check "$TAG"
+
+      # The Rust version of frost/rust-toolchain.toml, no build cache. Keep the two dealer jobs
+      # identical apart from the runner and the names.
+      - name: Rust version (frost/rust-toolchain.toml)
+        id: rust
+        run: |
+          set -euo pipefail
+          v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
+          [ -n "$v" ] || { echo "::error::no channel in frost/rust-toolchain.toml"; exit 1; }
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
+      - name: Build the dealer
+        run: scripts/release-assets.sh build-dealer out
+
+      # The digest of the file this job made, as a job output: the jobs that use the file compare
+      # against it (an artifact could be replaced by another job of the run; this output cannot).
+      - name: Digest
+        id: digest
+        run: scripts/release-assets.sh digest out dealer-aarch64 >>"$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: asset-dealer-aarch64
           path: out/
           retention-days: 7
           if-no-files-found: error
@@ -159,12 +231,15 @@ jobs:
   # write access, so a flaw in that tool cannot be turned into a signature or a release upload.
   sbom:
     name: SBOMs
-    needs: build
+    needs: [build-jar, build-dealer-x86_64, build-dealer-aarch64]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     env:
       TAG: ${{ github.ref_name }}
+    outputs:
+      driver_sha256: ${{ steps.digest.outputs.driver }}
+      dealer_sha256: ${{ steps.digest.outputs.dealer }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -179,12 +254,27 @@ jobs:
         run: scripts/release-assets.sh install-tools syft
 
       - name: SBOMs of the built files
+        # Through the step's environment, never interpolated into the script: the values come from
+        # other jobs.
+        env:
+          JAR_SHA256: ${{ needs.build-jar.outputs.sha256 }}
+          DEALER_X86_64_SHA256: ${{ needs.build-dealer-x86_64.outputs.sha256 }}
+          DEALER_AARCH64_SHA256: ${{ needs.build-dealer-aarch64.outputs.sha256 }}
         run: |
           set -euo pipefail
           scripts/release-assets.sh version-check "$TAG"
           scripts/release-assets.sh gather built out
           scripts/release-assets.sh check-set out built
+          scripts/release-assets.sh check-digests out \
+            jar="$JAR_SHA256" dealer-x86_64="$DEALER_X86_64_SHA256" dealer-aarch64="$DEALER_AARCH64_SHA256"
           scripts/release-assets.sh sbom out
+
+      - name: Digests of the SBOMs
+        id: digest
+        run: |
+          set -euo pipefail
+          scripts/release-assets.sh digest out sbom-driver | sed 's/^sha256=/driver=/' >>"$GITHUB_OUTPUT"
+          scripts/release-assets.sh digest out sbom-dealer | sed 's/^sha256=/dealer=/' >>"$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -195,7 +285,7 @@ jobs:
 
   sign:
     name: Signatures and provenance
-    needs: [build, sbom]
+    needs: [build-jar, build-dealer-x86_64, build-dealer-aarch64, sbom]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -230,10 +320,23 @@ jobs:
         run: scripts/release-assets.sh install-tools cosign
 
       - name: Licenses, SBOMs, checksums
+        # Through the step's environment, never interpolated into the script: the values come from
+        # other jobs.
+        env:
+          JAR_SHA256: ${{ needs.build-jar.outputs.sha256 }}
+          DEALER_X86_64_SHA256: ${{ needs.build-dealer-x86_64.outputs.sha256 }}
+          DEALER_AARCH64_SHA256: ${{ needs.build-dealer-aarch64.outputs.sha256 }}
+          SBOM_DRIVER_SHA256: ${{ needs.sbom.outputs.driver_sha256 }}
+          SBOM_DEALER_SHA256: ${{ needs.sbom.outputs.dealer_sha256 }}
         run: |
           set -euo pipefail
           scripts/release-assets.sh licenses out
           scripts/release-assets.sh gather-sbom built out
+          # Every downloaded file must be the one its job made: the digests come from those jobs'
+          # outputs, which no other job can change.
+          scripts/release-assets.sh check-digests out \
+            jar="$JAR_SHA256" dealer-x86_64="$DEALER_X86_64_SHA256" dealer-aarch64="$DEALER_AARCH64_SHA256" \
+            sbom-driver="$SBOM_DRIVER_SHA256" sbom-dealer="$SBOM_DEALER_SHA256"
           scripts/release-assets.sh sums out
           scripts/release-assets.sh check-set out ready
 
