@@ -70,15 +70,14 @@ jobs:
           tag="$(sed -n 's/^  tag: "\([0-9][^@"]*\)@.*/\1/p' "$values" | head -n 1)"
           digest="$(sed -n 's/^  tag: "[^@"]*@\(sha256:[0-9a-f]\{64\}\)".*/\1/p' "$values" | head -n 1)"
           [ -n "$repo" ] && [ -n "$tag" ] && [ -n "$digest" ] || { echo "::error::no digest-pinned image in $values"; exit 1; }
-          # Every platform of the release index must record the same commit.
-          expected=""
-          for platform in linux/amd64 linux/arm64; do
-            docker pull -q --platform "$platform" "$repo@$digest" >/dev/null
-            rev="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$repo@$digest")"
-            [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::$repo@$digest ($platform) records no commit"; exit 1; }
-            [ -z "$expected" ] || [ "$rev" = "$expected" ] || { echo "::error::$repo@$digest: $platform built from $rev, not $expected"; exit 1; }
-            expected="$rev"
-          done
+          # Every platform of the release index must record the same commit (read from the registry,
+          # nothing pulled: a second platform of one digest cannot be pulled next to the first).
+          revs="$(docker buildx imagetools inspect "$repo@$digest" --format '{{ json .Image }}' \
+            | jq -r 'if has("config") then [.] else [to_entries[] | select(.key | startswith("unknown") | not) | .value] end | map(.config.Labels["org.opencontainers.image.revision"] // "none") | unique | .[]')"
+          echo "release image $repo@$digest records: $(echo $revs)"
+          [ "$(printf '%s\n' "$revs" | wc -l)" -eq 1 ] || { echo "::error::$repo@$digest: its platforms record different commits"; exit 1; }
+          expected="$revs"
+          [[ "$expected" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::$repo@$digest records no commit"; exit 1; }
           url="https://github.com/${GITHUB_REPOSITORY}.git"
           commit="$(git ls-remote "$url" "refs/tags/v${tag}^{}" | cut -f1)"
           [ -n "$commit" ] || commit="$(git ls-remote "$url" "refs/tags/v${tag}" | cut -f1)"
