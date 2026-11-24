@@ -222,16 +222,57 @@ pub fn check_views(
     threshold: u16,
     views: &[NodeView],
 ) -> VerifyReport {
-    let mut problems = Vec::new();
-    // Canonical (trimmed, lower case) like every fingerprint computed here; a malformed one is a
-    // problem of its own and matches nothing.
-    let expected_fingerprint = expected_fingerprint.map(|given| {
+    let mut acc = ViewAcc::default();
+    let expected_fingerprint =
+        canonical_expected_fingerprint(expected_fingerprint, &mut acc.problems);
+    let mut rows = Vec::new();
+    check_roster(&mut acc.problems, roster, views);
+
+    for v in views {
+        let mut row = empty_node_row(v);
+        match &v.status {
+            Err(e) => {
+                row.error = Some(e.clone());
+                acc.problems.push(format!("node {}: {e}", v.identifier));
+            }
+            Ok(s) => {
+                let expected = expected_fingerprint.as_deref();
+                let id = v.identifier;
+                check_node_status(id, s, expected, roster, threshold, &mut row, &mut acc);
+            }
+        }
+        rows.push(row);
+    }
+    flag_disagreements(&mut acc);
+    build_report(key_id, expected_fingerprint, threshold, rows, acc)
+}
+
+/// What [`check_views`] collects over the nodes' views.
+#[derive(Default)]
+struct ViewAcc {
+    problems: Vec<String>,
+    digests: BTreeSet<String>,
+    groups: BTreeSet<String>,
+    provenance: BTreeSet<(String, String, u64, String, String)>,
+    epochs: BTreeSet<u64>,
+}
+
+/// The expected fingerprint in canonical form (trimmed, lower case) like every fingerprint
+/// computed here; a malformed one is a problem of its own and matches nothing.
+fn canonical_expected_fingerprint(
+    expected_fingerprint: Option<&str>,
+    problems: &mut Vec<String>,
+) -> Option<String> {
+    expected_fingerprint.map(|given| {
         crate::share_delivery::canonical_fingerprint(given).unwrap_or_else(|e| {
             problems.push(format!("--expect-fingerprint: {e}"));
             given.trim().to_string()
         })
-    });
-    let mut rows = Vec::new();
+    })
+}
+
+/// Record a problem when the nodes asked are not exactly the roster.
+fn check_roster(problems: &mut Vec<String>, roster: &[u16], views: &[NodeView]) {
     let expected_ids: BTreeSet<u16> = roster.iter().copied().collect();
     let seen_ids: BTreeSet<u16> = views.iter().map(|v| v.identifier).collect();
     if seen_ids != expected_ids || views.len() != roster.len() {
@@ -239,91 +280,107 @@ pub fn check_views(
             "asked nodes {seen_ids:?}, but the roster is {expected_ids:?}"
         ));
     }
+}
 
-    let mut digests = BTreeSet::new();
-    let mut groups = BTreeSet::new();
-    let mut provenance = BTreeSet::new();
-    let mut epochs = BTreeSet::new();
-    for v in views {
-        let mut row = NodeRow {
-            identifier: v.identifier,
-            endpoint: v.endpoint.clone(),
-            present: false,
-            error: None,
-            fingerprint: String::new(),
-            pkp_digest: String::new(),
-            own_share_in_package: false,
-            origin: String::new(),
-            ceremony_id: String::new(),
-            refresh_count: 0,
-            carried_for: String::new(),
-            recorded_usage: String::new(),
-            epoch: 0,
-            stale: false,
-        };
-        match &v.status {
-            Err(e) => {
-                row.error = Some(e.clone());
-                problems.push(format!("node {}: {e}", v.identifier));
-            }
-            Ok(s) => {
-                row.present = true;
-                row.origin = s.origin.clone();
-                row.ceremony_id = s.ceremony_id.clone();
-                row.refresh_count = s.refresh_count;
-                row.carried_for = s.carried_for.clone();
-                row.recorded_usage = s.recorded_usage.clone();
-                row.epoch = s.epoch;
-                row.stale = s.stale;
-                if s.stale {
-                    problems.push(format!(
-                        "node {}: its share is stale (a newer sharing is committed elsewhere) — it \
-                         refuses to sign",
-                        v.identifier
-                    ));
-                }
-                epochs.insert(s.epoch);
-                provenance.insert((
-                    s.origin.clone(),
-                    s.ceremony_id.clone(),
-                    s.refresh_count,
-                    s.carried_for.clone(),
-                    s.recorded_usage.clone(),
-                ));
-                let expected = expected_fingerprint.as_deref();
-                if let Err(e) = check_one(v.identifier, s, expected, roster, threshold, &mut row) {
-                    problems.push(format!("node {}: {e}", v.identifier));
-                }
-                digests.insert(row.pkp_digest.clone());
-                groups.insert(hex::encode(&s.group_verifying_key));
-            }
-        }
-        rows.push(row);
+/// A row for a node, before its answer is read.
+fn empty_node_row(v: &NodeView) -> NodeRow {
+    NodeRow {
+        identifier: v.identifier,
+        endpoint: v.endpoint.clone(),
+        present: false,
+        error: None,
+        fingerprint: String::new(),
+        pkp_digest: String::new(),
+        own_share_in_package: false,
+        origin: String::new(),
+        ceremony_id: String::new(),
+        refresh_count: 0,
+        carried_for: String::new(),
+        recorded_usage: String::new(),
+        epoch: 0,
+        stale: false,
     }
-    if digests.len() > 1 {
-        problems.push(format!(
-            "nodes hold {} different public key packages — the sharing is inconsistent",
-            digests.len()
+}
+
+/// Read a node's answer into its row and into what is compared across the nodes.
+fn check_node_status(
+    identifier: u16,
+    s: &KeyStatusReply,
+    expected_fingerprint: Option<&str>,
+    roster: &[u16],
+    threshold: u16,
+    row: &mut NodeRow,
+    acc: &mut ViewAcc,
+) {
+    row.present = true;
+    row.origin = s.origin.clone();
+    row.ceremony_id = s.ceremony_id.clone();
+    row.refresh_count = s.refresh_count;
+    row.carried_for = s.carried_for.clone();
+    row.recorded_usage = s.recorded_usage.clone();
+    row.epoch = s.epoch;
+    row.stale = s.stale;
+    if s.stale {
+        acc.problems.push(format!(
+            "node {identifier}: its share is stale (a newer sharing is committed elsewhere) — it \
+             refuses to sign"
         ));
     }
-    if epochs.len() > 1 {
-        problems.push(format!(
+    acc.epochs.insert(s.epoch);
+    acc.provenance.insert((
+        s.origin.clone(),
+        s.ceremony_id.clone(),
+        s.refresh_count,
+        s.carried_for.clone(),
+        s.recorded_usage.clone(),
+    ));
+    if let Err(e) = check_one(identifier, s, expected_fingerprint, roster, threshold, row) {
+        acc.problems.push(format!("node {identifier}: {e}"));
+    }
+    acc.digests.insert(row.pkp_digest.clone());
+    acc.groups.insert(hex::encode(&s.group_verifying_key));
+}
+
+/// Record a problem for each thing the nodes do not agree on: public key package, epoch, provenance.
+fn flag_disagreements(acc: &mut ViewAcc) {
+    if acc.digests.len() > 1 {
+        acc.problems.push(format!(
+            "nodes hold {} different public key packages — the sharing is inconsistent",
+            acc.digests.len()
+        ));
+    }
+    if acc.epochs.len() > 1 {
+        let epochs = &acc.epochs;
+        acc.problems.push(format!(
             "nodes are on different epochs {epochs:?} — mixed sharings never combine"
         ));
     }
-    if provenance.len() > 1 {
-        problems.push(format!(
+    if acc.provenance.len() > 1 {
+        let provenance = &acc.provenance;
+        acc.problems.push(format!(
             "nodes disagree on provenance (origin, ceremony, refreshes, carried for, usage): {provenance:?}"
         ));
     }
-    let single = |set: &BTreeSet<String>| {
-        (set.len() == 1)
-            .then(|| set.iter().next().cloned())
-            .flatten()
-    };
+}
+
+/// The only value of a set, when it holds exactly one.
+fn single_value(set: &BTreeSet<String>) -> Option<String> {
+    (set.len() == 1)
+        .then(|| set.iter().next().cloned())
+        .flatten()
+}
+
+/// The report: what every node agrees on, and the problems where they do not.
+fn build_report(
+    key_id: &str,
+    expected_fingerprint: Option<String>,
+    threshold: u16,
+    rows: Vec<NodeRow>,
+    acc: ViewAcc,
+) -> VerifyReport {
     let (origin, ceremony_id, refresh_count, carried_for, recorded_usage) =
-        match provenance.iter().next() {
-            Some((o, c, r, f, u)) if provenance.len() == 1 => (
+        match acc.provenance.iter().next() {
+            Some((o, c, r, f, u)) if acc.provenance.len() == 1 => (
                 Some(o.clone()),
                 Some(c.clone()),
                 Some(*r),
@@ -332,29 +389,29 @@ pub fn check_views(
             ),
             _ => (None, None, None, None, None),
         };
-    let group_verifying_key = single(&groups);
+    let group_verifying_key = single_value(&acc.groups);
     let fingerprint = group_verifying_key
         .as_ref()
-        .filter(|_| problems.is_empty())
+        .filter(|_| acc.problems.is_empty())
         .and_then(|h| <[u8; ED25519_KEY_BYTES]>::try_from(hex::decode(h).ok()?).ok())
         .map(|g| crate::share_delivery::ed25519_fingerprint(&g));
     VerifyReport {
         key_id: key_id.into(),
         kind: crate::key_cli::KeyKind::Frost.as_str(),
         expected_fingerprint,
-        ok: problems.is_empty(),
-        problems,
+        ok: acc.problems.is_empty(),
+        problems: acc.problems,
         group_verifying_key,
         fingerprint,
-        pkp_digest: single(&digests),
+        pkp_digest: single_value(&acc.digests),
         threshold,
         origin,
         ceremony_id,
         refresh_count,
         carried_for,
         recorded_usage,
-        epoch: (epochs.len() == 1)
-            .then(|| epochs.iter().next().copied())
+        epoch: (acc.epochs.len() == 1)
+            .then(|| acc.epochs.iter().next().copied())
             .flatten(),
         nodes: rows,
         sign_test: Vec::new(),

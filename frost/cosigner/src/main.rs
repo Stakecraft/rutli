@@ -1877,7 +1877,28 @@ async fn refresh_command(
     target: Option<String>,
     tls_server_name: Option<String>,
 ) -> Result<()> {
-    let endpoint = target
+    let endpoint = refresh_endpoint(cfg, target)?;
+    let channel = refresh_channel(cfg, &endpoint, tls_server_name).await?;
+    let intent = signed_refresh_intent(cfg, key_id).await?;
+    tracing::info!(%endpoint, %key_id, intent = intent.is_some(), "triggering proactive share refresh");
+    let mut client = SignerClient::new(channel);
+    let reply = client
+        .refresh(RefreshRequest {
+            key_id: key_id.to_string(),
+            intent,
+        })
+        .await?
+        .into_inner();
+    println!(
+        "refresh complete — group key unchanged: {}",
+        hex::encode(reply.group_verifying_key)
+    );
+    Ok(())
+}
+
+/// The endpoint a refresh is sent to: the given target, else another roster peer, else the first.
+fn refresh_endpoint(cfg: &Config, target: Option<String>) -> Result<String> {
+    target
         .or_else(|| {
             cfg.peers
                 .iter()
@@ -1885,8 +1906,15 @@ async fn refresh_command(
                 .map(|p| p.endpoint.clone())
         })
         .or_else(|| cfg.peers.first().map(|p| p.endpoint.clone()))
-        .ok_or_else(|| DaemonError::Config("no target endpoint for refresh".into()))?;
+        .ok_or_else(|| DaemonError::Config("no target endpoint for refresh".into()))
+}
 
+/// Connects to `endpoint` for a refresh: over mTLS when the config has TLS, else in the clear.
+async fn refresh_channel(
+    cfg: &Config,
+    endpoint: &str,
+    tls_server_name: Option<String>,
+) -> Result<tonic::transport::Channel> {
     let channel = match &cfg.tls {
         Some(tls_cfg) => {
             let tls = rutli_cosigner::tls::load(tls_cfg)?;
@@ -1895,7 +1923,7 @@ async fn refresh_command(
                     .trim_end_matches('/')
                     .eq_ignore_ascii_case(b.trim().trim_end_matches('/'))
             };
-            let roster = cfg.peers.iter().find(|p| same(&p.endpoint, &endpoint));
+            let roster = cfg.peers.iter().find(|p| same(&p.endpoint, endpoint));
             let name = tls_server_name
                 .or_else(|| roster.map(rutli_cosigner::config::PeerConfig::server_name))
                 .or_else(|| tls_cfg.domain.clone())
@@ -1905,18 +1933,25 @@ async fn refresh_command(
                     ))
                 })?;
             // No call deadline: a refresh runs a whole ceremony across the mesh.
-            operator_channel(&endpoint, &tls, &name, roster, None).await?
+            operator_channel(endpoint, &tls, &name, roster, None).await?
         }
         None => {
-            tonic::transport::Endpoint::from_shared(endpoint.clone())
+            tonic::transport::Endpoint::from_shared(endpoint.to_string())
                 .map_err(|e| DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?
                 .connect()
                 .await?
         }
     };
-    // The ceremony intent (refresh-fence remediation, L2): signed with the very certificate this
-    // client presents, so every cosigner can check that a refresher (or, while signer_may_refresh,
-    // the driver) asked for exactly this refresh — and the leader that it is this connection's.
+    Ok(channel)
+}
+
+/// The ceremony intent (refresh-fence remediation, L2): signed with the very certificate this
+/// client presents, so every cosigner can check that a refresher (or, while signer_may_refresh,
+/// the driver) asked for exactly this refresh — and the leader that it is this connection's.
+async fn signed_refresh_intent(
+    cfg: &Config,
+    key_id: &str,
+) -> Result<Option<rutli_cosigner::pb::SignedIntent>> {
     let intent = match &cfg.tls {
         Some(t) => {
             if let Some(cluster) = refresh_cluster_id(cfg).await {
@@ -1941,29 +1976,16 @@ async fn refresh_command(
                 Some(rutli_cosigner::intent::sign_intent(&signer, &intent)?)
             } else {
                 tracing::warn!(
-                "no cluster id: cluster_id is not set in this config and the roster does not agree \
-                 on one (Capabilities) — refreshing WITHOUT a ceremony intent; cosigners with \
-                 signing_policy.require_ceremony_intent refuse it"
-            );
+                    "no cluster id: cluster_id is not set in this config and the roster does not \
+                     agree on one (Capabilities) — refreshing WITHOUT a ceremony intent; cosigners \
+                     with signing_policy.require_ceremony_intent refuse it"
+                );
                 None
             }
         }
         None => None,
     };
-    tracing::info!(%endpoint, %key_id, intent = intent.is_some(), "triggering proactive share refresh");
-    let mut client = SignerClient::new(channel);
-    let reply = client
-        .refresh(RefreshRequest {
-            key_id: key_id.to_string(),
-            intent,
-        })
-        .await?
-        .into_inner();
-    println!(
-        "refresh complete — group key unchanged: {}",
-        hex::encode(reply.group_verifying_key)
-    );
-    Ok(())
+    Ok(intent)
 }
 
 /// What a report was compared with, for its first line.
@@ -1985,8 +2007,7 @@ async fn verify_key_command(
     sign_test: bool,
     json: bool,
 ) -> Result<()> {
-    use rutli_cosigner::pb::{CeremonySignTestRequest, KeyStatusRequest};
-    use rutli_cosigner::verify_key::{check_views, sign_test_plan, NodeView};
+    use rutli_cosigner::verify_key::check_views;
 
     let tls = cfg
         .tls
@@ -2002,82 +2023,13 @@ async fn verify_key_command(
     peers.sort_by_key(|p| p.identifier);
     let roster: Vec<u16> = peers.iter().map(|p| p.identifier).collect();
 
-    let mut views = Vec::new();
-    let mut clients = Vec::new();
-    for p in &peers {
-        // Each node verified under its own name, so one node's certificate cannot answer for
-        // another and make an inconsistent cluster look consistent.
-        let client = roster_signer_client(tls.as_ref(), p).await;
-        let status = match &client {
-            Ok(c) => match c
-                .clone()
-                .key_status(KeyStatusRequest {
-                    key_id: key_id.to_string(),
-                })
-                .await
-            {
-                Ok(r) => Ok(r.into_inner()),
-                Err(s) => {
-                    Err(explain_status(&s, probe.as_ref(), &p.endpoint, &p.server_name()).await)
-                }
-            },
-            Err(e) => {
-                Err(explain_unreachable(e, probe.as_ref(), &p.endpoint, &p.server_name()).await)
-            }
-        };
-        views.push(NodeView {
-            identifier: p.identifier,
-            endpoint: p.endpoint.clone(),
-            status,
-        });
-        clients.push((p.identifier, client));
-    }
+    let (views, clients) = collect_node_views(tls.as_ref(), probe.as_ref(), &peers, key_id).await;
     let mut report = check_views(key_id, expect_fingerprint, &roster, cfg.threshold, &views);
 
     if sign_test {
         if report.ok {
-            // Every t-subset, leader rotating: every share and every possible quorum is exercised.
-            let clients: std::collections::BTreeMap<u16, _> = clients.into_iter().collect();
-            let endpoints: std::collections::BTreeMap<u16, (&str, String)> = peers
-                .iter()
-                .map(|p| (p.identifier, (p.endpoint.as_str(), p.server_name())))
-                .collect();
-            for (leader, signers) in sign_test_plan(&roster, cfg.threshold) {
-                let (Some((endpoint, server_name)), Some(client)) =
-                    (endpoints.get(&leader), clients.get(&leader))
-                else {
-                    // Through the report, so that it fails and names no fingerprint.
-                    report.record_signature(
-                        leader,
-                        &signers,
-                        Err("the leader is not in the roster".into()),
-                    );
-                    continue;
-                };
-                let endpoint = *endpoint;
-                let result = match client {
-                    Ok(c) => match c
-                        .clone()
-                        .ceremony_sign_test(CeremonySignTestRequest {
-                            key_id: key_id.to_string(),
-                            signers: signers.iter().map(|&s| u32::from(s)).collect(),
-                        })
-                        .await
-                    {
-                        Ok(r) => {
-                            let r = r.into_inner();
-                            Ok((r.message, r.signature))
-                        }
-                        Err(s) => {
-                            Err(explain_status(&s, probe.as_ref(), endpoint, server_name).await)
-                        }
-                    },
-                    Err(e) => {
-                        Err(explain_unreachable(e, probe.as_ref(), endpoint, server_name).await)
-                    }
-                };
-                report.record_signature(leader, &signers, result);
-            }
+            let probe = probe.as_ref();
+            run_sign_test(&mut report, probe, &peers, clients, cfg.threshold, key_id).await;
         } else {
             report
                 .problems
@@ -2088,59 +2040,7 @@ async fn verify_key_command(
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        println!(
-            "{command} {key_id} (FROST) — {}",
-            expectation(report.expected_fingerprint.as_deref())
-        );
-        for n in &report.nodes {
-            match &n.error {
-                Some(e) => println!("  node {} {}: {e}", n.identifier, n.endpoint),
-                None => println!(
-                    "  node {} {}: fp {} digest {} own-share {} origin {} ceremony {:?} refreshes {}{}",
-                    n.identifier,
-                    n.endpoint,
-                    n.fingerprint,
-                    n.pkp_digest,
-                    if n.own_share_in_package { "ok" } else { "MISMATCH" },
-                    n.origin,
-                    n.ceremony_id,
-                    n.refresh_count,
-                    if n.carried_for.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" carried-for {} usage {:?}", n.carried_for, n.recorded_usage)
-                    }
-                ),
-            }
-        }
-        if let (Some(g), Some(d)) = (&report.group_verifying_key, &report.pkp_digest) {
-            println!("  group key {g}\n  pkp digest {d}");
-        }
-        if let Some(fp) = &report.fingerprint {
-            println!("  fingerprint {fp}");
-        }
-        if let (Some(origin), Some(epoch), Some(refreshes)) =
-            (&report.origin, report.epoch, report.refresh_count)
-        {
-            println!(
-                "  origin {origin} epoch {epoch} refreshes {refreshes} threshold {}",
-                report.threshold
-            );
-        }
-        for s in &report.sign_test {
-            println!(
-                "  sign test by {:?} led by node {}: {}",
-                s.signers,
-                s.leader,
-                s.error
-                    .as_deref()
-                    .unwrap_or("ok (verify_strict under the Canton key)")
-            );
-        }
-        for p in &report.problems {
-            println!("  PROBLEM: {p}");
-        }
-        println!("{}", if report.ok { "OK" } else { "FAILED" });
+        print_verify_report(command, key_id, &report);
     }
     if report.ok {
         Ok(())
@@ -2149,6 +2049,190 @@ async fn verify_key_command(
             "{command}: {} problem(s)",
             report.problems.len()
         )))
+    }
+}
+
+/// The Signer client of one roster node, or why it could not be made.
+type NodeClient = Result<SignerClient<tonic::transport::Channel>>;
+
+/// Asks every roster node for its view of `key_id`; returns the views and the clients used.
+async fn collect_node_views(
+    tls: Option<&rutli_cosigner::tls::Tls>,
+    probe: Option<&rutli_cosigner::tls_probe::TlsProbe>,
+    peers: &[rutli_cosigner::config::PeerConfig],
+    key_id: &str,
+) -> (
+    Vec<rutli_cosigner::verify_key::NodeView>,
+    Vec<(u16, NodeClient)>,
+) {
+    use rutli_cosigner::pb::KeyStatusRequest;
+    use rutli_cosigner::verify_key::NodeView;
+
+    let mut views = Vec::new();
+    let mut clients = Vec::new();
+    for p in peers {
+        // Each node verified under its own name, so one node's certificate cannot answer for
+        // another and make an inconsistent cluster look consistent.
+        let client = roster_signer_client(tls, p).await;
+        let status = match &client {
+            Ok(c) => match c
+                .clone()
+                .key_status(KeyStatusRequest {
+                    key_id: key_id.to_string(),
+                })
+                .await
+            {
+                Ok(r) => Ok(r.into_inner()),
+                Err(s) => Err(explain_status(&s, probe, &p.endpoint, &p.server_name()).await),
+            },
+            Err(e) => Err(explain_unreachable(e, probe, &p.endpoint, &p.server_name()).await),
+        };
+        views.push(NodeView {
+            identifier: p.identifier,
+            endpoint: p.endpoint.clone(),
+            status,
+        });
+        clients.push((p.identifier, client));
+    }
+    (views, clients)
+}
+
+/// Runs the sign test for every t-subset of the roster, leader rotating, and records each result.
+async fn run_sign_test(
+    report: &mut rutli_cosigner::verify_key::VerifyReport,
+    probe: Option<&rutli_cosigner::tls_probe::TlsProbe>,
+    peers: &[rutli_cosigner::config::PeerConfig],
+    clients: Vec<(u16, NodeClient)>,
+    threshold: u16,
+    key_id: &str,
+) {
+    use rutli_cosigner::verify_key::sign_test_plan;
+
+    let roster: Vec<u16> = peers.iter().map(|p| p.identifier).collect();
+    // Every t-subset, leader rotating: every share and every possible quorum is exercised.
+    let clients: std::collections::BTreeMap<u16, _> = clients.into_iter().collect();
+    let endpoints: std::collections::BTreeMap<u16, (&str, String)> = peers
+        .iter()
+        .map(|p| (p.identifier, (p.endpoint.as_str(), p.server_name())))
+        .collect();
+    for (leader, signers) in sign_test_plan(&roster, threshold) {
+        let (Some((endpoint, server_name)), Some(client)) =
+            (endpoints.get(&leader), clients.get(&leader))
+        else {
+            // Through the report, so that it fails and names no fingerprint.
+            report.record_signature(
+                leader,
+                &signers,
+                Err("the leader is not in the roster".into()),
+            );
+            continue;
+        };
+        let endpoint = *endpoint;
+        let result = sign_test_once(client, probe, endpoint, server_name, key_id, &signers).await;
+        report.record_signature(leader, &signers, result);
+    }
+}
+
+/// One `CeremonySignTest` call to the leader: `(message, signature)`, or the explained error.
+async fn sign_test_once(
+    client: &NodeClient,
+    probe: Option<&rutli_cosigner::tls_probe::TlsProbe>,
+    endpoint: &str,
+    server_name: &str,
+    key_id: &str,
+    signers: &[u16],
+) -> std::result::Result<(Vec<u8>, Vec<u8>), String> {
+    use rutli_cosigner::pb::CeremonySignTestRequest;
+
+    match client {
+        Ok(c) => match c
+            .clone()
+            .ceremony_sign_test(CeremonySignTestRequest {
+                key_id: key_id.to_string(),
+                signers: signers.iter().map(|&s| u32::from(s)).collect(),
+            })
+            .await
+        {
+            Ok(r) => {
+                let r = r.into_inner();
+                Ok((r.message, r.signature))
+            }
+            Err(s) => Err(explain_status(&s, probe, endpoint, server_name).await),
+        },
+        Err(e) => Err(explain_unreachable(e, probe, endpoint, server_name).await),
+    }
+}
+
+/// Prints the `verify-key` / `key show` report of a FROST key as plain text.
+fn print_verify_report(
+    command: &str,
+    key_id: &str,
+    report: &rutli_cosigner::verify_key::VerifyReport,
+) {
+    println!(
+        "{command} {key_id} (FROST) — {}",
+        expectation(report.expected_fingerprint.as_deref())
+    );
+    for n in &report.nodes {
+        print_verify_node(n);
+    }
+    if let (Some(g), Some(d)) = (&report.group_verifying_key, &report.pkp_digest) {
+        println!("  group key {g}\n  pkp digest {d}");
+    }
+    if let Some(fp) = &report.fingerprint {
+        println!("  fingerprint {fp}");
+    }
+    if let (Some(origin), Some(epoch), Some(refreshes)) =
+        (&report.origin, report.epoch, report.refresh_count)
+    {
+        println!(
+            "  origin {origin} epoch {epoch} refreshes {refreshes} threshold {}",
+            report.threshold
+        );
+    }
+    for s in &report.sign_test {
+        println!(
+            "  sign test by {:?} led by node {}: {}",
+            s.signers,
+            s.leader,
+            s.error
+                .as_deref()
+                .unwrap_or("ok (verify_strict under the Canton key)")
+        );
+    }
+    for p in &report.problems {
+        println!("  PROBLEM: {p}");
+    }
+    println!("{}", if report.ok { "OK" } else { "FAILED" });
+}
+
+/// Prints one node's row of the `verify-key` report.
+fn print_verify_node(n: &rutli_cosigner::verify_key::NodeRow) {
+    match &n.error {
+        Some(e) => println!("  node {} {}: {e}", n.identifier, n.endpoint),
+        None => println!(
+            "  node {} {}: fp {} digest {} own-share {} origin {} ceremony {:?} refreshes {}{}",
+            n.identifier,
+            n.endpoint,
+            n.fingerprint,
+            n.pkp_digest,
+            if n.own_share_in_package {
+                "ok"
+            } else {
+                "MISMATCH"
+            },
+            n.origin,
+            n.ceremony_id,
+            n.refresh_count,
+            if n.carried_for.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " carried-for {} usage {:?}",
+                    n.carried_for, n.recorded_usage
+                )
+            }
+        ),
     }
 }
 
@@ -2163,8 +2247,7 @@ async fn verify_hosted_command(
     expect_fingerprint: Option<&str>,
     json: bool,
 ) -> Result<()> {
-    use rutli_cosigner::pb::HostedKeyStatusRequest;
-    use rutli_cosigner::verify_hosted::{check_hosted_views, HostedView};
+    use rutli_cosigner::verify_hosted::check_hosted_views;
 
     let tls = cfg
         .tls
@@ -2174,11 +2257,38 @@ async fn verify_hosted_command(
     let mut peers = cfg.peers.clone();
     peers.sort_by_key(|p| p.identifier);
     let roster: Vec<u16> = peers.iter().map(|p| p.identifier).collect();
+    let views = collect_hosted_views(tls.as_ref(), &peers, key_id).await;
+    let report = check_hosted_views(key_id, expect_fingerprint, &roster, &views);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_hosted_report(command, key_id, &report);
+    }
+    if report.ok {
+        Ok(())
+    } else {
+        Err(DaemonError::Config(format!(
+            "{command}: {} problem(s)",
+            report.problems.len()
+        )))
+    }
+}
+
+/// Asks every roster node for its own copy of hosted key `key_id`, one view per node.
+async fn collect_hosted_views(
+    tls: Option<&rutli_cosigner::tls::Tls>,
+    peers: &[rutli_cosigner::config::PeerConfig],
+    key_id: &str,
+) -> Vec<rutli_cosigner::verify_hosted::HostedView> {
+    use rutli_cosigner::pb::HostedKeyStatusRequest;
+    use rutli_cosigner::verify_hosted::HostedView;
+
     let mut views = Vec::new();
-    for p in &peers {
+    for p in peers {
         // Each node verified under its own name (M3), so one node's certificate cannot answer for
         // another and make a key missing on one node look present everywhere.
-        let status = match roster_signer_client(tls.as_ref(), p).await {
+        let status = match roster_signer_client(tls, p).await {
             Ok(mut c) => c
                 .hosted_key_status(HostedKeyStatusRequest {
                     key_id: key_id.to_string(),
@@ -2194,48 +2304,43 @@ async fn verify_hosted_command(
             status,
         });
     }
-    let report = check_hosted_views(key_id, expect_fingerprint, &roster, &views);
+    views
+}
 
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        println!(
-            "{command} {key_id} (hosted) — {}",
-            expectation(report.expected_fingerprint.as_deref())
-        );
-        for n in &report.nodes {
-            match &n.error {
-                Some(e) => println!("  node {} {}: {e}", n.identifier, n.endpoint),
-                None => println!(
-                    "  node {} {}: {} fp {} created_at {}",
-                    n.identifier, n.endpoint, n.spec, n.fingerprint, n.created_at
-                ),
-            }
-        }
-        match (&report.spec, &report.public_key_der) {
-            (Some(spec), Some(der)) if der.is_empty() && report.ok => println!(
-                "  {spec}: a symmetric key has no public key or fingerprint — every node holds a key of \
-                 this spec under the id; that it is the same key is not shown"
+/// Prints the `verify-hosted` / `key show` report of a hosted key as plain text.
+fn print_hosted_report(
+    command: &str,
+    key_id: &str,
+    report: &rutli_cosigner::verify_hosted::HostedReport,
+) {
+    println!(
+        "{command} {key_id} (hosted) — {}",
+        expectation(report.expected_fingerprint.as_deref())
+    );
+    for n in &report.nodes {
+        match &n.error {
+            Some(e) => println!("  node {} {}: {e}", n.identifier, n.endpoint),
+            None => println!(
+                "  node {} {}: {} fp {} created_at {}",
+                n.identifier, n.endpoint, n.spec, n.fingerprint, n.created_at
             ),
-            (_, Some(der)) if !der.is_empty() => println!("  public key (SPKI) {der}"),
-            _ => {}
         }
-        if let Some(fp) = &report.fingerprint {
-            println!("  fingerprint {fp}");
-        }
-        for p in &report.problems {
-            println!("  PROBLEM: {p}");
-        }
-        println!("{}", if report.ok { "OK" } else { "FAILED" });
     }
-    if report.ok {
-        Ok(())
-    } else {
-        Err(DaemonError::Config(format!(
-            "{command}: {} problem(s)",
-            report.problems.len()
-        )))
+    match (&report.spec, &report.public_key_der) {
+        (Some(spec), Some(der)) if der.is_empty() && report.ok => println!(
+            "  {spec}: a symmetric key has no public key or fingerprint — every node holds a key of \
+             this spec under the id; that it is the same key is not shown"
+        ),
+        (_, Some(der)) if !der.is_empty() => println!("  public key (SPKI) {der}"),
+        _ => {}
     }
+    if let Some(fp) = &report.fingerprint {
+        println!("  fingerprint {fp}");
+    }
+    for p in &report.problems {
+        println!("  PROBLEM: {p}");
+    }
+    println!("{}", if report.ok { "OK" } else { "FAILED" });
 }
 
 /// `key fingerprint`: the Canton fingerprint of a public key file, alone on stdout; what the file
@@ -2805,123 +2910,152 @@ fn publish_keyfile_gauges(keystore: &KeyStore) {
 
 /// `seal …`: offline seal-bundle tooling. See [`SealCommand`].
 fn seal_command(command: SealCommand) -> Result<()> {
-    use rutli_cosigner::seal::NodeSealBundle;
     match command {
         SealCommand::SplitLegacy {
             nodes,
             out_dir,
             master_env,
-        } => {
-            let mut ids = nodes.clone();
-            ids.sort_unstable();
-            ids.dedup();
-            if ids.len() != nodes.len() || ids.contains(&0) {
-                return Err(DaemonError::Config(
-                    "--nodes must list distinct node identifiers ≥ 1".into(),
-                ));
-            }
-            let master = rutli_cosigner::seal::read_master_env(&master_env)?;
-            std::fs::create_dir_all(&out_dir)?;
-            let mut pins = Vec::new();
-            for &id in &ids {
-                let bundle = NodeSealBundle::from_legacy_master(master.as_bytes(), id);
-                let path = out_dir.join(format!("node-{id}.json"));
-                write_new_private_file(&path, &bundle.to_json()?)?;
-                pins.push((id, hex::encode(bundle.dist_public_key()), path));
-            }
-            let commitment = hex::encode(rutli_cosigner::wrap::legacy_commitment_key(
-                master.as_bytes(),
-            ));
-            drop(master);
-            for (id, _, path) in &pins {
-                println!(
-                    "wrote {} (node {id}: its share DEK + distribution seed, nothing else)",
-                    path.display()
-                );
-            }
-            println!("\nPublic values to pin (identical on every node; not secret):");
-            println!("  hosted_keys.commitment_key = {commitment}");
-            for (id, pk, _) in &pins {
-                println!("  peers[identifier={id}].dist_public_key = {pk}");
-            }
-            println!("\nHelm values (deploy/helm/rutli-cosigner, topology: perNode):");
-            println!("hostedKeys:\n  commitmentKey: \"{commitment}\"\nnodes:");
-            for (id, pk, _) in &pins {
-                println!("  - id: {id}\n    distPublicKey: \"{pk}\"");
-            }
-            println!(
-                "\nEach file is ONE node's secret: create one Secret per node from it, delete the \
-                 local copies, and never put two nodes' bundles in one place."
-            );
-        }
-        SealCommand::NewNode { node, out } => {
-            if node == 0 {
-                return Err(DaemonError::Config("--node must be ≥ 1".into()));
-            }
-            let bundle = NodeSealBundle::random(node);
-            write_new_private_file(&out, &bundle.to_json()?)?;
-            println!("wrote {} (node {node}, fresh random keys)", out.display());
-            println!(
-                "  dist_public_key = {}",
-                hex::encode(bundle.dist_public_key())
-            );
-            println!(
-                "A new cluster also needs one hosted_keys.commitment_key, the same on every node: \
-                 `openssl rand -hex 32`."
-            );
-        }
-        SealCommand::Inspect { r#in } => {
-            let bytes = zeroize::Zeroizing::new(std::fs::read(&r#in)?);
-            let bundle = NodeSealBundle::parse(&bytes)?;
-            println!("node {}", bundle.node);
-            println!("dist_public_key {}", hex::encode(bundle.dist_public_key()));
-            println!(
-                "share_dek id {} (+{} previous)",
-                bundle.dek_id(),
-                bundle.previous_count()
-            );
-        }
-        SealCommand::RotateDek { r#in, out } => {
-            let bundle = NodeSealBundle::parse(&zeroize::Zeroizing::new(std::fs::read(&r#in)?))?;
-            let rotated = bundle.rotated();
-            write_new_private_file(&out, &rotated.to_json()?)?;
-            println!(
-                "wrote {} (node {}): share_dek id {} (new), previous {} — dist_public_key unchanged",
-                out.display(),
-                rotated.node,
-                rotated.dek_id(),
-                bundle.dek_id()
-            );
-            println!(
-                "Next: replace node {}'s seal Secret with it, restart the node (it re-seals every key \
-                 file under the new DEK at start), check `rutli-cosigner keyfile status`, take a \
-                 backup, then `seal drop-previous`.",
-                rotated.node
-            );
-        }
-        SealCommand::DropPrevious { r#in, out } => {
-            let bundle = NodeSealBundle::parse(&zeroize::Zeroizing::new(std::fs::read(&r#in)?))?;
-            if bundle.previous_count() == 0 {
-                return Err(DaemonError::Config(format!(
-                    "{} has no previous DEKs",
-                    r#in.display()
-                )));
-            }
-            let dropped = bundle.without_previous();
-            write_new_private_file(&out, &dropped.to_json()?)?;
-            println!(
-                "wrote {} (node {}): share_dek id {}, {} previous DEK(s) removed from this bundle. \
-                 With this bundle, files sealed under a removed DEK no longer open on this node \
-                 (including old backups). The DEK is not destroyed until every other copy is: \
-                 earlier values of the seal Secret and their history, escrowed bundles, operator \
-                 machines (docs/key-material-handling.md).",
-                out.display(),
-                dropped.node,
-                dropped.dek_id(),
-                bundle.previous_count()
-            );
-        }
+        } => seal_split_legacy(&nodes, &out_dir, &master_env)?,
+        SealCommand::NewNode { node, out } => seal_new_node(node, &out)?,
+        SealCommand::Inspect { r#in } => seal_inspect(&r#in)?,
+        SealCommand::RotateDek { r#in, out } => seal_rotate_dek(&r#in, &out)?,
+        SealCommand::DropPrevious { r#in, out } => seal_drop_previous(&r#in, &out)?,
     }
+    Ok(())
+}
+
+/// `seal split-legacy`: writes one bundle per node from the legacy master; prints the pins.
+fn seal_split_legacy(nodes: &[u16], out_dir: &std::path::Path, master_env: &str) -> Result<()> {
+    use rutli_cosigner::seal::NodeSealBundle;
+    let mut ids = nodes.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.len() != nodes.len() || ids.contains(&0) {
+        return Err(DaemonError::Config(
+            "--nodes must list distinct node identifiers ≥ 1".into(),
+        ));
+    }
+    let master = rutli_cosigner::seal::read_master_env(master_env)?;
+    std::fs::create_dir_all(out_dir)?;
+    let mut pins = Vec::new();
+    for &id in &ids {
+        let bundle = NodeSealBundle::from_legacy_master(master.as_bytes(), id);
+        let path = out_dir.join(format!("node-{id}.json"));
+        write_new_private_file(&path, &bundle.to_json()?)?;
+        pins.push((id, hex::encode(bundle.dist_public_key()), path));
+    }
+    let commitment = hex::encode(rutli_cosigner::wrap::legacy_commitment_key(
+        master.as_bytes(),
+    ));
+    drop(master);
+    print_split_legacy_summary(&commitment, &pins);
+    Ok(())
+}
+
+/// Prints the files written by `seal split-legacy` and the public values to pin.
+fn print_split_legacy_summary(commitment: &str, pins: &[(u16, String, std::path::PathBuf)]) {
+    for (id, _, path) in pins {
+        println!(
+            "wrote {} (node {id}: its share DEK + distribution seed, nothing else)",
+            path.display()
+        );
+    }
+    println!("\nPublic values to pin (identical on every node; not secret):");
+    println!("  hosted_keys.commitment_key = {commitment}");
+    for (id, pk, _) in pins {
+        println!("  peers[identifier={id}].dist_public_key = {pk}");
+    }
+    println!("\nHelm values (deploy/helm/rutli-cosigner, topology: perNode):");
+    println!("hostedKeys:\n  commitmentKey: \"{commitment}\"\nnodes:");
+    for (id, pk, _) in pins {
+        println!("  - id: {id}\n    distPublicKey: \"{pk}\"");
+    }
+    println!(
+        "\nEach file is ONE node's secret: create one Secret per node from it, delete the \
+         local copies, and never put two nodes' bundles in one place."
+    );
+}
+
+/// `seal new-node`: writes a bundle of fresh random keys for node `node` of a new cluster.
+fn seal_new_node(node: u16, out: &std::path::Path) -> Result<()> {
+    use rutli_cosigner::seal::NodeSealBundle;
+    if node == 0 {
+        return Err(DaemonError::Config("--node must be ≥ 1".into()));
+    }
+    let bundle = NodeSealBundle::random(node);
+    write_new_private_file(out, &bundle.to_json()?)?;
+    println!("wrote {} (node {node}, fresh random keys)", out.display());
+    println!(
+        "  dist_public_key = {}",
+        hex::encode(bundle.dist_public_key())
+    );
+    println!(
+        "A new cluster also needs one hosted_keys.commitment_key, the same on every node: \
+         `openssl rand -hex 32`."
+    );
+    Ok(())
+}
+
+/// `seal inspect`: prints a bundle's node, `dist_public_key` and DEK ids (never its secrets).
+fn seal_inspect(input: &std::path::Path) -> Result<()> {
+    use rutli_cosigner::seal::NodeSealBundle;
+    let bytes = zeroize::Zeroizing::new(std::fs::read(input)?);
+    let bundle = NodeSealBundle::parse(&bytes)?;
+    println!("node {}", bundle.node);
+    println!("dist_public_key {}", hex::encode(bundle.dist_public_key()));
+    println!(
+        "share_dek id {} (+{} previous)",
+        bundle.dek_id(),
+        bundle.previous_count()
+    );
+    Ok(())
+}
+
+/// `seal rotate-dek`: writes the bundle with a fresh share DEK, the current one kept as previous.
+fn seal_rotate_dek(input: &std::path::Path, out: &std::path::Path) -> Result<()> {
+    use rutli_cosigner::seal::NodeSealBundle;
+    let bundle = NodeSealBundle::parse(&zeroize::Zeroizing::new(std::fs::read(input)?))?;
+    let rotated = bundle.rotated();
+    write_new_private_file(out, &rotated.to_json()?)?;
+    println!(
+        "wrote {} (node {}): share_dek id {} (new), previous {} — dist_public_key unchanged",
+        out.display(),
+        rotated.node,
+        rotated.dek_id(),
+        bundle.dek_id()
+    );
+    println!(
+        "Next: replace node {}'s seal Secret with it, restart the node (it re-seals every key \
+         file under the new DEK at start), check `rutli-cosigner keyfile status`, take a \
+         backup, then `seal drop-previous`.",
+        rotated.node
+    );
+    Ok(())
+}
+
+/// `seal drop-previous`: writes the bundle without its previous share DEKs.
+fn seal_drop_previous(input: &std::path::Path, out: &std::path::Path) -> Result<()> {
+    use rutli_cosigner::seal::NodeSealBundle;
+    let bundle = NodeSealBundle::parse(&zeroize::Zeroizing::new(std::fs::read(input)?))?;
+    if bundle.previous_count() == 0 {
+        return Err(DaemonError::Config(format!(
+            "{} has no previous DEKs",
+            input.display()
+        )));
+    }
+    let dropped = bundle.without_previous();
+    write_new_private_file(out, &dropped.to_json()?)?;
+    println!(
+        "wrote {} (node {}): share_dek id {}, {} previous DEK(s) removed from this bundle. \
+         With this bundle, files sealed under a removed DEK no longer open on this node \
+         (including old backups). The DEK is not destroyed until every other copy is: \
+         earlier values of the seal Secret and their history, escrowed bundles, operator \
+         machines (docs/key-material-handling.md).",
+        out.display(),
+        dropped.node,
+        dropped.dek_id(),
+        bundle.previous_count()
+    );
     Ok(())
 }
 
@@ -2943,6 +3077,42 @@ async fn delete_hosted_key_command(
         )
     })?;
     let signer = rutli_cosigner::request_auth::NodeSigner::from_files(&tls_cfg.cert, &tls_cfg.key)?;
+    let (endpoint, mut client) =
+        delete_signer_client(cfg, tls_cfg, target, tls_server_name).await?;
+    let cluster_id = delete_cluster_id(&mut client, &endpoint).await?;
+    let digest = rutli_cosigner::intent::delete_digest(key_id);
+    let (nonce, collected) = match inbox {
+        Some(dir) if approvals > 0 => {
+            collect_delete_approvals(dir, key_id, &digest, approvals, approval_timeout)?
+        }
+        _ => (Vec::new(), Vec::new()),
+    };
+    let intent = delete_intent(cluster_id, key_id, &digest, nonce, collected);
+    let signed = rutli_cosigner::intent::sign_intent(&signer, &intent)?;
+    let reply = client
+        .delete_key(pb::DeleteKeyRequest {
+            key_id: key_id.into(),
+            intent: Some(signed),
+        })
+        .await
+        .map_err(|s| DaemonError::Config(format!("DeleteKey refused: {}", status_text(&s))))?
+        .into_inner();
+    println!(
+        "{key_id}: {} — tombstoned on {} node(s); anti-entropy brings it to the rest. The material \
+         stays sealed in the tombstones for hosted_keys.delete_grace_secs (rutli-cosigner hosted-undelete).",
+        if reply.deleted { "deleted" } else { "already deleted / not held" },
+        reply.tombstones
+    );
+    Ok(())
+}
+
+/// Resolves the target endpoint and TLS name of `delete-hosted-key` and connects to it.
+async fn delete_signer_client(
+    cfg: &Config,
+    tls_cfg: &rutli_cosigner::config::TlsConfig,
+    target: Option<String>,
+    tls_server_name: Option<String>,
+) -> Result<(String, SignerClient<tonic::transport::Channel>)> {
     let peer = match &target {
         Some(t) => cfg
             .peers
@@ -2963,11 +3133,19 @@ async fn delete_hosted_key_command(
             ))
         })?;
     let tls = rutli_cosigner::tls::load(tls_cfg)?;
-    let mut client = SignerClient::new(
+    let client = SignerClient::new(
         operator_channel(&endpoint, &tls, &name, peer, Some(OPERATOR_CALL_TIMEOUT)).await?,
     );
+    Ok((endpoint, client))
+}
+
+/// Asks the node behind `client` for its cluster id; an empty one is an error.
+async fn delete_cluster_id(
+    client: &mut SignerClient<tonic::transport::Channel>,
+    endpoint: &str,
+) -> Result<String> {
     let cluster_id = client
-        .capabilities(pb::CapabilitiesRequest {})
+        .capabilities(rutli_cosigner::pb::CapabilitiesRequest {})
         .await?
         .into_inner()
         .cluster_id;
@@ -2976,17 +3154,21 @@ async fn delete_hosted_key_command(
             "{endpoint} reports no cluster id — a cosigner older than intents"
         )));
     }
-    let digest = rutli_cosigner::intent::delete_digest(key_id);
-    let (nonce, collected) = match inbox {
-        Some(dir) if approvals > 0 => {
-            collect_delete_approvals(dir, key_id, &digest, approvals, approval_timeout)?
-        }
-        _ => (Vec::new(), Vec::new()),
-    };
+    Ok(cluster_id)
+}
+
+/// Builds the delete intent for `key_id`: a fresh request id, valid for two minutes from now.
+fn delete_intent(
+    cluster_id: String,
+    key_id: &str,
+    digest: &[u8; 32],
+    nonce: Vec<u8>,
+    collected: Vec<rutli_cosigner::pb::IntentApproval>,
+) -> rutli_cosigner::pb::SignIntent {
     let now = rutli_cosigner::intent::now_ms();
     let mut request_id = [0u8; INTENT_REQUEST_ID_BYTES];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut request_id);
-    let intent = pb::SignIntent {
+    rutli_cosigner::pb::SignIntent {
         version: rutli_cosigner::intent::INTENT_VERSION,
         cluster_id,
         purpose: rutli_cosigner::intent::PURPOSE_DELETE_KEY.into(),
@@ -2998,23 +3180,7 @@ async fn delete_hosted_key_command(
         approval_nonce: nonce,
         approvals: collected,
         ..Default::default()
-    };
-    let signed = rutli_cosigner::intent::sign_intent(&signer, &intent)?;
-    let reply = client
-        .delete_key(pb::DeleteKeyRequest {
-            key_id: key_id.into(),
-            intent: Some(signed),
-        })
-        .await
-        .map_err(|s| DaemonError::Config(format!("DeleteKey refused: {}", status_text(&s))))?
-        .into_inner();
-    println!(
-        "{key_id}: {} — tombstoned on {} node(s); anti-entropy brings it to the rest. The material \
-         stays sealed in the tombstones for hosted_keys.delete_grace_secs (rutli-cosigner hosted-undelete).",
-        if reply.deleted { "deleted" } else { "already deleted / not held" },
-        reply.tombstones
-    );
-    Ok(())
+    }
 }
 
 /// Collect `threshold` approvals of a delete through a `rutli-approve` inbox: write the pending
@@ -3027,63 +3193,13 @@ fn collect_delete_approvals(
     threshold: usize,
     timeout: std::time::Duration,
 ) -> Result<(Vec<u8>, Vec<rutli_cosigner::pb::IntentApproval>)> {
-    use base64::Engine;
-    use sha2::Digest;
     let mut nonce = [0u8; APPROVAL_NONCE_BYTES];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
-    // Domain-separated from sign approvals (audit F6): the request id is over `delete:<key>`, and
-    // the pending file shows exactly that as its keyId, so `rutli-approve` recomputes the id from
-    // what it displays and knows it is approving a DELETE (and checks the digest is the key's).
-    let request_id =
-        rutli_cosigner::intent::delete_approval_request_id(key_id, delete_digest, &nonce);
-    let (pending, approvals_dir) = (inbox.join("pending"), inbox.join("approvals"));
-    std::fs::create_dir_all(&pending)?;
-    std::fs::create_dir_all(&approvals_dir)?;
-    let op_digest = hex::encode(sha2::Sha256::digest(delete_digest));
-    let json = serde_json::json!({
-        "requestId": request_id,
-        "keyId": format!("{}{key_id}", rutli_cosigner::intent::DELETE_APPROVAL_KEY_PREFIX),
-        "digest": op_digest, "nonce": hex::encode(nonce),
-        "ts": rutli_cosigner::intent::now_ms(), "operation": "delete-hosted-key",
-    });
-    let file = pending.join(format!("{request_id}.json"));
-    std::fs::write(&file, serde_json::to_vec(&json)?)?;
-    println!(
-        "waiting for {threshold} approval(s) of DELETE {key_id}: request {request_id} in {} — approvers run \
-         `ApproveCli approve --inbox {} --request {request_id}` (its digest is SHA-256 of the delete digest)",
-        file.display(),
-        inbox.display()
-    );
+    let (request_id, file, approvals_dir) =
+        post_delete_request(inbox, key_id, delete_digest, threshold, &nonce)?;
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        let mut found: std::collections::BTreeMap<String, Vec<u8>> = Default::default();
-        for entry in std::fs::read_dir(&approvals_dir)? {
-            let path = entry?.path();
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default()
-                .to_string();
-            if !name.starts_with(&format!("{request_id}.")) || !name.ends_with(".sig") {
-                continue;
-            }
-            let Ok(v) = serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path)?) else {
-                continue;
-            };
-            let (Some(id), Some(rid), Some(sig)) = (
-                v.get("approverId").and_then(serde_json::Value::as_str),
-                v.get("requestId").and_then(serde_json::Value::as_str),
-                v.get("signature").and_then(serde_json::Value::as_str),
-            ) else {
-                continue;
-            };
-            if rid != request_id {
-                continue;
-            }
-            if let Ok(sig) = base64::engine::general_purpose::STANDARD.decode(sig) {
-                found.insert(id.to_string(), sig);
-            }
-        }
+        let found = read_delete_approvals(&approvals_dir, &request_id)?;
         if found.len() >= threshold {
             let _ = std::fs::remove_file(&file);
             return Ok((
@@ -3108,6 +3224,79 @@ fn collect_delete_approvals(
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
+}
+
+/// Writes the pending delete request into the inbox and says who must approve it; returns the
+/// request id, the pending file and the directory the approvals appear in.
+fn post_delete_request(
+    inbox: &std::path::Path,
+    key_id: &str,
+    delete_digest: &[u8; 32],
+    threshold: usize,
+    nonce: &[u8; APPROVAL_NONCE_BYTES],
+) -> Result<(String, std::path::PathBuf, std::path::PathBuf)> {
+    use sha2::Digest;
+    // Domain-separated from sign approvals (audit F6): the request id is over `delete:<key>`, and
+    // the pending file shows exactly that as its keyId, so `rutli-approve` recomputes the id from
+    // what it displays and knows it is approving a DELETE (and checks the digest is the key's).
+    let request_id =
+        rutli_cosigner::intent::delete_approval_request_id(key_id, delete_digest, nonce);
+    let (pending, approvals_dir) = (inbox.join("pending"), inbox.join("approvals"));
+    std::fs::create_dir_all(&pending)?;
+    std::fs::create_dir_all(&approvals_dir)?;
+    let op_digest = hex::encode(sha2::Sha256::digest(delete_digest));
+    let json = serde_json::json!({
+        "requestId": request_id,
+        "keyId": format!("{}{key_id}", rutli_cosigner::intent::DELETE_APPROVAL_KEY_PREFIX),
+        "digest": op_digest, "nonce": hex::encode(nonce),
+        "ts": rutli_cosigner::intent::now_ms(), "operation": "delete-hosted-key",
+    });
+    let file = pending.join(format!("{request_id}.json"));
+    std::fs::write(&file, serde_json::to_vec(&json)?)?;
+    println!(
+        "waiting for {threshold} approval(s) of DELETE {key_id}: request {request_id} in {} — approvers run \
+         `ApproveCli approve --inbox {} --request {request_id}` (its digest is SHA-256 of the delete digest)",
+        file.display(),
+        inbox.display()
+    );
+    Ok((request_id, file, approvals_dir))
+}
+
+/// Reads the signed approvals for `request_id` currently in `approvals_dir`, keyed by approver.
+fn read_delete_approvals(
+    approvals_dir: &std::path::Path,
+    request_id: &str,
+) -> Result<std::collections::BTreeMap<String, Vec<u8>>> {
+    use base64::Engine;
+    let mut found: std::collections::BTreeMap<String, Vec<u8>> = Default::default();
+    for entry in std::fs::read_dir(approvals_dir)? {
+        let path = entry?.path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if !name.starts_with(&format!("{request_id}.")) || !name.ends_with(".sig") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path)?) else {
+            continue;
+        };
+        let (Some(id), Some(rid), Some(sig)) = (
+            v.get("approverId").and_then(serde_json::Value::as_str),
+            v.get("requestId").and_then(serde_json::Value::as_str),
+            v.get("signature").and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        if rid != request_id {
+            continue;
+        }
+        if let Ok(sig) = base64::engine::general_purpose::STANDARD.decode(sig) {
+            found.insert(id.to_string(), sig);
+        }
+    }
+    Ok(found)
 }
 
 /// `hosted-undelete`: see [`Command::HostedUndelete`].
@@ -3149,7 +3338,6 @@ fn hosted_clear_tombstone_command(cfg: &Config, key_id: &str, confirm: &str) -> 
 
 /// `keyfile …`: see [`KeyfileCommand`].
 fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
-    use rutli_cosigner::seal::DekUse;
     let sealer = offline_sealer(cfg)?;
     let lock = match command {
         KeyfileCommand::Status | KeyfileCommand::Prove { .. } => None,
@@ -3159,213 +3347,281 @@ fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
     };
     let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), Some(sealer.clone()))?;
     let recipients = rutli_cosigner::share_delivery::list_recipients(&cfg.data_dir)?;
-    let recipient_path = |k: &str| rutli_cosigner::share_delivery::recipient_path(&cfg.data_dir, k);
     match command {
-        KeyfileCommand::Status => {
-            let mut files = keystore.key_file_paths()?;
-            for k in &recipients {
-                files.push(recipient_path(k)?);
-            }
-            let (mut outdated, mut previous) = (0, 0);
-            println!(
-                "node {} — writes v{} (cluster_uuid {}), current DEK {}",
-                cfg.identifier,
-                cfg.keyfile.write_version,
-                cfg.keyfile.cluster_uuid.as_deref().unwrap_or("<unset>"),
-                sealer.current_dek_id()
-            );
-            for path in &files {
-                let bytes = std::fs::read(path)?;
-                let state = match rutli_cosigner::seal::file_version(&bytes) {
-                    None => {
-                        outdated += 1;
-                        "PLAINTEXT (refused)".to_string()
-                    }
-                    Some(v) => {
-                        if v < 2 {
-                            outdated += 1;
-                        }
-                        let dek = match sealer.dek_use(&bytes) {
-                            DekUse::Current => "current DEK".to_string(),
-                            DekUse::Previous(i) => {
-                                previous += 1;
-                                format!("PREVIOUS DEK #{i}")
-                            }
-                            DekUse::Unknown => "UNKNOWN DEK (does not open here)".to_string(),
-                        };
-                        format!("v{v}, {dek}")
-                    }
-                };
-                println!("  {}  {state}", path.display());
-            }
-            println!(
-                "{} file(s): {outdated} not yet v2, {previous} under a previous DEK{}",
-                files.len(),
-                if previous == 0 && sealer.has_previous() {
-                    " — the previous DEK(s) can be dropped from the seal bundle (`seal drop-previous`) after a backup"
-                } else {
-                    ""
-                }
-            );
-        }
+        KeyfileCommand::Status => keyfile_status(cfg, &keystore, &sealer, &recipients)?,
         KeyfileCommand::Migrate | KeyfileCommand::Downgrade => {
             let version = if matches!(command, KeyfileCommand::Migrate) {
                 2
             } else {
                 1
             };
-            let plaintext = keystore.plaintext_files()?;
-            if !plaintext.is_empty() {
-                return Err(DaemonError::KeyFile(format!(
-                    "plaintext key file(s) {} — seal or remove them first (keyfile migrate-plaintext)",
-                    plaintext.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
-                )));
-            }
-            let mut n = 0;
-            for path in keystore.key_file_paths()? {
-                keystore.rewrite(&path, version)?;
-                n += 1;
-            }
-            for k in &recipients {
-                rutli_cosigner::share_delivery::reseal_recipient(
-                    &cfg.data_dir,
-                    &sealer,
-                    k,
-                    version,
-                )?;
-                n += 1;
-            }
-            println!(
-                "re-sealed {n} key file(s) as format v{version} under DEK {}",
-                sealer.current_dek_id()
-            );
-            let tombstones = keystore.list_tombstones()?.len();
-            if version == 1 && tombstones > 0 {
-                println!(
-                    "{tombstones} tombstone(s) of deleted hosted keys: a release before tombstones reads each as \
-                     an unreadable file — it serves nothing for the id, but it no longer blocks the key from \
-                     coming back from a node that still holds it. Downgrade every node, or none."
-                );
-            }
-            if version == 1 && cfg.keyfile.write_version == 2 {
-                println!(
-                    "keyfile.write_version is still 2 here: set it to 1 before starting this release \
-                     again, or it migrates the files back to v2 at start"
-                );
-            }
+            keyfile_reseal_all(cfg, &keystore, &sealer, &recipients, version)?;
         }
         KeyfileCommand::Prove {
             key_id,
             epoch,
             report,
-        } => {
-            let share = keystore.load(&key_id)?;
-            if share.epoch != epoch {
-                return Err(DaemonError::Config(format!(
-                    "keyfile prove: this node's live share of {key_id} is at epoch {}, not {epoch}",
-                    share.epoch
-                )));
-            }
-            let live = rutli_cosigner::proof::Live {
-                key_id: key_id.clone(),
-                epoch,
-                group_key: rutli_frost_core::dkg::group_verifying_key_bytes(
-                    &share.public_key_package,
-                )?,
-                pkp_digest: share.pkp_digest()?,
-                threshold: *share.key_package.min_signers(),
-                roster: share
-                    .public_key_package
-                    .verifying_shares()
-                    .keys()
-                    .map(|id| rutli_cosigner::hosted::identifier_index(*id))
-                    .collect::<std::result::Result<Vec<u16>, _>>()?,
-            };
-            let roster: Vec<u16> = cfg.peers.iter().map(|p| p.identifier).collect();
-            let (marker, wrote) = rutli_cosigner::proof::prove(
-                &cfg.data_dir.join("keys"),
-                &live,
-                &roster,
-                cfg.threshold,
-                &std::fs::read(&report)?,
-                rutli_cosigner::intent::now_ms(),
-            )?;
-            println!(
-                "{} {} epoch {} (group key {}, report sha256 {})",
-                if wrote {
-                    "recorded: proven"
-                } else {
-                    "already recorded: proven"
-                },
-                marker.key_id,
-                marker.epoch,
-                marker.group_key,
-                marker.report_sha256
-            );
-            println!(
-                "NOTE: this marker is YOUR statement. This node checked that the report is consistent \
-                 and agrees with its own epoch, sharing and group key; it cannot check who produced the \
-                 report. Backups of older epochs are kept until this epoch is proven and old enough."
-            );
-        }
+        } => keyfile_prove(cfg, &keystore, &key_id, epoch, &report)?,
         KeyfileCommand::MigratePlaintext { key_id, confirm } => {
-            use sha2::Digest;
-            let path = cfg.data_dir.join("keys").join(format!("{key_id}.json"));
-            let bytes = std::fs::read(&path)?;
-            if rutli_cosigner::seal::Sealer::is_sealed(&bytes) {
-                return Err(DaemonError::Config(format!(
-                    "{} is already sealed",
-                    path.display()
-                )));
-            }
-            let code = hex::encode(
-                sha2::Sha256::digest(&bytes)
-                    .iter()
-                    .copied()
-                    .take(MIGRATE_CONFIRM_CODE_BYTES)
-                    .collect::<Vec<u8>>(),
-            );
-            let what = match keystore.inspect_plaintext(&key_id) {
-                Ok(rutli_cosigner::keystore::Record::Frost(share)) => format!(
-                    "FROST share, group key {}, epoch {}",
-                    hex::encode(share.public_key_package.verifying_key().serialize()?),
-                    share.epoch
-                ),
-                Ok(rutli_cosigner::keystore::Record::Hosted(k)) => format!(
-                    "hosted key {}, public digest {}",
-                    k.spec.as_str(),
-                    hex::encode(rutli_cosigner::keystore::hosted_header_digest(&k))
-                ),
-                Ok(rutli_cosigner::keystore::Record::Tombstone(t)) => {
-                    format!(
-                        "tombstone of a deleted hosted key, deleted at {} ms",
-                        t.deleted_at_ms
-                    )
-                }
-                Err(e) => return Err(e),
-            };
-            match confirm {
-                Some(c) if c == code => {
-                    keystore.migrate_plaintext(&key_id)?;
-                    println!("sealed {} ({what})", path.display());
-                }
-                Some(_) => {
-                    return Err(DaemonError::Config(format!(
-                        "confirmation code mismatch: the file is not the one inspected (code now {code})"
-                    )))
-                }
-                None => {
-                    println!("{}: PLAINTEXT {what}", path.display());
-                    println!(
-                        "If this is genuine, seal it: rutli-cosigner keyfile migrate-plaintext --key-id \
-                         {key_id} --confirm {code}"
-                    );
-                }
-            }
+            keyfile_migrate_plaintext(cfg, &keystore, &key_id, confirm)?;
         }
     }
     drop(lock);
     Ok(())
+}
+
+/// `keyfile status`: the format version and the DEK of every key file and recipient file.
+fn keyfile_status(
+    cfg: &Config,
+    keystore: &KeyStore,
+    sealer: &rutli_cosigner::seal::Sealer,
+    recipients: &[String],
+) -> Result<()> {
+    let mut files = keystore.key_file_paths()?;
+    for k in recipients {
+        files.push(rutli_cosigner::share_delivery::recipient_path(
+            &cfg.data_dir,
+            k,
+        )?);
+    }
+    let (mut outdated, mut previous) = (0, 0);
+    println!(
+        "node {} — writes v{} (cluster_uuid {}), current DEK {}",
+        cfg.identifier,
+        cfg.keyfile.write_version,
+        cfg.keyfile.cluster_uuid.as_deref().unwrap_or("<unset>"),
+        sealer.current_dek_id()
+    );
+    for path in &files {
+        let bytes = std::fs::read(path)?;
+        let state = keyfile_state(sealer, &bytes, &mut outdated, &mut previous);
+        println!("  {}  {state}", path.display());
+    }
+    println!(
+        "{} file(s): {outdated} not yet v2, {previous} under a previous DEK{}",
+        files.len(),
+        if previous == 0 && sealer.has_previous() {
+            " — the previous DEK(s) can be dropped from the seal bundle (`seal drop-previous`) after a backup"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
+/// The status text of one key file's bytes; counts it as outdated and/or under a previous DEK.
+fn keyfile_state(
+    sealer: &rutli_cosigner::seal::Sealer,
+    bytes: &[u8],
+    outdated: &mut i32,
+    previous: &mut i32,
+) -> String {
+    use rutli_cosigner::seal::DekUse;
+    match rutli_cosigner::seal::file_version(bytes) {
+        None => {
+            *outdated += 1;
+            "PLAINTEXT (refused)".to_string()
+        }
+        Some(v) => {
+            if v < 2 {
+                *outdated += 1;
+            }
+            let dek = match sealer.dek_use(bytes) {
+                DekUse::Current => "current DEK".to_string(),
+                DekUse::Previous(i) => {
+                    *previous += 1;
+                    format!("PREVIOUS DEK #{i}")
+                }
+                DekUse::Unknown => "UNKNOWN DEK (does not open here)".to_string(),
+            };
+            format!("v{v}, {dek}")
+        }
+    }
+}
+
+/// `keyfile migrate` / `downgrade`: re-seals every key and recipient file as format `version`.
+fn keyfile_reseal_all(
+    cfg: &Config,
+    keystore: &KeyStore,
+    sealer: &rutli_cosigner::seal::Sealer,
+    recipients: &[String],
+    version: u8,
+) -> Result<()> {
+    let plaintext = keystore.plaintext_files()?;
+    if !plaintext.is_empty() {
+        return Err(DaemonError::KeyFile(format!(
+            "plaintext key file(s) {} — seal or remove them first (keyfile migrate-plaintext)",
+            plaintext
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    let mut n = 0;
+    for path in keystore.key_file_paths()? {
+        keystore.rewrite(&path, version)?;
+        n += 1;
+    }
+    for k in recipients {
+        rutli_cosigner::share_delivery::reseal_recipient(&cfg.data_dir, sealer, k, version)?;
+        n += 1;
+    }
+    println!(
+        "re-sealed {n} key file(s) as format v{version} under DEK {}",
+        sealer.current_dek_id()
+    );
+    let tombstones = keystore.list_tombstones()?.len();
+    if version == 1 && tombstones > 0 {
+        println!(
+            "{tombstones} tombstone(s) of deleted hosted keys: a release before tombstones reads each as \
+             an unreadable file — it serves nothing for the id, but it no longer blocks the key from \
+             coming back from a node that still holds it. Downgrade every node, or none."
+        );
+    }
+    if version == 1 && cfg.keyfile.write_version == 2 {
+        println!(
+            "keyfile.write_version is still 2 here: set it to 1 before starting this release \
+             again, or it migrates the files back to v2 at start"
+        );
+    }
+    Ok(())
+}
+
+/// `keyfile prove`: checks the operator's report against this node's live key, records the proof.
+fn keyfile_prove(
+    cfg: &Config,
+    keystore: &KeyStore,
+    key_id: &str,
+    epoch: u64,
+    report: &std::path::Path,
+) -> Result<()> {
+    let share = keystore.load(key_id)?;
+    if share.epoch != epoch {
+        return Err(DaemonError::Config(format!(
+            "keyfile prove: this node's live share of {key_id} is at epoch {}, not {epoch}",
+            share.epoch
+        )));
+    }
+    let live = live_proof_state(key_id, epoch, &share)?;
+    let roster: Vec<u16> = cfg.peers.iter().map(|p| p.identifier).collect();
+    let (marker, wrote) = rutli_cosigner::proof::prove(
+        &cfg.data_dir.join("keys"),
+        &live,
+        &roster,
+        cfg.threshold,
+        &std::fs::read(report)?,
+        rutli_cosigner::intent::now_ms(),
+    )?;
+    println!(
+        "{} {} epoch {} (group key {}, report sha256 {})",
+        if wrote {
+            "recorded: proven"
+        } else {
+            "already recorded: proven"
+        },
+        marker.key_id,
+        marker.epoch,
+        marker.group_key,
+        marker.report_sha256
+    );
+    println!(
+        "NOTE: this marker is YOUR statement. This node checked that the report is consistent \
+         and agrees with its own epoch, sharing and group key; it cannot check who produced the \
+         report. Backups of older epochs are kept until this epoch is proven and old enough."
+    );
+    Ok(())
+}
+
+/// The live state of this node's share of `key_id` that a proof report is checked against.
+fn live_proof_state(
+    key_id: &str,
+    epoch: u64,
+    share: &rutli_cosigner::keystore::Share,
+) -> Result<rutli_cosigner::proof::Live> {
+    Ok(rutli_cosigner::proof::Live {
+        key_id: key_id.to_string(),
+        epoch,
+        group_key: rutli_frost_core::dkg::group_verifying_key_bytes(&share.public_key_package)?,
+        pkp_digest: share.pkp_digest()?,
+        threshold: *share.key_package.min_signers(),
+        roster: share
+            .public_key_package
+            .verifying_shares()
+            .keys()
+            .map(|id| rutli_cosigner::hosted::identifier_index(*id))
+            .collect::<std::result::Result<Vec<u16>, _>>()?,
+    })
+}
+
+/// `keyfile migrate-plaintext`: shows what a plaintext key file holds and its confirmation code, or
+/// seals it when `confirm` is that code.
+fn keyfile_migrate_plaintext(
+    cfg: &Config,
+    keystore: &KeyStore,
+    key_id: &str,
+    confirm: Option<String>,
+) -> Result<()> {
+    use sha2::Digest;
+    let path = cfg.data_dir.join("keys").join(format!("{key_id}.json"));
+    let bytes = std::fs::read(&path)?;
+    if rutli_cosigner::seal::Sealer::is_sealed(&bytes) {
+        return Err(DaemonError::Config(format!(
+            "{} is already sealed",
+            path.display()
+        )));
+    }
+    let code = hex::encode(
+        sha2::Sha256::digest(&bytes)
+            .iter()
+            .copied()
+            .take(MIGRATE_CONFIRM_CODE_BYTES)
+            .collect::<Vec<u8>>(),
+    );
+    let what = describe_plaintext_record(keystore, key_id)?;
+    match confirm {
+        Some(c) if c == code => {
+            keystore.migrate_plaintext(key_id)?;
+            println!("sealed {} ({what})", path.display());
+        }
+        Some(_) => {
+            return Err(DaemonError::Config(format!(
+                "confirmation code mismatch: the file is not the one inspected (code now {code})"
+            )))
+        }
+        None => {
+            println!("{}: PLAINTEXT {what}", path.display());
+            println!(
+                "If this is genuine, seal it: rutli-cosigner keyfile migrate-plaintext --key-id \
+                 {key_id} --confirm {code}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// What the plaintext key file of `key_id` holds, in one line (never the secret share).
+fn describe_plaintext_record(keystore: &KeyStore, key_id: &str) -> Result<String> {
+    let what = match keystore.inspect_plaintext(key_id) {
+        Ok(rutli_cosigner::keystore::Record::Frost(share)) => format!(
+            "FROST share, group key {}, epoch {}",
+            hex::encode(share.public_key_package.verifying_key().serialize()?),
+            share.epoch
+        ),
+        Ok(rutli_cosigner::keystore::Record::Hosted(k)) => format!(
+            "hosted key {}, public digest {}",
+            k.spec.as_str(),
+            hex::encode(rutli_cosigner::keystore::hosted_header_digest(&k))
+        ),
+        Ok(rutli_cosigner::keystore::Record::Tombstone(t)) => {
+            format!(
+                "tombstone of a deleted hosted key, deleted at {} ms",
+                t.deleted_at_ms
+            )
+        }
+        Err(e) => return Err(e),
+    };
+    Ok(what)
 }
 
 /// Create `path` owner-only and write `bytes`; refuses to replace an existing file.
@@ -3644,6 +3900,7 @@ fn import_key_command(
     // `{` (its first field tag is 0x0a). The flags that only make sense for one of them are
     // refused for the other, so an operator never believes a check ran that did not.
     let is_rutli_envelope = raw.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'{');
+    let secret = passphrase.as_deref().map(std::string::String::as_str);
     let (key_id, key, origin) = if is_rutli_envelope {
         if canton_key_id.is_some() || expect_fingerprint.is_some() || key_prefix.is_some() {
             return Err(DaemonError::Config(
@@ -3652,52 +3909,30 @@ fn import_key_command(
                     .into(),
             ));
         }
-        let envelope: rutli_cosigner::export::ExportEnvelope = serde_json::from_slice(&raw)?;
-        let key = rutli_cosigner::export::import(
-            &envelope,
-            passphrase.as_deref().map(std::string::String::as_str),
-        )?;
-        (envelope.key_id.clone(), key, "a Rütli export".to_string())
+        read_rutli_export(&raw, secret)?
     } else {
-        let (Some(key_id), Some(expect)) = (canton_key_id, expect_fingerprint) else {
-            return Err(DaemonError::Config(
-                "this looks like a Canton key export: pass --key-id (the hosted key id to create, \
-                 <frost.key-prefix>rutli-…) and --expect-fingerprint (the key's 1220… fingerprint \
-                 from the old node)"
-                    .into(),
-            ));
-        };
-        let prefix = rutli_cosigner::export::hosted_import_key_id(key_id, key_prefix)?;
-        println!(
-            "{key_id} is reachable by a driver whose frost.key-prefix is {prefix:?}{}",
-            if key_prefix.is_none() {
-                " (pass --key-prefix to enforce it)"
-            } else {
-                ""
-            }
-        );
-        let imported = rutli_cosigner::export::import_canton(
-            &raw,
-            passphrase.as_deref().map(std::string::String::as_bytes),
-            expect,
-            rutli_cosigner::hosted::now_secs(),
-        )?;
-        (
-            key_id.to_string(),
-            imported.key,
-            format!("Canton key {}", imported.fingerprint),
-        )
+        read_canton_export(&raw, secret, canton_key_id, expect_fingerprint, key_prefix)?
     };
     drop(raw);
     drop(passphrase);
 
+    install_imported_key(&keystore, &key_id, &key, &origin, input)
+}
+
+/// Installs the imported `key` as hosted key `key_id`; a byte-identical key already there is fine.
+fn install_imported_key(
+    keystore: &KeyStore,
+    key_id: &str,
+    key: &rutli_cosigner::hosted::HostedKey,
+    origin: &str,
+    input: &std::path::Path,
+) -> Result<()> {
     // Hosted keys are create-once-immutable: a key id maps to one key forever, because Canton
     // rotates by minting a new id. Overwriting could destroy material the cluster already
     // committed to, so refuse unless it is byte-identical. Safe against a running daemon — see
     // export::install_imported.
     use rutli_cosigner::export::Installed;
-    if rutli_cosigner::export::install_imported(&keystore, &key_id, &key)?
-        == Installed::AlreadyPresent
+    if rutli_cosigner::export::install_imported(keystore, key_id, key)? == Installed::AlreadyPresent
     {
         println!("{key_id} is already present here and identical — nothing to do");
         return Ok(());
@@ -3714,6 +3949,54 @@ fn import_key_command(
         key.spec.as_str()
     );
     Ok(())
+}
+
+/// Reads a Rütli export artifact: its key id, the key, and where the key came from.
+fn read_rutli_export(
+    raw: &[u8],
+    passphrase: Option<&str>,
+) -> Result<(String, rutli_cosigner::hosted::HostedKey, String)> {
+    let envelope: rutli_cosigner::export::ExportEnvelope = serde_json::from_slice(raw)?;
+    let key = rutli_cosigner::export::import(&envelope, passphrase)?;
+    Ok((envelope.key_id.clone(), key, "a Rütli export".to_string()))
+}
+
+/// Reads a Canton key export: the hosted key id to create, the key, and where the key came from.
+fn read_canton_export(
+    raw: &[u8],
+    passphrase: Option<&str>,
+    canton_key_id: Option<&str>,
+    expect_fingerprint: Option<&str>,
+    key_prefix: Option<&str>,
+) -> Result<(String, rutli_cosigner::hosted::HostedKey, String)> {
+    let (Some(key_id), Some(expect)) = (canton_key_id, expect_fingerprint) else {
+        return Err(DaemonError::Config(
+            "this looks like a Canton key export: pass --key-id (the hosted key id to create, \
+             <frost.key-prefix>rutli-…) and --expect-fingerprint (the key's 1220… fingerprint \
+             from the old node)"
+                .into(),
+        ));
+    };
+    let prefix = rutli_cosigner::export::hosted_import_key_id(key_id, key_prefix)?;
+    println!(
+        "{key_id} is reachable by a driver whose frost.key-prefix is {prefix:?}{}",
+        if key_prefix.is_none() {
+            " (pass --key-prefix to enforce it)"
+        } else {
+            ""
+        }
+    );
+    let imported = rutli_cosigner::export::import_canton(
+        raw,
+        passphrase.map(str::as_bytes),
+        expect,
+        rutli_cosigner::hosted::now_secs(),
+    )?;
+    Ok((
+        key_id.to_string(),
+        imported.key,
+        format!("Canton key {}", imported.fingerprint),
+    ))
 }
 
 /// Copy regular files from `src` to `dst`. When `!overwrite`, existing destination files are an
