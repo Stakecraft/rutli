@@ -133,8 +133,11 @@ final case class SigningJournalConfig(
   * @param leaderRecovery     After this long the first endpoint gets the lead back, after it lost it
   *                   (60 s).
   * @param signLeader  `sticky` (default) | `rotate`: where each sign starts. Sticky keeps signs on
-  *                   the preferred leader, as before 0.5.0; rotate spreads them over the healthy
-  *                   endpoints in turn. Ceremonies and hosted-key calls are sticky either way.
+  *                   the preferred leader, as before 0.5.0 (past a cosigner that answered another
+  *                   group key for the key), and a verified signature makes its cosigner the
+  *                   preferred leader; rotate spreads signs over the healthy endpoints in turn and
+  *                   leaves the preferred leader alone. Ceremonies and hosted-key calls are sticky
+  *                   either way.
   */
 final case class FrostConfig(
     endpoint: Option[String] = None,

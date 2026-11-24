@@ -160,7 +160,8 @@ class FrostBackend(
     // first again; if it still fails it loses the lead again at the cost of one attempt).
     leaderRecovery: FiniteDuration = 60.seconds,
     // `frost.sign-leader`: true = rotate (each sign starts at the next healthy endpoint in turn),
-    // false = sticky (every sign starts at the preferred leader, as every other call does).
+    // false = sticky (every sign starts at the preferred leader, or at the next endpoint that has
+    // not answered another group key for that key).
     rotateSigns: Boolean = FrostBackend.DefaultRotateSigns,
     // `frost.pin-dir`: the durable group-key pins; None keeps them in memory only (a WARN).
     pinStore: Option[GroupKeyPinStore] = None,
