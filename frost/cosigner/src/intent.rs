@@ -1427,6 +1427,100 @@ mod tests {
         );
     }
 
+    /// A signed intent of exactly the size limit, plus `over` zero bytes after it: with 0 a valid
+    /// intent that must still be accepted by the size check, with more one that must not.
+    fn intent_at_the_size_limit(over: usize) -> pb::SignedIntent {
+        let mut intent = pb::SignIntent {
+            request_id: vec![1; REQUEST_ID_LEN],
+            ..Default::default()
+        };
+        let base = intent.encoded_len();
+        intent.key_id = "k".repeat(MAX_INTENT_BYTES - base - 3); // tag + 2-byte length prefix
+        let mut bytes = intent.encode_to_vec();
+        assert_eq!(bytes.len(), MAX_INTENT_BYTES);
+        bytes.extend(std::iter::repeat_n(0, over));
+        pb::SignedIntent {
+            intent: bytes,
+            ..Default::default()
+        }
+    }
+
+    /// The generate intent's ceremony id is read from an intent of the size limit and no bigger, as
+    /// the other ceremony kinds' is (`the_ceremony_id_is_read_only_from_an_intent_of_a_sane_size`).
+    #[test]
+    fn the_generate_ceremony_id_is_read_only_from_an_intent_of_a_sane_size() {
+        let err = generate_ceremony_id_of(&pb::SignedIntent::default()).unwrap_err();
+        assert!(err.to_string().contains("intent of 0 bytes"), "{err}");
+        assert_eq!(
+            generate_ceremony_id_of(&intent_at_the_size_limit(0)).unwrap(),
+            generate_ceremony_id(&[1; REQUEST_ID_LEN])
+        );
+        let err = generate_ceremony_id_of(&intent_at_the_size_limit(1)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("intent of {} bytes", MAX_INTENT_BYTES + 1)),
+            "{err}"
+        );
+        let err = generate_ceremony_id_of(&intent_at_the_size_limit(1000)).unwrap_err();
+        assert!(err.to_string().contains("intent of 17384 bytes"), "{err}");
+    }
+
+    /// Every verification refuses an oversized intent for its size before it looks at anything
+    /// else, and does not for one of exactly the limit (which is then refused for what comes next:
+    /// here the certificate chain, which the test verifier has no CA for).
+    #[test]
+    fn every_verification_refuses_an_intent_over_the_size_limit_and_only_that() {
+        let v = verifier_with(&SigningPolicyConfig::default());
+        let sized = |n: usize| format!("intent of {n} bytes");
+        let over = intent_at_the_size_limit(1);
+        let exact = intent_at_the_size_limit(0);
+        let empty = pb::SignedIntent::default();
+        for err in [
+            v.verify(&empty, "k", 1_000).unwrap_err(),
+            v.verify_ceremony(&empty, CeremonyKind::Dkg, "k", "c", 1_000)
+                .unwrap_err(),
+            v.verify_generate(&empty, "k", "ed25519", 0, "c", 1_000)
+                .unwrap_err(),
+        ] {
+            assert!(err.to_string().contains(&sized(0)), "{err}");
+        }
+        let results = [
+            (
+                "verify",
+                v.verify(&over, "k", 1_000).unwrap_err().to_string(),
+                v.verify(&exact, "k", 1_000).unwrap_err().to_string(),
+            ),
+            (
+                "verify_ceremony",
+                v.verify_ceremony(&over, CeremonyKind::Dkg, "k", "c", 1_000)
+                    .unwrap_err()
+                    .to_string(),
+                v.verify_ceremony(&exact, CeremonyKind::Dkg, "k", "c", 1_000)
+                    .unwrap_err()
+                    .to_string(),
+            ),
+            (
+                "verify_generate",
+                v.verify_generate(&over, "k", "ed25519", 0, "c", 1_000)
+                    .unwrap_err()
+                    .to_string(),
+                v.verify_generate(&exact, "k", "ed25519", 0, "c", 1_000)
+                    .unwrap_err()
+                    .to_string(),
+            ),
+        ];
+        for (what, over_err, exact_err) in results {
+            assert!(
+                over_err.contains(&sized(MAX_INTENT_BYTES + 1)),
+                "{what}: {over_err}"
+            );
+            assert!(
+                !exact_err.contains("intent of") && exact_err.contains("certificate"),
+                "{what}: {exact_err}"
+            );
+        }
+    }
+
     /// The validity window is closed at both ends, and the clock skew stretches it on both sides.
     #[test]
     fn intent_validity_boundaries() {
