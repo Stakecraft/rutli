@@ -29,6 +29,15 @@ not a dependency of the daemon; it is in the image because the slim base ships i
   systemd's libraries, PAM. The daemon links none of them (rustls and aws-lc-rs instead of OpenSSL; no SQLite,
   no PAM); they are in the image because the slim base ships them.
 
+## Reproducibility
+
+The `apt-get upgrade` takes whatever Debian's security repository holds on the day of the build, so
+two builds of the same commit can differ in a few packages; before, the digest pin made the base the
+same every time. The release image is the thing that is identified (its digest, with the SBOM and
+the provenance attached by the release job, which list the package versions that went in), not the
+Dockerfile. If bit-for-bit rebuilds matter more than the two libraries, the alternative is to
+bump the base digest when a fix lands (Dependabot proposes it monthly) and leave `upgrade` out.
+
 ## What would remove the rest
 
 A runtime base that does not ship them, for example `gcr.io/distroless/cc-debian13` (the C library and
