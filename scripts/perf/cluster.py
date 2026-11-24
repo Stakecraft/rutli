@@ -52,6 +52,7 @@ Standard library only.
 """
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -303,7 +304,9 @@ class Suite(base.Runner):
                     os.killpg(proc.pid, signal.SIGTERM)
                     proc.communicate(timeout=300)
                 except subprocess.TimeoutExpired:
-                    os.killpg(proc.pid, signal.SIGKILL)
+                    # The group may have exited between the timeout and the kill.
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(proc.pid, signal.SIGKILL)
                     proc.communicate()
                 except ProcessLookupError:
                     pass
@@ -323,9 +326,14 @@ class Suite(base.Runner):
                     gone = left.returncode == 0 and not left.stdout.strip()
                 except subprocess.TimeoutExpired:
                     gone = False
+                deleted = False
                 if gone:
-                    self.cluster.kubectl("delete", "networkpolicy", "rutli-perf-dealer", "--ignore-not-found",
-                                         timeout=60, check=False)
+                    # A hung API here must not hide the ceremony's result: the policy then stays.
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        deleted = self.cluster.kubectl("delete", "networkpolicy", "rutli-perf-dealer",
+                                                       "--ignore-not-found", timeout=60, check=False).returncode == 0
+                    if not deleted:
+                        log("  WARNING: the dealer's NetworkPolicy could not be deleted. Delete it by hand.")
                 else:
                     log("  WARNING: the dealer pod may still be there; its NetworkPolicy is kept. Delete it by hand.")
             stage.update({"seconds": round(time.time() - started, 1), "dealer_image": image,
