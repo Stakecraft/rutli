@@ -1024,8 +1024,20 @@ impl IntentVerifier {
     }
 
     /// Verify `signed` for a signature with `key_id` at `now_ms` (Unix epoch milliseconds). Every
-    /// failure is [`DaemonError::PolicyRefused`].
+    /// failure is [`DaemonError::PolicyRefused`]. Timed in `rutli_intent_verify_duration_seconds`.
     pub fn verify(
+        &self,
+        signed: &pb::SignedIntent,
+        key_id: &str,
+        now_ms: u64,
+    ) -> Result<VerifiedIntent> {
+        crate::metrics::timed(crate::metrics::INTENT_VERIFY_DURATION, || {
+            self.verify_untimed(signed, key_id, now_ms)
+        })
+    }
+
+    /// [`IntentVerifier::verify`] without its timing.
+    fn verify_untimed(
         &self,
         signed: &pb::SignedIntent,
         key_id: &str,

@@ -1188,7 +1188,8 @@ impl Node {
             };
             let share = self.keystore.load(key_id)?;
             let view = (share.epoch, share.pkp_digest()?);
-            let nonce_store = NonceStore::open(self.keystore.nonce_dir(key_id))?;
+            let nonce_store = NonceStore::open(self.keystore.nonce_dir(key_id))?
+                .with_observer(crate::metrics::nonce_marker_observed);
             let cached = CachedKey {
                 // Cloned: `share` wipes its own copy when it drops here, the cosigner wipes this one.
                 cosigner: Arc::new(Cosigner::new(
@@ -1609,8 +1610,21 @@ impl Node {
 
     /// Sign round 1 opened by `opener`: only it may then send this session's round 2 or abort it
     /// ([`Node::sign_round2_as`], [`Node::abort_sign_as`]), and the session counts against its
-    /// caps ([`PENDING_SIGN_CAPS`]).
+    /// caps ([`PENDING_SIGN_CAPS`]). Timed in `rutli_sign_round1_duration_seconds`.
     pub fn sign_round1_as(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        ctx: &Round1Ctx,
+        opener: &SessionOwner,
+    ) -> Result<SigningCommitments> {
+        crate::metrics::timed(crate::metrics::SIGN_ROUND1_DURATION, || {
+            self.sign_round1_untimed(key_id, session_id, ctx, opener)
+        })
+    }
+
+    /// [`Node::sign_round1_as`] without its timing.
+    fn sign_round1_untimed(
         &self,
         key_id: &str,
         session_id: &str,
@@ -1813,7 +1827,31 @@ impl Node {
     /// ([`rutli_frost_core::CoreError::NotSessionOwner`], PERMISSION_DENIED), with or without a
     /// signing policy, before its authorization or nonces are touched; the opener's own round 2
     /// still signs. Nothing is charged or journaled for it.
+    ///
+    /// Timed in `rutli_sign_round2_duration_seconds`.
     pub fn sign_round2_as(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        message: &[u8],
+        commitments: &BTreeMap<Identifier, SigningCommitments>,
+        intent_digest: Option<[u8; 32]>,
+        caller: &SessionOwner,
+    ) -> Result<SignatureShare> {
+        crate::metrics::timed(crate::metrics::SIGN_ROUND2_DURATION, || {
+            self.sign_round2_untimed(
+                key_id,
+                session_id,
+                message,
+                commitments,
+                intent_digest,
+                caller,
+            )
+        })
+    }
+
+    /// [`Node::sign_round2_as`] without its timing.
+    fn sign_round2_untimed(
         &self,
         key_id: &str,
         session_id: &str,
@@ -5676,6 +5714,19 @@ mod sign_policy_race_tests {
             intent::sign_intent(&self.pki.signer("driver"), &unsigned).unwrap()
         }
 
+        /// A round-1 context for signers 1 and 2 carrying [`Rig::intent`], and the intent's digest.
+        fn signed_ctx(&self, msg: &[u8], request: u8) -> (Round1Ctx, [u8; 32]) {
+            let signed = self.intent(msg, request);
+            let digest = intent::intent_digest(&signed);
+            let ctx = Round1Ctx {
+                message: Some(msg.to_vec()),
+                signers: Some(vec![1, 2]),
+                intent: Some(signed),
+                ..Default::default()
+            };
+            (ctx, digest)
+        }
+
         /// Node 1's burned nonce markers and journal entries for `KEY`.
         fn released(&self) -> (usize, usize) {
             let markers = std::fs::read_dir(self.nodes[0].keystore.nonce_dir(KEY))
@@ -6240,6 +6291,106 @@ mod sign_policy_race_tests {
         }
         node.sign_round1_as(KEY, "fifth", &ctx, &peer("cosigner4"))
             .unwrap();
+    }
+
+    /// One signature on in-process nodes records every sign phase it went through with
+    /// `result="ok"`: each member's round 1 and round 2, its intent verification, journal append and
+    /// fsync, and nonce marker. A refused round records `result="error"`, and the phases it never
+    /// reached record nothing; so does an unknown session at round 2 (a round-2 error, nothing in
+    /// append or marker).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sign_phases_record_their_durations() {
+        use crate::metrics::{
+            builder, INTENT_VERIFY_DURATION, NONCE_MARKER_DURATION, SIGN_JOURNAL_APPEND_DURATION,
+            SIGN_JOURNAL_FSYNC_DURATION, SIGN_ROUND1_DURATION, SIGN_ROUND2_DURATION,
+        };
+        let r = rig().await;
+        let msg = rutli_frost_core::dealer::canton_test_message(b"phase timings");
+        let (ctx, digest) = r.signed_ctx(&msg, 1);
+        let (mut forged, _) = r.signed_ctx(&msg, 2);
+        if let Some(b) = forged.intent.as_mut().and_then(|i| i.signature.last_mut()) {
+            *b ^= 1;
+        }
+        let recorder = builder().expect("valid buckets").build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let members = &r.nodes[..2];
+            let mut cs = BTreeMap::new();
+            for n in members {
+                cs.insert(n.identifier, n.sign_round1(KEY, "timed", &ctx).unwrap());
+            }
+            for n in members {
+                n.sign_round2_with(KEY, "timed", &msg, &cs, Some(digest))
+                    .unwrap();
+            }
+            // Refused: a forged intent at round 1, an unknown session at round 2 (the first round 2
+            // removed it, so the nonce marker is never reached).
+            assert!(r.nodes[0].sign_round1(KEY, "forged", &forged).is_err());
+            assert!(r.nodes[0]
+                .sign_round2_with(KEY, "timed", &msg, &cs, Some(digest))
+                .is_err());
+        });
+        let out = handle.render();
+        let count = |name: &str, result: &str| -> u64 {
+            let prefix = format!(r#"{name}_count{{result="{result}"}} "#);
+            out.lines()
+                .find_map(|l| l.strip_prefix(&prefix))
+                .map_or(0, |v| v.parse().unwrap())
+        };
+        for (name, ok, error) in [
+            (SIGN_ROUND1_DURATION, 2, 1),
+            (SIGN_ROUND2_DURATION, 2, 1),
+            (INTENT_VERIFY_DURATION, 2, 1),
+            (SIGN_JOURNAL_APPEND_DURATION, 2, 0),
+            (NONCE_MARKER_DURATION, 2, 0),
+        ] {
+            assert_eq!(count(name, "ok"), ok, "{name} ok:\n{out}");
+            assert_eq!(count(name, "error"), error, "{name} error:\n{out}");
+        }
+        let fsyncs = format!("{SIGN_JOURNAL_FSYNC_DURATION}_count 2");
+        assert!(
+            out.lines().any(|l| l == fsyncs),
+            "missing {fsyncs:?}:\n{out}"
+        );
+        assert_eq!(r.released(), (1, 1));
+    }
+
+    /// A session whose nonce marker is already burned fails at round 2 and the marker phase records
+    /// `result="error"` once, next to one round-2 error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_burned_nonce_marker_records_an_error_at_round_2() {
+        use crate::metrics::{builder, NONCE_MARKER_DURATION, SIGN_ROUND2_DURATION};
+        let r = rig().await;
+        let msg = rutli_frost_core::dealer::canton_test_message(b"burned marker");
+        let (ctx, digest) = r.signed_ctx(&msg, 1);
+        let recorder = builder().expect("valid buckets").build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let members = &r.nodes[..2];
+            let mut cs = BTreeMap::new();
+            for n in members {
+                cs.insert(n.identifier, n.sign_round1(KEY, "burned", &ctx).unwrap());
+            }
+            // The marker is burned behind the node's back, between the rounds.
+            NonceStore::open(r.nodes[0].keystore.nonce_dir(KEY))
+                .unwrap()
+                .consume("burned")
+                .unwrap();
+            assert!(r.nodes[0]
+                .sign_round2_with(KEY, "burned", &msg, &cs, Some(digest))
+                .is_err());
+        });
+        let out = handle.render();
+        let count = |name: &str, result: &str| -> u64 {
+            let prefix = format!(r#"{name}_count{{result="{result}"}} "#);
+            out.lines()
+                .find_map(|l| l.strip_prefix(&prefix))
+                .map_or(0, |v| v.parse().unwrap())
+        };
+        assert_eq!(count(NONCE_MARKER_DURATION, "error"), 1, "{out}");
+        assert_eq!(count(NONCE_MARKER_DURATION, "ok"), 0, "{out}");
+        assert_eq!(count(SIGN_ROUND2_DURATION, "error"), 1, "{out}");
+        assert_eq!(count(SIGN_ROUND2_DURATION, "ok"), 0, "{out}");
     }
 }
 

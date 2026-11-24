@@ -176,6 +176,7 @@ pub struct LeadGuard {
 impl Drop for LeadGuard {
     fn drop(&mut self) {
         self.load.leading.fetch_sub(1, Ordering::AcqRel);
+        metrics::gauge!(crate::metrics::SIGNS_IN_FLIGHT).decrement(1.0);
     }
 }
 
@@ -188,12 +189,18 @@ impl SignLoad {
         }
     }
 
+    /// Count one signature led here until the guard drops; `rutli_signs_in_flight` follows. The
+    /// gauge's only writers are this increment and the guard's decrement (it is primed at 0), so
+    /// concurrent updates cannot publish a stale value.
     pub fn lead(self: &Arc<Self>) -> LeadGuard {
         let count = self.leading.fetch_add(1, Ordering::AcqRel) + 1;
-        LeadGuard {
+        // The guard exists before the gauge is touched, so a panic there still releases the count.
+        let guard = LeadGuard {
             load: self.clone(),
             count,
-        }
+        };
+        metrics::gauge!(crate::metrics::SIGNS_IN_FLIGHT).increment(1.0);
+        guard
     }
 
     /// Signatures led here right now.
