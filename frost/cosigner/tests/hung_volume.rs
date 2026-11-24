@@ -22,7 +22,9 @@ use rutli_cosigner::node::Node;
 use rutli_cosigner::orchestrator::{run_dkg, sign, Peers};
 use rutli_cosigner::pb::peer_server::Peer;
 use rutli_cosigner::pb::signer_server::Signer;
-use rutli_cosigner::pb::{GroupKeyRequest, HealthRequest, SignRequest, SignRound1Request};
+use rutli_cosigner::pb::{
+    CeremonyFenceRequest, GroupKeyRequest, HealthRequest, SignRequest, SignRound1Request,
+};
 use rutli_cosigner::peer::{LocalPeer, PeerApi};
 use rutli_cosigner::ratelimit::DecryptRateLimiter;
 use rutli_cosigner::service::{PeerSvc, SignerSvc};
@@ -328,4 +330,84 @@ fn the_watchdog_flips_the_verdict_on_a_hung_store_without_any_async_runtime() {
         !node.keystore_health().is_down(),
         "the probe's real result must clear the verdict"
     );
+}
+
+/// A hosted-key fence reads the key store (#126): a delete fence parked on a hung key file, over
+/// gRPC and in process, must cost a blocking thread, not the runtime's only worker.
+#[test]
+fn a_hosted_key_fence_parked_on_a_hung_key_file_does_not_freeze_health() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let gate = Arc::new(Gate::default());
+    let _release = ReleaseOnDrop(gate.clone());
+
+    let tmp = tempfile::tempdir().unwrap();
+    let keys = tmp.path().join("node-1");
+    let ks = KeyStore::open(&keys).unwrap().with_io_hook(gate.hook());
+    let node = Arc::new(
+        Node::new(Identifier::try_from(1u16).unwrap(), 3, 2, ks)
+            .with_keystore_probe_freshness(Duration::ZERO)
+            .with_keystore_unresponsive_after(Duration::ZERO),
+    );
+    let peers: Peers = vec![Arc::new(LocalPeer::new(node.clone())) as Arc<dyn PeerApi>];
+    let signer = signer_svc(&node, &peers);
+    let peer = Arc::new(PeerSvc {
+        node: node.clone(),
+        allowed_cns: None,
+        peer_ids: None,
+        peer_pins: None,
+    });
+    let answer = PROBE_TIMEOUT + Duration::from_secs(2);
+    let health = || {
+        let svc = signer.clone();
+        async move {
+            Signer::health(&*svc, Request::new(HealthRequest {}))
+                .await
+                .unwrap()
+                .into_inner()
+        }
+    };
+
+    // Over gRPC: a delete fence for a hosted key reads that key's file, which stops answering.
+    gate.hang_on(keys.join("rutli-gone.json"));
+    let grpc = {
+        let svc = peer.clone();
+        rt.spawn(async move {
+            Peer::ceremony_fence(
+                &*svc,
+                Request::new(CeremonyFenceRequest {
+                    ceremony_id: "del-1".into(),
+                    key_id: "rutli-gone".into(),
+                    kind: "delkey".into(),
+                    ..Default::default()
+                }),
+            )
+            .await
+        })
+    };
+    assert!(gate.parked_within(1, Duration::from_secs(5)), "the fence must reach the store");
+    let h = answers_within(&rt, answer, health()).expect("Health must answer while the fence is parked");
+    assert!(h.ok, "{}", h.detail);
+
+    // In process (the leader's own node): the same.
+    gate.hang_on(keys.join("rutli-gone-2.json"));
+    let local = {
+        let p = peers[0].clone();
+        rt.spawn(async move { p.ceremony_fence("del-2", "rutli-gone-2", "delkey").await })
+    };
+    assert!(gate.parked_within(2, Duration::from_secs(5)), "the local fence must reach the store");
+    answers_within(&rt, answer, health()).expect("Health must answer while both fences are parked");
+
+    // The volume answers again: both fences complete (nothing hosted there yet: a delete fence on a
+    // hosted id takes the guard).
+    gate.release();
+    let done = rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), async { (grpc.await, local.await) }).await
+    });
+    let (grpc, local) = done.expect("the parked fences complete once the volume answers");
+    grpc.unwrap().expect("gRPC delete fence");
+    local.unwrap().expect("local delete fence");
 }
