@@ -21,14 +21,15 @@ import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, Future}
 
 /** A sign leader that answers from its own state — it lacks the share, a ceremony holds the key, it
-  * runs an old release — loses the lead only when another leader then signs. When every leader
-  * answers so, none is at fault, and none may leave the sign rotation: with
-  * `frost.sign-leader = rotate` a cosigner that lost the lead is not a sign start for
-  * `leader-recovery`, for any key. A leader that returns a signature the pinned key does not
-  * verify, fails internally or cannot be reached still loses the lead at once. And a leader that
-  * answered from its own state loses the lead when the sign ends before every leader was asked
-  * (the request budget is spent, a later leader's refusal is returned at once): the next sign must
-  * not start at it again.
+  * runs an old release — keeps the lead in one case: every leader of the roster answers so. Then
+  * none is at fault, and none may leave the sign rotation: with `frost.sign-leader = rotate` a
+  * cosigner that lost the lead is not a sign start for `leader-recovery`, for any key.
+  *
+  * In every other case such a leader loses the lead as any failing leader does: when another
+  * leader signs, when another could not be reached, when the request budget is spent, when a later
+  * leader's refusal is returned at once. So a leader cannot keep the lead by answering so. A
+  * leader that returns a signature the pinned key does not verify, fails internally or cannot be
+  * reached loses the lead at once.
   *
   * Three cosigners. What the tests look at is where the signs start once every cosigner signs
   * again: untouched, each starts every third sign.
@@ -215,24 +216,6 @@ class FrostSignRefusalLeadSpec extends AnyWordSpec with Matchers {
         }
       }
     }
-
-    "keep its place when the others could not be reached and the sign ends retryable" in {
-      for (status <- ownState) withClue(s"${status.getCode}: ") {
-        withCluster() { (backend, nodes) =>
-          nodes(0).refuses = Some(status)
-          nodes(1).refuses = Some(Status.UNAVAILABLE)
-          nodes(2).refuses = Some(Status.UNAVAILABLE)
-          val notes = new AuditNotes
-          val thrown = intercept[StatusRuntimeException](sign(backend, notes))
-          thrown.getStatus.getCode shouldBe Status.Code.UNAVAILABLE
-          notes.render should include("unconfirmed=")
-
-          // The two that were unreachable lost the lead; the first is the only start left.
-          nodes.foreach(_.heal())
-          starts(backend, nodes, 6) shouldBe Seq(6, 0, 0)
-        }
-      }
-    }
   }
 
   /** The first leader answers from its own state at once, the second does not answer, and the
@@ -253,7 +236,26 @@ class FrostSignRefusalLeadSpec extends AnyWordSpec with Matchers {
       after(backend, nodes)
     }
 
-  "a leader that cannot sign, in a sign that ends before every leader was asked" should {
+  "a leader that cannot sign, in a sign that fails but not with every leader answering so" should {
+
+    "lose the lead with the leaders that could not be reached" in {
+      for (rotate <- Seq(true, false); status <- ownState) withClue(s"rotate=$rotate ${status.getCode}: ") {
+        withCluster(rotate) { (backend, nodes) =>
+          nodes(0).refuses = Some(Status.UNAVAILABLE)
+          nodes(1).refuses = Some(status)
+          nodes(2).refuses = Some(Status.UNAVAILABLE)
+          val notes = new AuditNotes
+          val thrown = intercept[StatusRuntimeException](sign(backend, notes))
+          thrown.getStatus.getCode shouldBe Status.Code.UNAVAILABLE
+          notes.render should include("unconfirmed=")
+
+          // All three lost the lead and it went round the ring, back to the first: the second is
+          // not the one sign start left, and not the preferred leader.
+          nodes.foreach(_.heal())
+          starts(backend, nodes, 6) shouldBe Seq(6, 0, 0)
+        }
+      }
+    }
 
     "lose the lead to the leader that was not asked, in sticky mode" in {
       // Left on the first, every later sign would spend its budget on the same two leaders.
