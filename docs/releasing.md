@@ -105,8 +105,10 @@ without its license file next to it is not a complete release: the MIT and BSD l
 bundled crates require their notices to travel with the binary.
 
 What the release workflow may do beyond `publish-image.yml`: the `build` jobs have `contents: read`;
-the `sign` job has `contents: write` (attach the files to the release), `id-token: write` (keyless
-signing) and `attestations: write` (the provenance attestation). `publish-image.yml` keeps its
+the `sign` job has `id-token: write` (keyless signing) and `attestations: write` (the provenance
+attestation) and checks that the build artifacts are exactly the expected files before it hashes
+or signs anything; the `publish` job has `contents: write` (attach the signed set to the release,
+create a missing release as a draft) and no signing identity. `publish-image.yml` keeps its
 permissions.
 
 ### Verify the release assets
@@ -117,7 +119,7 @@ newer and, for the second check, the GitHub CLI (`gh`, 2.103 or newer).
 ```bash
 TAG=v0.5.0
 ID="https://github.com/Stakecraft/rutli/.github/workflows/release-assets.yml@refs/tags/$TAG"
-FILE=rutli-dealer-0.5.0-linux-x86_64        # or rutli-driver-0.5.0.jar, an .spdx.json, SHA256SUMS
+FILE=rutli-dealer-0.5.0-linux-x86_64        # or rutli-driver-0.5.0.jar, an .spdx.json (SHA256SUMS: signature only)
 
 # Signature: made by release-assets.yml in Stakecraft/rutli, run on that tag
 cosign verify-blob --bundle "$FILE.sigstore.json" \

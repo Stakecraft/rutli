@@ -38,6 +38,7 @@ jobs:
     env:
       CANTON_TAG: v3.6.1 # as ci.yml (image-build-check.yml checks that they agree)
       COSIGN_PASSWORD: ""
+      RELEASE_DEALER_ARCHS: x86_64 # one machine here; the release builds both
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,6 +80,7 @@ jobs:
           scripts/release-assets.sh version-check
           scripts/release-assets.sh build-jar out
           scripts/release-assets.sh build-dealer out
+          scripts/release-assets.sh check-set out built
           scripts/release-assets.sh licenses out
           scripts/release-assets.sh sbom out
           scripts/release-assets.sh sums out
@@ -91,6 +93,7 @@ jobs:
           (cd "$keys" && cosign generate-key-pair >/dev/null)
           export COSIGN_KEY="${keys}/cosign.key" COSIGN_PUBKEY="${keys}/cosign.pub"
           scripts/release-assets.sh sign out
+          scripts/release-assets.sh check-set out signed
           scripts/release-assets.sh verify out
 
       # The verification must fail when a file changes after signing, and when a signature belongs to
@@ -106,4 +109,7 @@ jobs:
           rm -rf tampered; cp -r out tampered
           cp "tampered/LICENSE.sigstore.json" "tampered/$(basename "$jar").sigstore.json"
           if scripts/release-assets.sh verify tampered; then echo "::error::a swapped signature passed the verification"; exit 1; fi
-          echo "OK: tampering is detected"
+          rm -rf tampered; cp -r out tampered
+          echo stray > tampered/unexpected.txt
+          if scripts/release-assets.sh check-set tampered signed; then echo "::error::an unexpected file passed check-set"; exit 1; fi
+          echo "OK: tampering and an unexpected file are detected"

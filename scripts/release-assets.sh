@@ -13,6 +13,7 @@
 #   scripts/release-assets.sh build-dealer OUT       cargo build --release -> OUT/rutli-dealer-<version>-<os>-<arch>
 #   scripts/release-assets.sh licenses OUT           LICENSE and THIRD-PARTY-LICENSES-rust.txt next to the binary
 #   scripts/release-assets.sh sbom OUT               SPDX SBOMs: rutli-driver-<version>.spdx.json, rutli-dealer-<version>.spdx.json
+#   scripts/release-assets.sh check-set OUT STAGE    OUT holds exactly the expected files: STAGE built|signed
 #   scripts/release-assets.sh sums OUT               SHA256SUMS of every file in OUT (not the bundles)
 #   scripts/release-assets.sh sign OUT               a cosign bundle OUT/<file>.sigstore.json for every file
 #   scripts/release-assets.sh verify OUT             the commands a user runs, against every file
@@ -141,11 +142,45 @@ cmd_sbom() {
   echo "OK: SBOMs for the driver jar ($(jq '.packages | length' "$1/rutli-driver-${v}.spdx.json") packages) and the dealer ($(jq '.packages | length' "$1/rutli-dealer-${v}.spdx.json") packages)"
 }
 
+# The files the release consists of, nothing else: the build jobs' artifacts are trusted by the job
+# that signs them, so an unexpected or missing file stops the run before anything is hashed or signed.
+# RELEASE_DEALER_ARCHS: the dealer builds to expect (default both; the dry run builds on one machine).
+expected_files() { # STAGE
+  local v a
+  v="$(version)"
+  local built=("rutli-driver-${v}.jar")
+  for a in ${RELEASE_DEALER_ARCHS:-x86_64 aarch64}; do built+=("rutli-dealer-${v}-linux-${a}"); done
+  local extra=(LICENSE THIRD-PARTY-LICENSES-rust.txt "rutli-driver-${v}.spdx.json" "rutli-dealer-${v}.spdx.json" SHA256SUMS)
+  case "$1" in
+    built) printf '%s\n' "${built[@]}" ;;
+    signed)
+      local f
+      for f in "${built[@]}" "${extra[@]}"; do printf '%s\n%s\n' "$f" "$f.sigstore.json"; done
+      ;;
+    *) die "check-set: stage must be built or signed" ;;
+  esac | LC_ALL=C sort
+}
+
+cmd_check_set() {
+  [ -d "${1:-}" ] || die "usage: $0 check-set OUT built|signed"
+  local want have
+  want="$(expected_files "${2:-}")"
+  # Everything in OUT, any type: a directory, a link or a stray file is a difference.
+  have="$(find "$1" -mindepth 1 -printf '%P\n' | LC_ALL=C sort)"
+  if [ "$want" != "$have" ]; then
+    echo "release-assets: the files in $1 are not the expected set (${2}):" >&2
+    diff <(echo "$want") <(echo "$have") >&2 || true
+    exit 1
+  fi
+  if [ -n "$(find "$1" -mindepth 1 ! -type f)" ]; then die "$1 holds something that is not a regular file"; fi
+  echo "OK: $1 holds exactly the expected ${2} files"
+}
+
 cmd_sums() {
   need_out "${1:-}"
   local tmp
   tmp="$(mktemp)"
-  (cd "$1" && find . -maxdepth 1 -type f ! -name '*.sigstore.json' ! -name SHA256SUMS -printf '%P\n' | LC_ALL=C sort | xargs sha256sum) > "$tmp"
+  (cd "$1" && find . -maxdepth 1 -type f ! -name '*.sigstore.json' ! -name SHA256SUMS -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum) > "$tmp"
   mv "$tmp" "$1/SHA256SUMS"
   cat "$1/SHA256SUMS"
 }
@@ -195,7 +230,7 @@ cmd_verify() {
 
 main() {
   local c="${1:-}"
-  [ -n "$c" ] || die "usage: $0 install-tools|version-check|build-jar|build-dealer|licenses|sbom|sums|sign|verify [args]"
+  [ -n "$c" ] || die "usage: $0 install-tools|version-check|build-jar|build-dealer|licenses|sbom|check-set|sums|sign|verify [args]"
   shift
   case "$c" in
     install-tools) cmd_install_tools ;;
@@ -204,6 +239,7 @@ main() {
     build-dealer) cmd_build_dealer "$@" ;;
     licenses) cmd_licenses "$@" ;;
     sbom) cmd_sbom "$@" ;;
+    check-set) cmd_check_set "$@" ;;
     sums) cmd_sums "$@" ;;
     sign) cmd_sign "$@" ;;
     verify) cmd_verify "$@" ;;
