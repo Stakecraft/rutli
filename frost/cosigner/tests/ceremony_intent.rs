@@ -8,6 +8,9 @@
 //! cosigner (the compromised node), a second key certified under the driver's CN (pinned out), and
 //! a "driver" from another CA.
 
+// The daemon's error type is large by value (see the crate root); the test wrappers return it too.
+#![allow(clippy::result_large_err)]
+
 #[path = "common/pki.rs"]
 mod pki;
 
@@ -627,6 +630,95 @@ impl Rig {
             .unwrap();
         self.peers[n].ceremony_release(&cid, key).await.unwrap();
     }
+
+    /// The first DKG of `KEY` under the driver's intent (request id 1), led through `peers`.
+    async fn first_dkg(&self, peers: &Peers) -> [u8; 32] {
+        let intent = self.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1);
+        run_dkg_with_intent(peers, KEY, Some(intent)).await.unwrap()
+    }
+
+    /// A refresh of `KEY` led through `peers` under the refresher's intent with request id `rid`.
+    async fn refresh_with(&self, peers: &Peers, rid: u8) -> rutli_cosigner::Result<[u8; 32]> {
+        let intent = self
+            .ids
+            .ceremony("refresher", CeremonyKind::Refresh, KEY, rid);
+        run_refresh_with_intent(peers, KEY, Some(intent)).await
+    }
+
+    /// The first DKG of `KEY` and then one refresh (request id 2), both through the mesh peers.
+    /// Returns the group key.
+    async fn dkg_then_refresh(&self) -> [u8; 32] {
+        let group = self.first_dkg(&self.peers).await;
+        self.refresh_with(&self.peers, 2).await.unwrap();
+        group
+    }
+
+    /// The refresher's intent for a refresh of `KEY` with request id `rid`, and its ceremony id.
+    fn refresh_intent(&self, rid: u8) -> (pb::SignedIntent, String) {
+        (
+            self.ids
+                .ceremony("refresher", CeremonyKind::Refresh, KEY, rid),
+            id(CeremonyKind::Refresh, rid),
+        )
+    }
+
+    /// A refresh of `KEY` with request id `rid`, led by node 1 through fence, part 1 and part 2 on
+    /// every node (each must pass). Returns the ceremony id, the leader's handles and the digest.
+    async fn refresh_through_part2(&self, rid: u8) -> (String, Peers, [u8; 32]) {
+        let (x, xid) = self.refresh_intent(rid);
+        let leader = self.led_by(0);
+        self.fence_all(&leader, &xid, &x).await;
+        let map = part1_all(&leader, &xid, &x).await;
+        let digest = part2_all(&leader, &xid, &map).await;
+        (xid, leader, digest)
+    }
+
+    /// Fence every node of `peers` for the refresh `xid` with its intent `x` (each fence must pass).
+    async fn fence_all(&self, peers: &[Arc<dyn PeerApi>], xid: &str, x: &pb::SignedIntent) {
+        for p in peers {
+            p.ceremony_begin(xid, KEY, CeremonyKind::Refresh, self.expect(KEY), Some(x))
+                .await
+                .unwrap();
+        }
+    }
+}
+
+/// An enforcing rig whose `KEY` was created by the first DKG, led by node 1; with the group key.
+async fn enforcing_rig_with_key() -> (Rig, [u8; 32]) {
+    let r = rig(|_| enforcing());
+    let group = r.first_dkg(&r.led_by(0)).await;
+    (r, group)
+}
+
+/// Part 1 of the refresh `xid` on every node of `peers` (each must pass), the packages by node.
+async fn part1_all(
+    peers: &[Arc<dyn PeerApi>],
+    xid: &str,
+    x: &pb::SignedIntent,
+) -> BTreeMap<Identifier, frost_ed25519::keys::dkg::round1::Package> {
+    let mut map = BTreeMap::new();
+    for p in peers {
+        map.insert(
+            p.identifier(),
+            p.ceremony_part1(xid, KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(x))
+                .await
+                .unwrap(),
+        );
+    }
+    map
+}
+
+/// Part 2 of `xid` on every node of `peers` (each must pass); the round 1 digest of the last.
+async fn part2_all(
+    peers: &[Arc<dyn PeerApi>],
+    xid: &str,
+    map: &BTreeMap<Identifier, frost_ed25519::keys::dkg::round1::Package>,
+) -> [u8; 32] {
+    let mut digest = [0u8; 32];
+    for p in peers {
+        digest = p.ceremony_part2(xid, map).await.unwrap().round1_digest;
+    }
+    digest
 }
 
 /// The end-to-end path: a DKG and a refresh run only with intents on enforcing nodes, each under
@@ -686,13 +778,7 @@ async fn enforcing_nodes_run_a_dkg_and_a_refresh_only_with_a_client_intent() {
 #[tokio::test]
 async fn a_compromised_peer_gets_no_guard_and_no_session_without_a_valid_intent() {
     let r = rig(|_| enforcing());
-    run_dkg_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
+    r.first_dkg(&r.peers).await;
     let now = intent::now_ms();
     for (kind, key) in [
         (CeremonyKind::Refresh, KEY),
@@ -851,13 +937,7 @@ async fn malformed_ids_are_refused_before_the_intent_check_and_never_echoed_in_f
 #[tokio::test]
 async fn a_spent_or_misdirected_intent_cannot_fence_again() {
     let r = rig(|_| enforcing());
-    run_dkg_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
+    r.first_dkg(&r.peers).await;
     let refresh = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2);
     run_refresh_with_intent(&r.peers, KEY, Some(refresh.clone()))
         .await
@@ -908,13 +988,7 @@ async fn a_spent_or_misdirected_intent_cannot_fence_again() {
 #[tokio::test]
 async fn a_refused_fence_spends_the_intent_on_every_node() {
     let r = rig(|_| enforcing());
-    let group = run_dkg_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
+    let group = r.first_dkg(&r.peers).await;
     // Node 3 is busy with another (valid) refresh's fence, so the leader's fence is refused there.
     let busy = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2);
     r.peers[2]
@@ -969,13 +1043,7 @@ async fn a_refused_fence_spends_the_intent_on_every_node() {
 #[tokio::test]
 async fn two_leaders_never_drive_one_intent() {
     let r = rig(|_| enforcing());
-    run_dkg_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
+    r.first_dkg(&r.peers).await;
     let x = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 5);
     let xid = id(CeremonyKind::Refresh, 5);
     // Leader A has fenced every node for X.
@@ -1018,13 +1086,7 @@ async fn two_leaders_never_drive_one_intent() {
 #[tokio::test]
 async fn only_the_refresher_role_refreshes_unless_signer_may_refresh() {
     let r = rig(|_| enforcing());
-    let group = run_dkg_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
+    let group = r.first_dkg(&r.peers).await;
     refused_with(
         run_refresh_with_intent(
             &r.peers,
@@ -1043,16 +1105,7 @@ async fn only_the_refresher_role_refreshes_unless_signer_may_refresh() {
         .await,
         "signed by \"operator\"",
     );
-    assert_eq!(
-        run_refresh_with_intent(
-            &r.peers,
-            KEY,
-            Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 4))
-        )
-        .await
-        .unwrap(),
-        group
-    );
+    assert_eq!(r.refresh_with(&r.peers, 4).await.unwrap(), group);
     // With signer_may_refresh, the driver may.
     let lenient_role = rig(|_| SigningPolicyConfig {
         require_ceremony_intent: Some(true),
@@ -1224,16 +1277,7 @@ async fn without_enforcement_an_absent_intent_is_counted_and_a_present_one_verif
         run_refresh_with_intent(&r.peers, KEY, Some(forged)).await,
         "signature",
     );
-    assert_eq!(
-        run_refresh_with_intent(
-            &r.peers,
-            KEY,
-            Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 3))
-        )
-        .await
-        .unwrap(),
-        group
-    );
+    assert_eq!(r.refresh_with(&r.peers, 3).await.unwrap(), group);
 
     // The counters, on one node's guard.
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -1282,24 +1326,10 @@ fn not_the_leader(r: rutli_cosigner::Result<impl std::fmt::Debug>) {
 /// other peer are refused — before they touch the session — and the leader's ceremony completes.
 #[tokio::test]
 async fn only_the_leader_that_fenced_a_ceremony_runs_it() {
-    let r = rig(|_| enforcing());
-    let group = run_dkg_with_intent(
-        &r.led_by(0),
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
-    let (x, xid) = (
-        r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 6),
-        id(CeremonyKind::Refresh, 6),
-    );
+    let (r, group) = enforcing_rig_with_key().await;
+    let (x, xid) = r.refresh_intent(6);
     let (leader, node3) = (r.led_by(0), r.led_by(2));
-    for p in &leader {
-        p.ceremony_begin(&xid, KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&x))
-            .await
-            .unwrap();
-    }
+    r.fence_all(&leader, &xid, &x).await;
     // Node 3 runs part 1 on node 1 (the leader itself) and node 2 with the intent it was shown.
     for p in &node3[..2] {
         not_the_leader(
@@ -1307,15 +1337,7 @@ async fn only_the_leader_that_fenced_a_ceremony_runs_it() {
                 .await,
         );
     }
-    let mut map = BTreeMap::new();
-    for p in &leader {
-        map.insert(
-            p.identifier(),
-            p.ceremony_part1(&xid, KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(&x))
-                .await
-                .unwrap(),
-        );
-    }
+    let map = part1_all(&leader, &xid, &x).await;
     for p in &node3[..2] {
         not_the_leader(p.ceremony_part2(&xid, &map).await);
         // Nor can it abort the leader's live session there.
@@ -1325,10 +1347,7 @@ async fn only_the_leader_that_fenced_a_ceremony_runs_it() {
     for p in &node3[..2] {
         p.ceremony_release(&xid, KEY).await.unwrap();
     }
-    let mut digest = [0u8; 32];
-    for p in &leader {
-        digest = p.ceremony_part2(&xid, &map).await.unwrap().round1_digest;
-    }
+    let digest = part2_all(&leader, &xid, &map).await;
     for p in &node3[..2] {
         not_the_leader(p.ceremony_part3(&xid, &digest).await);
     }
@@ -1357,18 +1376,8 @@ async fn only_the_leader_that_fenced_a_ceremony_runs_it() {
 /// so a peer cannot skip the fence to bind a node to itself. Nothing is left behind by the refusal.
 #[tokio::test]
 async fn under_ceremony_intents_part1_needs_the_leaders_fence() {
-    let r = rig(|_| enforcing());
-    let group = run_dkg_with_intent(
-        &r.led_by(0),
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
-    let (x, xid) = (
-        r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 8),
-        id(CeremonyKind::Refresh, 8),
-    );
+    let (r, group) = enforcing_rig_with_key().await;
+    let (x, xid) = r.refresh_intent(8);
     for p in &r.led_by(2) {
         match p
             .ceremony_part1(&xid, KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(&x))
@@ -1411,15 +1420,8 @@ async fn a_failover_leader_runs_the_ceremony_after_the_first_leader_died() {
     )
     .await
     .unwrap();
-    let (x, xid) = (
-        r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 10),
-        id(CeremonyKind::Refresh, 10),
-    );
-    for p in &r.led_by(0) {
-        p.ceremony_begin(&xid, KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&x))
-            .await
-            .unwrap();
-    }
+    let (x, xid) = r.refresh_intent(10);
+    r.fence_all(&r.led_by(0), &xid, &x).await;
     // Leader 1 is gone. Its fences hold the key until they time out...
     let y = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 11);
     assert!(run_refresh_with_intent(&r.led_by(1), KEY, Some(y))
@@ -1586,14 +1588,7 @@ impl PeerApi for Racer {
 /// Nothing is staged or committed under the attacker, and the next refresh runs.
 #[tokio::test]
 async fn a_peer_racing_the_leaders_fences_stops_the_ceremony_but_never_runs_it() {
-    let r = rig(|_| enforcing());
-    let group = run_dkg_with_intent(
-        &r.led_by(0),
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
+    let (r, group) = enforcing_rig_with_key().await;
     let before = r.expect(KEY);
     // Node 3 leads, through the daemon's handles; its handle to node 1 is the racer.
     let mut leader = r.led_by(2);
@@ -1603,10 +1598,7 @@ async fn a_peer_racing_the_leaders_fences_stops_the_ceremony_but_never_runs_it()
         log: Default::default(),
     });
     leader[0] = racer.clone();
-    let (x, xid) = (
-        r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 13),
-        id(CeremonyKind::Refresh, 13),
-    );
+    let (x, xid) = r.refresh_intent(13);
     assert!(run_refresh_with_intent(&leader, KEY, Some(x))
         .await
         .is_err());
@@ -1893,39 +1885,28 @@ fn assert_not_taken_over(
     );
 }
 
+/// A fresh enforcing rig with `KEY`, then the rollback race `stall` on request id `rid`, then
+/// [`assert_not_taken_over`] (it asserts; every test that calls this wants exactly that).
+async fn assert_rollback_race_not_taken_over(stall: Stall, rid: u8) {
+    let (r, group) = enforcing_rig_with_key().await;
+    let before = r.expect(KEY);
+    let racer = rollback_race(&r, stall, rid).await;
+    assert_not_taken_over(&r, &racer, &id(CeremonyKind::Refresh, rid), group, before);
+}
+
 /// Review (rc.6): the leader's rollback released its own fence before the id was spent on its node,
 /// and node 1 held the leader in its own release meanwhile — then fenced the leader's node under the
 /// same id, bound it to itself and led the ceremony. Now an intent's fence is marked durably, and
 /// the mark outlives the guard.
 #[tokio::test]
 async fn a_peer_cannot_take_over_during_the_leaders_fence_rollback() {
-    let r = rig(|_| enforcing());
-    let group = run_dkg_with_intent(
-        &r.led_by(0),
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
-    let before = r.expect(KEY);
-    let racer = rollback_race(&r, Stall::Release, 20).await;
-    assert_not_taken_over(&r, &racer, &id(CeremonyKind::Refresh, 20), group, before);
+    assert_rollback_race_not_taken_over(Stall::Release, 20).await;
 }
 
 /// The same race held in the leader's abort, which reaches node 1 before node 3 (roster order).
 #[tokio::test]
 async fn a_peer_cannot_take_over_while_holding_the_leaders_abort() {
-    let r = rig(|_| enforcing());
-    let group = run_dkg_with_intent(
-        &r.led_by(0),
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
-    let before = r.expect(KEY);
-    let racer = rollback_race(&r, Stall::Abort, 21).await;
-    assert_not_taken_over(&r, &racer, &id(CeremonyKind::Refresh, 21), group, before);
+    assert_rollback_race_not_taken_over(Stall::Abort, 21).await;
 }
 
 /// No timing at all: the leader's abort on its own node is a capped no-vote for an id with no
@@ -1933,14 +1914,7 @@ async fn a_peer_cannot_take_over_while_holding_the_leaders_abort() {
 /// cap full node 1 cannot fence the leader's node under the id once the leader gave up.
 #[tokio::test]
 async fn a_full_no_vote_cap_does_not_leave_the_leaders_id_unspent() {
-    let r = rig(|_| enforcing());
-    let group = run_dkg_with_intent(
-        &r.led_by(0),
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
+    let (r, group) = enforcing_rig_with_key().await;
     let before = r.expect(KEY);
     // Fill node 3's caps on no-votes for unknown ids asked in process (the bucket its own leader's
     // aborts use) and in total.
@@ -1963,18 +1937,8 @@ async fn a_full_no_vote_cap_does_not_leave_the_leaders_id_unspent() {
 /// client retries with a fresh intent, which runs.
 #[tokio::test]
 async fn a_fence_mark_survives_a_restart() {
-    let r = rig(|_| enforcing());
-    let group = run_dkg_with_intent(
-        &r.led_by(0),
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
-    let (x, xid) = (
-        r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 30),
-        id(CeremonyKind::Refresh, 30),
-    );
+    let (r, group) = enforcing_rig_with_key().await;
+    let (x, xid) = r.refresh_intent(30);
     r.led_by(0)[1]
         .ceremony_begin(&xid, KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&x))
         .await
@@ -2085,33 +2049,12 @@ async fn an_opted_out_leader_node_still_refuses_a_marked_id_without_an_intent() 
 /// is refused while any live guard under the id is bound to another leader.
 #[tokio::test]
 async fn a_same_id_guard_on_another_key_cannot_stand_in_for_the_leaders() {
-    let r = rig(|_| enforcing());
-    let group = run_dkg_with_intent(
-        &r.led_by(0),
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
-    let (x, xid) = (
-        r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 42),
-        id(CeremonyKind::Refresh, 42),
-    );
-    let (leader, p3) = (r.led_by(0), r.led_by(2));
-    for p in &leader {
-        p.ceremony_begin(&xid, KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&x))
-            .await
-            .unwrap();
-    }
-    let mut map = BTreeMap::new();
-    for p in &leader {
-        map.insert(
-            p.identifier(),
-            p.ceremony_part1(&xid, KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(&x))
-                .await
-                .unwrap(),
-        );
-    }
+    let (r, group) = enforcing_rig_with_key().await;
+    let (x, xid) = r.refresh_intent(42);
+    let leader = r.led_by(0);
+    r.fence_all(&leader, &xid, &x).await;
+    let map = part1_all(&leader, &xid, &x).await;
+    let p3 = r.led_by(2);
     for i in 0..8 {
         // A delete fence takes no client intent, so on an enforcing node it reaches the guard
         // check: the ceremony id already guards KEY here.
@@ -2135,10 +2078,7 @@ async fn a_same_id_guard_on_another_key_cannot_stand_in_for_the_leaders() {
         }
     }
     not_the_leader(p3[1].ceremony_abort(&xid).await);
-    let mut digest = [0u8; 32];
-    for p in &leader {
-        digest = p.ceremony_part2(&xid, &map).await.unwrap().round1_digest;
-    }
+    let digest = part2_all(&leader, &xid, &map).await;
     for p in &leader {
         p.ceremony_part3(&xid, &digest).await.unwrap();
     }
@@ -2275,24 +2215,9 @@ fn too_soon<T: std::fmt::Debug>(r: rutli_cosigner::Result<T>) -> String {
 #[tokio::test]
 async fn a_second_refresh_inside_the_interval_is_refused_whoever_leads() {
     let r = rig(|_| limited());
-    let group = run_dkg_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
+    let group = r.first_dkg(&r.peers).await;
     // A refresh right after the DKG is fine: DKGs do not count.
-    assert_eq!(
-        run_refresh_with_intent(
-            &r.peers,
-            KEY,
-            Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2))
-        )
-        .await
-        .unwrap(),
-        group
-    );
+    assert_eq!(r.refresh_with(&r.peers, 2).await.unwrap(), group);
     for leader in 0..3 {
         let rid = 10 + leader as u8;
         let m = too_soon(
@@ -2322,42 +2247,15 @@ async fn a_second_refresh_inside_the_interval_is_refused_whoever_leads() {
 #[tokio::test]
 async fn a_leader_without_the_interval_is_held_to_it_by_every_honest_node() {
     let r = rig(|i| if i == 3 { enforcing() } else { limited() });
-    run_dkg_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
-    run_refresh_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2)),
-    )
-    .await
-    .unwrap();
+    r.dkg_then_refresh().await;
 
     // Led by node 3: its own check and fence pass; node 1's fence (the first peer) refuses.
-    let m = too_soon(
-        run_refresh_with_intent(
-            &r.led_by(2),
-            KEY,
-            Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 3)),
-        )
-        .await,
-    );
+    let m = too_soon(r.refresh_with(&r.led_by(2), 3).await);
     assert!(
         m.contains("refused by node 1"),
         "the refusal comes from a peer's fence: {m}"
     );
-    let m = too_soon(
-        run_refresh_with_intent(
-            &r.led_by(0),
-            KEY,
-            Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 4)),
-        )
-        .await,
-    );
+    let m = too_soon(r.refresh_with(&r.led_by(0), 4).await);
     assert!(m.contains("refused by node 1"), "{m}");
     r.assert_on_epoch(2);
 
@@ -2401,20 +2299,7 @@ async fn a_leader_without_the_interval_is_held_to_it_by_every_honest_node() {
 #[tokio::test]
 async fn the_interval_survives_a_restart_and_the_weekly_refresh_runs() {
     let mut r = rig(|_| limited());
-    let group = run_dkg_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
-    run_refresh_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2)),
-    )
-    .await
-    .unwrap();
+    let group = r.dkg_then_refresh().await;
 
     r.restart(|_| limited());
     let x = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 3);
@@ -2450,16 +2335,7 @@ async fn the_interval_survives_a_restart_and_the_weekly_refresh_runs() {
         }
     }
     r.restart(|_| limited());
-    assert_eq!(
-        run_refresh_with_intent(
-            &r.peers,
-            KEY,
-            Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 4))
-        )
-        .await
-        .unwrap(),
-        group
-    );
+    assert_eq!(r.refresh_with(&r.peers, 4).await.unwrap(), group);
     r.assert_on_epoch(3);
 }
 
@@ -2471,33 +2347,13 @@ async fn the_interval_survives_a_restart_and_the_weekly_refresh_runs() {
 #[tokio::test]
 async fn only_the_operators_node_config_waives_the_interval_and_only_for_one_refresh() {
     let mut r = rig(|_| limited());
-    let group = run_dkg_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
-    run_refresh_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2)),
-    )
-    .await
-    .unwrap();
+    let group = r.dkg_then_refresh().await;
 
     r.restart(|_| SigningPolicyConfig {
         signer_may_refresh: true,
         ..limited()
     });
-    too_soon(
-        run_refresh_with_intent(
-            &r.peers,
-            KEY,
-            Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 3)),
-        )
-        .await,
-    );
+    too_soon(r.refresh_with(&r.peers, 3).await);
     too_soon(
         run_refresh_with_intent(
             &r.peers,
@@ -2524,47 +2380,17 @@ async fn only_the_operators_node_config_waives_the_interval_and_only_for_one_ref
     };
     // On one node only: the others still refuse.
     r.restart(|i| if i == 1 { waived.clone() } else { limited() });
-    too_soon(
-        run_refresh_with_intent(
-            &r.peers,
-            KEY,
-            Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 6)),
-        )
-        .await,
-    );
+    too_soon(r.refresh_with(&r.peers, 6).await);
     r.assert_on_epoch(2);
     // On every node: one refresh goes through...
     r.restart(|_| waived.clone());
-    assert_eq!(
-        run_refresh_with_intent(
-            &r.peers,
-            KEY,
-            Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 7))
-        )
-        .await
-        .unwrap(),
-        group
-    );
+    assert_eq!(r.refresh_with(&r.peers, 7).await.unwrap(), group);
     r.assert_on_epoch(3);
     // ...and only one: the next is held to the interval from it, waiver or not, restart or not.
-    let m = too_soon(
-        run_refresh_with_intent(
-            &r.peers,
-            KEY,
-            Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 8)),
-        )
-        .await,
-    );
+    let m = too_soon(r.refresh_with(&r.peers, 8).await);
     assert!(m.contains(&id(CeremonyKind::Refresh, 7)), "{m}");
     r.restart(|_| waived.clone());
-    too_soon(
-        run_refresh_with_intent(
-            &r.peers,
-            KEY,
-            Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 9)),
-        )
-        .await,
-    );
+    too_soon(r.refresh_with(&r.peers, 9).await);
     r.assert_on_epoch(3);
 }
 
@@ -2575,13 +2401,7 @@ async fn only_the_operators_node_config_waives_the_interval_and_only_for_one_ref
 async fn the_leader_refuses_a_refresh_inside_the_interval_before_it_contacts_any_peer() {
     use rutli_cosigner::pb::signer_server::Signer as _;
     let r = rig(|_| limited());
-    run_dkg_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
+    r.first_dkg(&r.peers).await;
     let svc = rutli_cosigner::service::SignerSvc {
         node: r.nodes[0].clone(),
         peers: r.peers.clone(),
@@ -2664,37 +2484,9 @@ impl Rig {
 async fn a_late_commit_holds_the_next_refresh_off_from_the_commit() {
     const H: i64 = 3600 * 1000;
     let mut r = rig(|_| limited());
-    let group = run_dkg_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
+    let group = r.first_dkg(&r.peers).await;
     // Stage a refresh on every node, by hand, and do not commit it.
-    let (x, xid) = (
-        r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2),
-        id(CeremonyKind::Refresh, 2),
-    );
-    let leader = r.led_by(0);
-    for p in &leader {
-        p.ceremony_begin(&xid, KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&x))
-            .await
-            .unwrap();
-    }
-    let mut map = BTreeMap::new();
-    for p in &leader {
-        map.insert(
-            p.identifier(),
-            p.ceremony_part1(&xid, KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(&x))
-                .await
-                .unwrap(),
-        );
-    }
-    let mut digest = [0u8; 32];
-    for p in &leader {
-        digest = p.ceremony_part2(&xid, &map).await.unwrap().round1_digest;
-    }
+    let (xid, leader, digest) = r.refresh_through_part2(2).await;
     for p in &leader {
         p.ceremony_part3(&xid, &digest).await.unwrap();
     }
@@ -2713,14 +2505,7 @@ async fn a_late_commit_holds_the_next_refresh_off_from_the_commit() {
     }
     r.assert_on_epoch(2);
     // Right after the commit: refused, counted from the commit.
-    let m = too_soon(
-        run_refresh_with_intent(
-            &r.peers,
-            KEY,
-            Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 3)),
-        )
-        .await,
-    );
+    let m = too_soon(r.refresh_with(&r.peers, 3).await);
     assert!(m.contains(&xid), "{m}");
     // 73 h after the commit: the next refresh runs.
     r.shift_records(
@@ -2729,16 +2514,7 @@ async fn a_late_commit_holds_the_next_refresh_off_from_the_commit() {
         -73 * H,
     );
     r.restart(|_| limited());
-    assert_eq!(
-        run_refresh_with_intent(
-            &r.peers,
-            KEY,
-            Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 4))
-        )
-        .await
-        .unwrap(),
-        group
-    );
+    assert_eq!(r.refresh_with(&r.peers, 4).await.unwrap(), group);
     r.assert_on_epoch(3);
 }
 
@@ -2747,20 +2523,7 @@ async fn a_late_commit_holds_the_next_refresh_off_from_the_commit() {
 #[tokio::test]
 async fn a_waiver_use_is_counted_once_where_the_guard_is_taken() {
     let mut r = rig(|_| limited());
-    run_dkg_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
-    run_refresh_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2)),
-    )
-    .await
-    .unwrap();
+    r.dkg_then_refresh().await;
     std::thread::sleep(std::time::Duration::from_millis(5));
     let at = rutli_cosigner::audit_check::fmt_ms(intent::now_ms());
     r.restart(|_| SigningPolicyConfig {
@@ -2821,36 +2584,8 @@ async fn a_waiver_use_is_counted_once_where_the_guard_is_taken() {
 #[tokio::test]
 async fn a_refresh_aborted_by_the_resolver_after_staging_counts() {
     let r = rig(|_| limited());
-    run_dkg_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
-    let (x, xid) = (
-        r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2),
-        id(CeremonyKind::Refresh, 2),
-    );
-    let leader = r.led_by(0);
-    for p in &leader {
-        p.ceremony_begin(&xid, KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&x))
-            .await
-            .unwrap();
-    }
-    let mut map = BTreeMap::new();
-    for p in &leader {
-        map.insert(
-            p.identifier(),
-            p.ceremony_part1(&xid, KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(&x))
-                .await
-                .unwrap(),
-        );
-    }
-    let mut digest = [0u8; 32];
-    for p in &leader {
-        digest = p.ceremony_part2(&xid, &map).await.unwrap().round1_digest;
-    }
+    r.first_dkg(&r.peers).await;
+    let (xid, leader, digest) = r.refresh_through_part2(2).await;
     for p in &leader[..2] {
         p.ceremony_part3(&xid, &digest).await.unwrap();
     }
@@ -2868,14 +2603,7 @@ async fn a_refresh_aborted_by_the_resolver_after_staging_counts() {
         );
     }
     r.assert_on_epoch(1);
-    let m = too_soon(
-        run_refresh_with_intent(
-            &r.peers,
-            KEY,
-            Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 3)),
-        )
-        .await,
-    );
+    let m = too_soon(r.refresh_with(&r.peers, 3).await);
     assert!(m.contains(&xid), "{m}");
     r.assert_on_epoch(1);
 }
@@ -2888,20 +2616,7 @@ async fn a_refresh_aborted_by_the_resolver_after_staging_counts() {
 async fn a_node_without_its_records_or_with_an_older_one_is_outvoted_at_the_fence() {
     const H: i64 = 3600 * 1000;
     let mut r = rig(|_| limited());
-    run_dkg_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
-    run_refresh_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2)),
-    )
-    .await
-    .unwrap();
+    r.dkg_then_refresh().await;
 
     // Node 1 loses its ceremony directory: it would allow, node 2 refuses at its fence.
     let dir = KeyStore::open(r._tmp.path().join("n1"))
@@ -2913,14 +2628,7 @@ async fn a_node_without_its_records_or_with_an_older_one_is_outvoted_at_the_fenc
         r.nodes[0].refresh_interval_verdict(KEY).unwrap(),
         rutli_cosigner::refresh_interval::Verdict::Allowed
     );
-    let m = too_soon(
-        run_refresh_with_intent(
-            &r.led_by(0),
-            KEY,
-            Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 3)),
-        )
-        .await,
-    );
+    let m = too_soon(r.refresh_with(&r.led_by(0), 3).await);
     assert!(m.contains("refused by node 2"), "{m}");
     r.assert_on_epoch(2);
     for n in 0..3 {
@@ -2930,20 +2638,7 @@ async fn a_node_without_its_records_or_with_an_older_one_is_outvoted_at_the_fenc
     // Straddling: node 3's last refresh now reads 73 h old (it allows), node 2's is fresh (refuses).
     let fresh = rig(|_| limited());
     let mut r = fresh;
-    run_dkg_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)),
-    )
-    .await
-    .unwrap();
-    run_refresh_with_intent(
-        &r.peers,
-        KEY,
-        Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2)),
-    )
-    .await
-    .unwrap();
+    r.dkg_then_refresh().await;
     let n3 = KeyStore::open(r._tmp.path().join("n3"))
         .unwrap()
         .ceremony_dir();
@@ -2966,14 +2661,7 @@ async fn a_node_without_its_records_or_with_an_older_one_is_outvoted_at_the_fenc
         rutli_cosigner::refresh_interval::Verdict::Allowed
     );
     let before = r.tree(1);
-    let m = too_soon(
-        run_refresh_with_intent(
-            &r.led_by(2),
-            KEY,
-            Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 3)),
-        )
-        .await,
-    );
+    let m = too_soon(r.refresh_with(&r.led_by(2), 3).await);
     assert!(m.contains("refused by node 1"), "{m}");
     r.assert_on_epoch(2);
     for n in 0..3 {

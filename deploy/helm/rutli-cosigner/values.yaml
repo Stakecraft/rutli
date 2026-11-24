@@ -202,6 +202,17 @@ maintenanceNodes: []
 #     write_version: 2
 keyfile: {}
 
+# Peer round deadlines of a signing session (optional), written into every node's config as
+# `peer_deadlines`. Keys: signRound1Ms (500..5000, default 2000) and signRound2Ms (1000..9000,
+# default 5000); a value outside the bounds fails `helm template` here, and the cosigner refuses to
+# start with it. Empty = the defaults, which are recommended; any in-bounds value is accepted under
+# the production profile. Set it only after EVERY cosigner runs a release that knows the section: an
+# older node refuses the unknown key at startup. Example:
+#   peerDeadlines:
+#     signRound1Ms: 3000
+#     signRound2Ms: 6000
+peerDeadlines: {}
+
 # topology=legacy only: the tls.domain written into each config. Since 0.4.0-rc.2 the cosigners
 # verify each peer under its own name (cosigner<id>) whatever this says; it only remains the
 # fallback name for operator commands against a non-roster target.

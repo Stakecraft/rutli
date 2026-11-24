@@ -316,6 +316,28 @@ fn wrapped(c: &Cluster, from: usize, to: usize, key_id: &str, key: &HostedKey) -
         .unwrap()
 }
 
+/// Node `from` takes the generation fence `cid` for `id` at node `to`, then pushes a fresh AES key
+/// wrapped for `to`: the push's result (the fence itself must be granted).
+async fn fence_then_push_aes(
+    c: &Cluster,
+    from: usize,
+    to: usize,
+    cid: &str,
+    id: &str,
+) -> Result<Vec<u8>> {
+    let pusher = c.as_peer(from, to);
+    pusher.ceremony_fence(cid, id, "genkey").await.unwrap();
+    pusher
+        .replicate_key(
+            cid,
+            id,
+            "aes-256-gcm",
+            &[],
+            &wrapped(c, from, to, id, &aes()),
+        )
+        .await
+}
+
 fn unconfirmed(r: Result<bool>) {
     assert!(
         matches!(r, Err(DaemonError::HostedUnconfirmed { .. })),
@@ -617,20 +639,7 @@ async fn a_push_is_refused_while_a_peer_holds_a_copy_that_cannot_be_checked() {
     let mut ahead = aes();
     ahead.created_at = rutli_cosigner::hosted::now_secs() + 3600;
     c.nodes[2].hosted_store(id, &ahead).unwrap();
-    let leader = c.as_peer(0, 1);
-    leader
-        .ceremony_fence("genkey-u", id, "genkey")
-        .await
-        .unwrap();
-    let e = leader
-        .replicate_key(
-            "genkey-u",
-            id,
-            "aes-256-gcm",
-            &[],
-            &wrapped(&c, 0, 1, id, &aes()),
-        )
-        .await;
+    let e = fence_then_push_aes(&c, 0, 1, "genkey-u", id).await;
     assert!(
         matches!(e, Err(DaemonError::HostedUnconfirmed { .. })),
         "{e:?}"
@@ -805,19 +814,7 @@ async fn a_peer_that_fences_a_generation_itself_cannot_plant_over_another_copy()
     let c = Cluster::new();
     let id = "rutli-sym-self-fence";
     c.nodes[0].hosted_store(id, &aes()).unwrap();
-    let evil = c.as_peer(1, 2);
-    evil.ceremony_fence("genkey-evil", id, "genkey")
-        .await
-        .unwrap();
-    let e = evil
-        .replicate_key(
-            "genkey-evil",
-            id,
-            "aes-256-gcm",
-            &[],
-            &wrapped(&c, 1, 2, id, &aes()),
-        )
-        .await;
+    let e = fence_then_push_aes(&c, 1, 2, "genkey-evil", id).await;
     assert!(
         matches!(e, Err(DaemonError::HostedConflict { .. })),
         "{e:?}"
@@ -1755,11 +1752,7 @@ async fn a_rollback_during_a_pushs_peer_check_leaves_no_orphan() {
             ..Hooks::default()
         }
     });
-    let leader = c.as_peer(0, 1);
-    leader.ceremony_fence(cid, id, "genkey").await.unwrap();
-    let e = leader
-        .replicate_key(cid, id, "aes-256-gcm", &[], &wrapped(&c, 0, 1, id, &aes()))
-        .await;
+    let e = fence_then_push_aes(&c, 0, 1, cid, id).await;
     assert!(matches!(e, Err(DaemonError::HostedPushRefused(_))), "{e:?}");
     assert!(!c.nodes[1].hosted_exists(id));
 }
@@ -1784,11 +1777,7 @@ async fn a_key_arriving_during_a_pushs_peer_check_is_not_overwritten() {
             ..Hooks::default()
         }
     });
-    let leader = c.as_peer(0, 1);
-    leader.ceremony_fence(cid, id, "genkey").await.unwrap();
-    let e = leader
-        .replicate_key(cid, id, "aes-256-gcm", &[], &wrapped(&c, 0, 1, id, &aes()))
-        .await;
+    let e = fence_then_push_aes(&c, 0, 1, cid, id).await;
     assert!(
         matches!(e, Err(DaemonError::HostedConflict { .. })),
         "{e:?}"

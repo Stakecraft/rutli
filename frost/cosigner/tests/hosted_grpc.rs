@@ -64,6 +64,27 @@ impl Drop for Mesh {
     }
 }
 
+/// Round 1 under `session` of node 1 (in process) and of node 2 (through `node2`, over gRPC), both
+/// handed `ctx`.
+async fn round1_of_nodes_1_and_2(
+    m: &Mesh,
+    node2: &Arc<dyn PeerApi>,
+    key: &str,
+    session: &str,
+    ctx: &rutli_cosigner::node::Round1Ctx,
+) -> std::collections::BTreeMap<Identifier, frost_ed25519::round1::SigningCommitments> {
+    let mut cs = std::collections::BTreeMap::new();
+    cs.insert(
+        m.nodes[0].identifier,
+        m.nodes[0].sign_round1(key, session, ctx).unwrap(),
+    );
+    cs.insert(
+        m.nodes[1].identifier,
+        node2.sign_round1(key, session, ctx).await.unwrap(),
+    );
+    cs
+}
+
 /// A cert with CN `cn` and that same name as its only SAN — what gen-frost-certs.sh issues now
 /// (`cosigner<N>`, no shared name). Peers dial by that name; the endpoints are IPs.
 fn write_tls(dir: &std::path::Path, ca: &(rcgen::Certificate, KeyPair), cn: &str) -> TlsConfig {
@@ -871,15 +892,7 @@ async fn a_sign_session_belongs_to_the_peer_that_opened_it_over_mtls_grpc() {
         signers: Some(vec![1, 2]),
         ..Default::default()
     };
-    let mut cs = std::collections::BTreeMap::new();
-    cs.insert(
-        m.nodes[0].identifier,
-        m.nodes[0].sign_round1(key, "g-own", &ctx).unwrap(),
-    );
-    cs.insert(
-        m.nodes[1].identifier,
-        by1.sign_round1(key, "g-own", &ctx).await.unwrap(),
-    );
+    let cs = round1_of_nodes_1_and_2(&m, by1, key, "g-own", &ctx).await;
 
     let refused = |e: DaemonError| match e {
         DaemonError::Status(s) if s.code() == tonic::Code::PermissionDenied => {
@@ -964,15 +977,7 @@ async fn epoch_refusals_and_session_binding_hold_over_mtls_grpc() {
         signers: Some(vec![1, 2]),
         ..Default::default()
     };
-    let mut cs = std::collections::BTreeMap::new();
-    cs.insert(
-        m.nodes[0].identifier,
-        m.nodes[0].sign_round1(key, "g-bind", &ctx).unwrap(),
-    );
-    cs.insert(
-        m.nodes[1].identifier,
-        node2.sign_round1(key, "g-bind", &ctx).await.unwrap(),
-    );
+    let cs = round1_of_nodes_1_and_2(&m, node2, key, "g-bind", &ctx).await;
     let other = rutli_frost_core::dealer::canton_test_message(b"swapped");
     let err = node2
         .sign_round2(key, "g-bind", &other, &cs, None)
