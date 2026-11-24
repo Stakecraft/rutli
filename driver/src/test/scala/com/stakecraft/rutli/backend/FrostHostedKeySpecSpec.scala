@@ -58,7 +58,7 @@ class FrostHostedKeySpecSpec extends AnyWordSpec with Matchers {
     val asked = new AtomicInteger
 
     private def answer[R](obs: StreamObserver[R], counted: Boolean = true)(under: String => R)(lacks: => Unit): Unit = {
-      if (counted) asked.incrementAndGet()
+      if (counted) { asked.incrementAndGet(); () }
       answers match {
         case Under(spec) =>
           obs.onNext(under(spec))
@@ -200,14 +200,12 @@ class FrostHostedKeySpecSpec extends AnyWordSpec with Matchers {
       }
     }
 
-    "fail and keep the spec when one cosigner answers under another and the rest lack the key" in {
-      for (known <- specs; r <- reads) withClue(s"known as $known, ${r.name}: ") {
+    "fail for good and keep the spec when one cosigner answers under another and the rest lack the key" in {
+      for (known <- specs; r <- reads; at <- 0 until 3) withClue(s"known as $known, ${r.name}, cosigner $at: ") {
         withCluster(Some(known)) { (backend, nodes) =>
-          answering(nodes, Seq(Under(otherThan(known)), Lacks, Lacks))
-          intercept[Exception](read(backend, r)) match {
-            case e: StatusRuntimeException => e.getStatus.getCode shouldBe Status.Code.NOT_FOUND // not retryable
-            case _                         => succeed
-          }
+          answering(nodes, Seq.tabulate[Answer](3)(i => if (i == at) Under(otherThan(known)) else Lacks))
+          // The same error wherever that cosigner sits in the roster, and not one Canton retries.
+          an[IllegalStateException] should be thrownBy read(backend, r)
           nodes.map(_.asked.get) shouldBe Seq(1, 1, 1)
           laterRead(backend, nodes, known) shouldBe (atCanton(known) -> false)
         }
@@ -239,6 +237,8 @@ class FrostHostedKeySpecSpec extends AnyWordSpec with Matchers {
           val notes = new AuditNotes
           read(backend, r, notes)
           notes.render should include(s"hosted-spec=$Rsa→$Ec")
+          // And it stays EC while the third cosigner goes on answering RSA.
+          await(backend.getPublicKey(Key)).spec shouldBe EncryptionKeySpec.EcP256
           laterRead(backend, nodes, Ec) shouldBe (EncryptionKeySpec.EcP256 -> false)
         }
       }
