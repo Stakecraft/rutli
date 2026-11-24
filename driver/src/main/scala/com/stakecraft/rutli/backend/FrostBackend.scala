@@ -1777,8 +1777,11 @@ class FrostBackend(
                   Some(signAnswerIsLeaderLocal _),
                   // And it does not cost a leader the lead when every leader answers so (the shares
                   // are gone, a ceremony holds the key on all of them): none is at fault then, and
-                  // none leaves the rotation. In every other case it costs the lead as before.
-                  signLeaderCannotSignNow _,
+                  // none leaves the rotation. In every other case it costs the lead as before. So
+                  // it does in the retry after the cluster id was learned again: leaders may have
+                  // lost the lead before the refusal, so the retry holds nobody back, and the sign
+                  // as a whole leaves the lead where it would be without holding back.
+                  (failure: Either[StatusRuntimeException, Rejected]) => !relearned && signLeaderCannotSignNow(failure),
                   holdOnlyIfAll = true,
                 )(_.sign(built))
               catch {
@@ -2400,7 +2403,8 @@ object FrostBackend {
     * leader's refusal is returned at once (also a cluster-id refusal, after which the sign is
     * tried again from the refusing leader), and when the request budget is spent. The lead and
     * the demotion times then are what they would be had it been demoted as it failed, so a leader
-    * cannot keep the lead, or stay the only sign start, by answering so.
+    * cannot keep the lead, or stay the only sign start, by answering so. The retry after the
+    * cluster id was learned again holds nobody back: there every failing leader is demoted at once.
     *
     * A signature that does not verify is not in this set: a leader that returns one is demoted at
     * once, whether or not another leader signs. So are INTERNAL, UNKNOWN and an unreachable leader. */
