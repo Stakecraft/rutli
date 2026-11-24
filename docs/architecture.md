@@ -161,8 +161,12 @@ Operators who want the pre-0.5.0 behaviour set `sign-leader = sticky`.
 
 **What Canton waits for.** Canton puts no deadline on a KMS driver call. It retries a *retryable*
 failure forever, with a backoff up to 10 s (`KmsConfig.retries.failures`, Canton 3.6/3.7). The
-driver reports only "the cluster could not be reached in time" as retryable (`UNAVAILABLE`,
-`DEADLINE_EXCEEDED`, the request budget spent, too few cosigners answering a group-key query). A refusal (`PERMISSION_DENIED`, `RESOURCE_EXHAUSTED`, a bad request, an
+driver reports as retryable only what clears by itself: "the cluster could not be reached in time"
+(`UNAVAILABLE`, `DEADLINE_EXCEEDED`, the request budget spent, too few cosigners answering a
+group-key query) and the cosigners' "not now" (`ABORTED`: a DKG or refresh ceremony holds the key,
+the sign session is gone; also the same "ceremony … is already in progress" passed on as `INTERNAL`
+by a leader that does not keep a member's status code). `ABORTED` for conflicting hosted-key material (`hosted-conflict`)
+is final. A refusal (`PERMISSION_DENIED`, `RESOURCE_EXHAUSTED`, a bad request, an
 unknown key), a signature that does not verify, a group key that differs from the pin, and
 cosigners that disagree are not retryable, so Canton stops at once rather than retrying a
 condition that will not clear.
