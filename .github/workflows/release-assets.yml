@@ -63,12 +63,15 @@ jobs:
       matrix:
         include:
           - name: driver jar
+            kind: jar
             asset: jar
             runner: ubuntu-24.04
           - name: dealer linux-x86_64
+            kind: dealer-x86_64
             asset: dealer
             runner: ubuntu-24.04
           - name: dealer linux-aarch64
+            kind: dealer-aarch64
             asset: dealer
             runner: ubuntu-24.04-arm
     steps:
@@ -117,7 +120,7 @@ jobs:
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: asset-${{ matrix.name }}
+          name: asset-${{ matrix.kind }}
           path: out/
           retention-days: 7
           if-no-files-found: error
@@ -138,18 +141,21 @@ jobs:
         with:
           persist-credentials: false
 
+      # One directory per build artifact, not merged: see "gather".
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: asset-*
-          merge-multiple: true
-          path: out
+          path: built
 
-      # The build jobs are trusted only to produce these three files: anything else, or a missing
-      # file, stops the run before it is hashed or signed.
+      # The build jobs are trusted only to produce these three files, each from its own job:
+      # anything else, a missing file, or a file from the wrong job stops the run before it is
+      # hashed or signed. (A compromised build still gets its own bytes signed: the signature and
+      # the provenance say what this workflow released, not that the bytes derive from the source.)
       - name: The build artifacts are exactly the expected files
         run: |
           set -euo pipefail
           scripts/release-assets.sh version-check "$TAG"
+          scripts/release-assets.sh gather built out
           scripts/release-assets.sh check-set out built
 
       - name: Install cosign and syft (pinned, checked by sha256)
@@ -161,6 +167,7 @@ jobs:
           scripts/release-assets.sh licenses out
           scripts/release-assets.sh sbom out
           scripts/release-assets.sh sums out
+          scripts/release-assets.sh check-set out ready
 
       # Keyless: Fulcio issues a short-lived certificate for this workflow at this tag ref, and each
       # signature is recorded in the public Rekor log.

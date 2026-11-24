@@ -13,7 +13,8 @@
 #   scripts/release-assets.sh build-dealer OUT       cargo build --release -> OUT/rutli-dealer-<version>-<os>-<arch>
 #   scripts/release-assets.sh licenses OUT           LICENSE and THIRD-PARTY-LICENSES-rust.txt next to the binary
 #   scripts/release-assets.sh sbom OUT               SPDX SBOMs: rutli-driver-<version>.spdx.json, rutli-dealer-<version>.spdx.json
-#   scripts/release-assets.sh check-set OUT STAGE    OUT holds exactly the expected files: STAGE built|signed
+#   scripts/release-assets.sh gather SRC OUT         copy each build artifact (SRC/asset-<kind>/) into OUT, one expected file from each
+#   scripts/release-assets.sh check-set OUT STAGE    OUT holds exactly the expected files: STAGE built|ready|signed
 #   scripts/release-assets.sh sums OUT               SHA256SUMS of every file in OUT (not the bundles)
 #   scripts/release-assets.sh sign OUT               a cosign bundle OUT/<file>.sigstore.json for every file
 #   scripts/release-assets.sh verify OUT             the commands a user runs, against every file
@@ -153,11 +154,12 @@ expected_files() { # STAGE
   local extra=(LICENSE THIRD-PARTY-LICENSES-rust.txt "rutli-driver-${v}.spdx.json" "rutli-dealer-${v}.spdx.json" SHA256SUMS)
   case "$1" in
     built) printf '%s\n' "${built[@]}" ;;
+    ready) printf '%s\n' "${built[@]}" "${extra[@]}" ;;
     signed)
       local f
       for f in "${built[@]}" "${extra[@]}"; do printf '%s\n%s\n' "$f" "$f.sigstore.json"; done
       ;;
-    *) die "check-set: stage must be built or signed" ;;
+    *) die "check-set: stage must be built, ready or signed" ;;
   esac | LC_ALL=C sort
 }
 
@@ -174,6 +176,29 @@ cmd_check_set() {
   fi
   if [ -n "$(find "$1" -mindepth 1 ! -type f)" ]; then die "$1 holds something that is not a regular file"; fi
   echo "OK: $1 holds exactly the expected ${2} files"
+}
+
+# Each build artifact is read from its own directory and may hold exactly the one file that build job
+# makes: the jar job cannot supply a dealer, a dealer job cannot supply the other architecture or the
+# jar. Nothing is merged before this check.
+cmd_gather() {
+  [ -d "${1:-}" ] || die "usage: $0 gather SRC OUT"
+  need_out "${2:-}"
+  local v kind want n
+  v="$(version)"
+  for kind in jar dealer-x86_64 dealer-aarch64; do
+    case "$kind" in
+      jar) want="rutli-driver-${v}.jar" ;;
+      dealer-x86_64) want="rutli-dealer-${v}-linux-x86_64" ;;
+      dealer-aarch64) want="rutli-dealer-${v}-linux-aarch64" ;;
+    esac
+    [ -d "$1/asset-${kind}" ] || die "no build artifact asset-${kind} in $1"
+    n="$(find "$1/asset-${kind}" -mindepth 1 | wc -l | tr -d ' ')"
+    [ "$n" = 1 ] && [ -f "$1/asset-${kind}/${want}" ] && [ ! -L "$1/asset-${kind}/${want}" ] \
+      || die "asset-${kind} must hold exactly the file ${want}"
+    cp "$1/asset-${kind}/${want}" "$2/${want}"
+  done
+  echo "OK: three build artifacts, one expected file each"
 }
 
 cmd_sums() {
@@ -230,7 +255,7 @@ cmd_verify() {
 
 main() {
   local c="${1:-}"
-  [ -n "$c" ] || die "usage: $0 install-tools|version-check|build-jar|build-dealer|licenses|sbom|check-set|sums|sign|verify [args]"
+  [ -n "$c" ] || die "usage: $0 install-tools|version-check|build-jar|build-dealer|licenses|sbom|gather|check-set|sums|sign|verify [args]"
   shift
   case "$c" in
     install-tools) cmd_install_tools ;;
@@ -239,6 +264,7 @@ main() {
     build-dealer) cmd_build_dealer "$@" ;;
     licenses) cmd_licenses "$@" ;;
     sbom) cmd_sbom "$@" ;;
+    gather) cmd_gather "$@" ;;
     check-set) cmd_check_set "$@" ;;
     sums) cmd_sums "$@" ;;
     sign) cmd_sign "$@" ;;

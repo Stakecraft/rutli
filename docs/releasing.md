@@ -141,10 +141,20 @@ dealer binaries before it uploads anything, so a file that does not verify is no
 SBOMs are signed like every other file; to read one, `jq '.packages[].name' rutli-dealer-<version>.spdx.json`.
 The container image is verified as described in [SECURITY.md](../SECURITY.md#verify-the-image).
 
+What the checks prove: the signature and the attestation say that `release-assets.yml` of this
+repository, run on that tag on a hosted runner, released these exact bytes. They do not prove that the
+bytes derive from the tagged source (a compromised build dependency would still be signed); the
+builds are not reproducible, so there is nothing to rebuild and compare. The tag is part of the
+signing identity: `v*` tags are created by the maintainers only, and a tag that is moved and approved
+again is a new run with a new signature set. Verify `SHA256SUMS` itself with the first command before
+you rely on `sha256sum`: `--ignore-missing` checks only the files you downloaded, not that the release
+is complete.
+
 The files are always one set. The builds are not reproducible, so a repeated run (`workflow_dispatch`)
 would sign a second set; it refuses to touch a release that already carries `SHA256SUMS` unless it is
 started with `replace_published`; then it replaces its files and removes its own files that the new
-run no longer produces (other attachments stay). The provenance names the tagged
+run no longer produces (other attachments stay). A replacement is not atomic and does not revoke
+anything: signatures, log entries and attestations of the old set stay valid for whoever holds it. The provenance names the tagged
 workflow file, whose jobs all run on the hosted runners that file lists; `--deny-self-hosted-runners`
 checks the runner of the signing job.
 

@@ -84,6 +84,7 @@ jobs:
           scripts/release-assets.sh licenses out
           scripts/release-assets.sh sbom out
           scripts/release-assets.sh sums out
+          scripts/release-assets.sh check-set out ready
 
       - name: Sign with a throwaway key and verify
         run: |
