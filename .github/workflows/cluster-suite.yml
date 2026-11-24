@@ -63,6 +63,11 @@ jobs:
           set -euo pipefail
           tag="$(sed -n 's/^  tag: "\([0-9][^@"]*\).*/\1/p' deploy/helm/rutli-cosigner/values.yaml | head -n 1)"
           [ -n "$tag" ] || { echo "::error::no image tag in deploy/helm/rutli-cosigner/values.yaml"; exit 1; }
+          # v* tags are protected (only admins create them, docs/release-process.md); the commit the
+          # tag names is recorded here, next to the build.
+          commit="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/v${tag}^{}" | cut -f1)"
+          [ -n "$commit" ] || commit="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/v${tag}" | cut -f1)"
+          echo "previous release v${tag} = ${commit}" | tee -a "$GITHUB_STEP_SUMMARY"
           docker build -f- -t "rutli-dealer:$tag" "https://github.com/${GITHUB_REPOSITORY}.git#v${tag}:frost" <frost/Dockerfile.dealer
           echo "DEALER_IMAGE=rutli-dealer:$tag" >>"$GITHUB_ENV"
 
@@ -94,7 +99,7 @@ jobs:
         run: |
           python3 -I scripts/perf/cluster.py --namespace rutli-perf --profile scripts/perf/profiles/smoke.json \
             --env-name kind --out perf-out/cluster.json --upgrade-image rutli-perf:local --work "$WORK" \
-            --dealer-image "$DEALER_IMAGE" --disrupt-secs 90 --commit "$GITHUB_SHA"
+            --dealer-image "$DEALER_IMAGE" --allow-unisolated-dealer --disrupt-secs 90 --commit "$GITHUB_SHA"
 
       # The diagnostic pass, tiny: it checks the wiring (cgroup and pressure readings, the flush
       # probe, load spread over two generators, the key-count step), not the numbers.

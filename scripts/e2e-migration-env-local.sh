@@ -287,6 +287,6 @@ env_cleanup() {
     tail -n 80 "$WORK/canton.out" 2>/dev/null || true
   fi
   if [ -n "${WORK:-}" ]; then
-    if [ "${KEEP:-0}" = 1 ]; then echo "work dir kept: $WORK"; else rm -rf "$WORK"; fi
+    if [ "${KEEP:-0}" = 1 ]; then echo "work dir kept: $WORK"; else shred_local "$WORK"; fi
   fi
 }

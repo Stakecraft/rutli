@@ -20,6 +20,8 @@
 #   E2E_DEALER_IMAGE    the dealer's image: one with rutli-dealer of the cosigners' release
 #                       (frost/Dockerfile.perf, or frost/Dockerfile.dealer for an earlier tag)
 #   E2E_LOADGEN_POD     the load generator pod (default rutli-perf-loadgen)
+#   E2E_ALLOW_UNISOLATED_DEALER=1  go on when the dealer pod reaches the network (its NetworkPolicy
+#                       not enforced: kind's default network plugin); otherwise that is a failure
 
 NS="${RUTLI_NAMESPACE:?RUTLI_NAMESPACE is required for E2E_ENV=k8s}"
 LOADGEN_POD="${E2E_LOADGEN_POD:-rutli-perf-loadgen}"
@@ -58,6 +60,13 @@ env_init() {
   # certificate (the load generator pod mounts them at /certs) and the lab profile, as a client
   # config is not a node's.
   _in_node 1 cat /config/cosigner-1.json >"$WORK/node1.json"
+  # Request files, bundles and founding backups go to each cosigner pod's /tmp, the client configs to
+  # the load generator's: both must be memory-backed (the chart's and loadgen.yaml's emptyDir with
+  # medium Memory), so that nothing of the ceremony reaches a node's disk.
+  for i in 1 2 3; do
+    _in_node "$i" grep -q ' /tmp tmpfs ' /proc/mounts || fail "cosigner $i's /tmp is not memory-backed"
+  done
+  _k exec "$LOADGEN_POD" -- grep -q ' /tmp tmpfs ' /proc/mounts || fail "the load generator's /tmp is not memory-backed"
   for role in operator refresher; do
     jq --arg role "$role" '.tls.cert = "/certs/\($role).crt" | .tls.key = "/certs/\($role).key"
       | .tls.ca_cert = "/certs/ca.crt" | .profile = "lab"' "$WORK/node1.json" \
@@ -121,6 +130,8 @@ spec:
   automountServiceAccountToken: false
   enableServiceLinks: false
   restartPolicy: Never
+  activeDeadlineSeconds: 1800
+  terminationGracePeriodSeconds: 1
   securityContext:
     runAsNonRoot: true
     runAsUser: 10001
@@ -147,10 +158,11 @@ YAML
   DEALER_STARTED=1
   # Does the NetworkPolicy hold? Only a network plugin that enforces policies makes it so (kind's
   # default one does not). Before anything is copied in, try to reach cosigner 1 from the pod.
-  # E2E_REQUIRE_DEALER_ISOLATION=1 makes a reachable network a failure; otherwise it is reported.
+  # A reachable network is a failure unless E2E_ALLOW_UNISOLATED_DEALER=1 (a throwaway cluster whose
+  # network plugin enforces no policies, with the public test key only); then it is reported.
   if _k exec "$DEALER_POD" -- bash -c "timeout 3 bash -c '</dev/tcp/rutli-node-1.$NS.svc/9101'" >/dev/null 2>&1; then
     DEALER_ISOLATED=false
-    [ "${E2E_REQUIRE_DEALER_ISOLATION:-0}" = 1 ] && fail "the dealer pod reaches the network: its NetworkPolicy is not enforced here"
+    [ "${E2E_ALLOW_UNISOLATED_DEALER:-0}" = 1 ] || fail "the dealer pod reaches the network: its NetworkPolicy is not enforced here"
     echo "WARNING: the dealer pod reaches the network: this cluster's network plugin does not enforce its NetworkPolicy"
   else
     DEALER_ISOLATED=true
@@ -232,7 +244,7 @@ env_destroy_old_db() { _no_canton; }
 
 env_cleanup() {
   local rc=$1 i
-  _k delete pod "$DEALER_POD" --wait=false --ignore-not-found >/dev/null 2>&1 || true
+  _k delete pod "$DEALER_POD" --wait=true --timeout=120s --ignore-not-found >/dev/null 2>&1 || true
   _k delete networkpolicy "$DEALER_POD" --ignore-not-found >/dev/null 2>&1 || true
   # Ceremony files in the pods' memory-backed /tmp: requests, bundles, the client configs. The
   # founding backups stay until the pods restart (they are what Step 8 keeps).

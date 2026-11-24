@@ -285,9 +285,21 @@ class Suite(base.Runner):
             env = dict(os.environ, E2E_ENV="k8s", E2E_STAGES="ceremony", E2E_PREFIX=prefix,
                        RUTLI_NAMESPACE=self.cluster.ns, E2E_CERTS=os.path.join(a.work, "certs"),
                        E2E_DEALER_IMAGE=image, E2E_RESULT=result_path)
+            if a.allow_unisolated_dealer:
+                env["E2E_ALLOW_UNISOLATED_DEALER"] = "1"
             started = time.time()
-            out = subprocess.run(["bash", os.path.join(HERE, "..", "e2e-migration.sh")], env=env,
-                                 capture_output=True, text=True, timeout=1800, check=False)
+            try:
+                out = subprocess.run(["bash", os.path.join(HERE, "..", "e2e-migration.sh")], env=env,
+                                     capture_output=True, text=True, timeout=1800, check=False)
+            except subprocess.TimeoutExpired:
+                return [{"failed": "the split ceremony on the cluster did not finish within 30 minutes"}]
+            finally:
+                # Whatever happened to the script (a timeout kills it before its own cleanup), the
+                # dealer pod and what its memory holds go now, not at its 30-minute deadline.
+                self.cluster.kubectl("delete", "pod", "rutli-perf-dealer", "--wait=true", "--timeout=120s",
+                                     "--ignore-not-found", timeout=180, check=False)
+                self.cluster.kubectl("delete", "networkpolicy", "rutli-perf-dealer", "--ignore-not-found",
+                                     timeout=60, check=False)
             stage.update({"seconds": round(time.time() - started, 1), "dealer_image": image,
                           "steps": [line[4:] for line in out.stdout.splitlines() if line.startswith("==> ")]})
             for line in out.stdout.splitlines():
@@ -1109,6 +1121,9 @@ def main():
     p.add_argument("--out", required=True)
     # Disruption last: whatever it leaves behind cannot skew the measurements of the others.
     p.add_argument("--suites", default="migration,upgrade,scenarios,connect,keys,ramp,disrupt")
+    p.add_argument("--allow-unisolated-dealer", action="store_true",
+                   help="migration suite: go on when the dealer pod reaches the network (a cluster whose network "
+                        "plugin enforces no NetworkPolicy, such as kind's default); otherwise that is a failure")
     p.add_argument("--dealer-image", default="",
                    help="migration suite: the dealer's image (rutli-dealer of the cosigners' release). Default: the load "
                         "generator's image; with the upgrade suite, whose cosigners start on the previous release, one "
