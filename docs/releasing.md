@@ -52,6 +52,22 @@ ghcr.io/stakecraft/rutli-cosigner:<version>`), verify it with the commands in
 
 `git grep` the previous version afterwards: no default should still name it.
 
+**Record the tag's commit next to the digest.** In the same PR, add a row to "Release records" below:
+the commit the tag points at (`git rev-parse vX.Y.Z^{commit}`) and the index digest. Check that the
+commit equals the `org.opencontainers.image.revision` label of the image on both platforms
+(`docker buildx imagetools inspect --raw` shows the platform manifests; the label is in each one's
+config blob). A pinned digest alone does not say which source it was built from.
+
+## Release records
+
+| Release | Date | Tag commit | Image (multi-arch index) |
+|---|---|---|---|
+| `v0.4.0` | 2026-11-14 | `ebab88b1a9afe1c55af0f40226a16a9ac0847fac` | `0.4.0@sha256:6e606d2b00b53a6d70864a15693a697e0052c0e458386c18c22307eba4912d98` |
+| `v0.4.1` | 2026-11-20 | `af85dca1455df65e6feda53424630aa42a71a268` | `0.4.1@sha256:16ad19650b580609dfd0b90136cfe07ec65126addcbdbd4c8676da41fd558326` |
+
+For both rows the commit equals the image's `org.opencontainers.image.revision` label on linux/amd64
+and linux/arm64 (read from the registry on 2026-11-24).
+
 ### When the run fails part-way
 
 The `index` job pushes the version tags before the `sign` job signs, so a failure in `sign`

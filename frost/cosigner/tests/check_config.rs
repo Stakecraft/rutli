@@ -106,3 +106,28 @@ fn check_config_lists_findings_under_any_profile_and_the_node_refuses_under_prod
     assert_eq!(code, 2, "{out}");
     assert!(out.contains("require_epoch_matc"), "{out}");
 }
+
+#[test]
+fn check_config_rejects_peer_deadlines_outside_their_bounds() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let mut ok = enforced();
+    ok["peer_deadlines"] = serde_json::json!({"sign_round1_ms": 5000, "sign_round2_ms": 9000});
+    let (code, out) = run(tmp.path(), &ok, &["check-config"]);
+    assert_eq!(code, 0, "{out}");
+
+    // Each bound, just outside it. (The sum check cannot fire within the bounds: 5 s + 9 s is
+    // under the 20 s sign budget; it is unit-tested in config.rs.)
+    for (r1, r2, key) in [
+        (499, 5000, "sign_round1_ms"),
+        (5001, 5000, "sign_round1_ms"),
+        (2000, 999, "sign_round2_ms"),
+        (2000, 9001, "sign_round2_ms"),
+    ] {
+        let mut bad = enforced();
+        bad["peer_deadlines"] = serde_json::json!({"sign_round1_ms": r1, "sign_round2_ms": r2});
+        let (code, out) = run(tmp.path(), &bad, &["check-config"]);
+        assert_eq!(code, 2, "{r1}/{r2}: {out}");
+        assert!(out.contains(&format!("peer_deadlines.{key}")), "{out}");
+    }
+}

@@ -105,6 +105,100 @@ pub struct Config {
     /// are bound to.
     #[serde(default)]
     pub keyfile: KeyFileConfig,
+    /// Deadlines of the sign rounds this node, as leader, waits on a member (and, as a member, on
+    /// its own clock). Absent: the defaults. A node rejects the section until it runs the release
+    /// that knows it ([`PeerDeadlinesConfig`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_deadlines: Option<PeerDeadlinesConfig>,
+}
+
+/// Lowest `peer_deadlines.sign_round1_ms`.
+pub const SIGN_ROUND1_MS_MIN: u64 = 500;
+/// Highest `peer_deadlines.sign_round1_ms`.
+pub const SIGN_ROUND1_MS_MAX: u64 = 5000;
+/// Lowest `peer_deadlines.sign_round2_ms`.
+pub const SIGN_ROUND2_MS_MIN: u64 = 1000;
+/// Highest `peer_deadlines.sign_round2_ms`.
+/// Below the 10 s per-call backstop of a peer connection (`peer::PEER_RPC_TIMEOUT`), so the round
+/// deadline, not the backstop, is what ends a slow round 2.
+pub const SIGN_ROUND2_MS_MAX: u64 = 9000;
+
+/// `peer_deadlines`: the two sign-round deadlines that are configuration rather than constants
+/// (docs/architecture.md, "Peer liveness"). The abort and control deadlines stay constants.
+///
+/// A node rejects this section until it runs the release that knows it, so set it only after every
+/// node is upgraded.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerDeadlinesConfig {
+    /// What the leader waits for a member's sign round 1, in milliseconds (also capped by the
+    /// client's remaining deadline minus 1 s). Default 2000; 500 to 5000.
+    pub sign_round1_ms: Option<u64>,
+    /// What the leader waits for a member's sign round 2, in milliseconds (also capped by the
+    /// client's remaining deadline minus 1 s). Default 5000; 1000 to 9000 (under the 10 s per-call
+    /// backstop). Round 1 plus round 2
+    /// must stay under the 20 s sign budget.
+    pub sign_round2_ms: Option<u64>,
+}
+
+impl PeerDeadlinesConfig {
+    fn validate(&self) -> crate::Result<()> {
+        use crate::DaemonError::Config;
+        if let Some(ms) = self.sign_round1_ms {
+            if !(SIGN_ROUND1_MS_MIN..=SIGN_ROUND1_MS_MAX).contains(&ms) {
+                return Err(Config(format!(
+                    "peer_deadlines.sign_round1_ms must be {SIGN_ROUND1_MS_MIN} to \
+                     {SIGN_ROUND1_MS_MAX} (milliseconds), got {ms}"
+                )));
+            }
+        }
+        if let Some(ms) = self.sign_round2_ms {
+            if !(SIGN_ROUND2_MS_MIN..=SIGN_ROUND2_MS_MAX).contains(&ms) {
+                return Err(Config(format!(
+                    "peer_deadlines.sign_round2_ms must be {SIGN_ROUND2_MS_MIN} to \
+                     {SIGN_ROUND2_MS_MAX} (milliseconds), got {ms}"
+                )));
+            }
+        }
+        let live = crate::peer::Liveness::default();
+        let r1 = self
+            .sign_round1_ms
+            .unwrap_or(live.round1.as_millis() as u64);
+        let r2 = self
+            .sign_round2_ms
+            .unwrap_or(live.round2.as_millis() as u64);
+        check_round_sum(r1, r2, crate::orchestrator::SIGN_BUDGET.as_millis() as u64)?;
+        Ok(())
+    }
+}
+
+/// Both rounds of one attempt must fit in the sign budget. The bounds keep the sum at 14 s at most
+/// today; this guards a later raise of them.
+fn check_round_sum(r1: u64, r2: u64, budget_ms: u64) -> crate::Result<()> {
+    if r1 + r2 >= budget_ms {
+        return Err(crate::DaemonError::Config(format!(
+            "peer_deadlines.sign_round1_ms ({r1}) + peer_deadlines.sign_round2_ms ({r2}) must \
+             be under the {budget_ms} ms sign budget"
+        )));
+    }
+    Ok(())
+}
+
+impl Config {
+    /// The peer-call timings this node runs: the defaults, with the sign-round deadlines of
+    /// `peer_deadlines` where set.
+    pub fn liveness(&self) -> crate::peer::Liveness {
+        let mut l = crate::peer::Liveness::default();
+        if let Some(d) = &self.peer_deadlines {
+            if let Some(ms) = d.sign_round1_ms {
+                l.round1 = std::time::Duration::from_millis(ms);
+            }
+            if let Some(ms) = d.sign_round2_ms {
+                l.round2 = std::time::Duration::from_millis(ms);
+            }
+        }
+        l
+    }
 }
 
 /// `keyfile`: the at-rest key-file format (audit M4, [`crate::seal`]).
@@ -1021,6 +1115,9 @@ impl Config {
                 other => other,
             })?;
         }
+        if let Some(d) = &self.peer_deadlines {
+            d.validate()?;
+        }
         if self.peers.is_empty() {
             return Err(Config("peer roster is empty".into()));
         }
@@ -1350,6 +1447,7 @@ mod tests {
             cluster_id_change_allowed: false,
             signing_policy: Default::default(),
             keyfile: Default::default(),
+            peer_deadlines: None,
         }
     }
 
@@ -1920,6 +2018,7 @@ mod hosted_config_tests {
             cluster_id_change_allowed: false,
             signing_policy: Default::default(),
             keyfile: Default::default(),
+            peer_deadlines: None,
         }
     }
 
@@ -2243,6 +2342,11 @@ mod strict_parse_tests {
                 "hosted.json",
                 r#","hosted_keys":{"enabled":false,"write_qourum":2}"#,
                 "write_qourum",
+            ),
+            (
+                "deadlines.json",
+                r#","peer_deadlines":{"sign_round3_ms":1}"#,
+                "sign_round3_ms",
             ),
             (
                 "seal.json",
@@ -2570,5 +2674,77 @@ mod strict_parse_tests {
                "tls":{"ca_cert":"/ca","cert":"/c","key":"/k"},
                "signer_allowlist":["driver"],"peer_allowlist":["cosigner1","cosigner2"]}"#;
         load_text(tmp.path(), "client.json", client).unwrap();
+    }
+
+    fn deadlines(r1: Option<u64>, r2: Option<u64>) -> Config {
+        let mut cfg = base(None, None);
+        cfg.peer_deadlines = Some(PeerDeadlinesConfig {
+            sign_round1_ms: r1,
+            sign_round2_ms: r2,
+        });
+        cfg
+    }
+
+    #[test]
+    fn peer_deadlines_absent_means_the_defaults() {
+        let cfg = base(None, None);
+        cfg.validate().unwrap();
+        let l = cfg.liveness();
+        assert_eq!(l.round1, std::time::Duration::from_secs(2));
+        assert_eq!(l.round2, std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn peer_deadlines_apply_through_liveness() {
+        let cfg = deadlines(Some(3000), Some(8000));
+        cfg.validate().unwrap();
+        let l = cfg.liveness();
+        assert_eq!(l.round1, std::time::Duration::from_millis(3000));
+        assert_eq!(l.round2, std::time::Duration::from_millis(8000));
+        let cfg = deadlines(Some(500), None);
+        cfg.validate().unwrap();
+        assert_eq!(cfg.liveness().round2, std::time::Duration::from_secs(5));
+        deadlines(Some(5000), Some(9000)).validate().unwrap();
+        deadlines(None, Some(1000)).validate().unwrap();
+    }
+
+    #[test]
+    fn peer_deadlines_outside_their_bounds_are_rejected_naming_the_key() {
+        for (cfg, key) in [
+            (deadlines(Some(499), None), "peer_deadlines.sign_round1_ms"),
+            (deadlines(Some(5001), None), "peer_deadlines.sign_round1_ms"),
+            (deadlines(None, Some(999)), "peer_deadlines.sign_round2_ms"),
+            (
+                deadlines(None, Some(12001)),
+                "peer_deadlines.sign_round2_ms",
+            ),
+        ] {
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains(key), "{err}");
+        }
+    }
+
+    #[test]
+    fn peer_deadlines_summing_to_the_sign_budget_are_rejected() {
+        let budget = crate::orchestrator::SIGN_BUDGET.as_millis() as u64;
+        assert!(check_round_sum(12000, 9000, budget).is_err());
+        assert!(check_round_sum(5000, 15001, budget).is_err());
+        let err = check_round_sum(12000, 9000, budget)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("peer_deadlines.sign_round1_ms"), "{err}");
+        check_round_sum(5000, 9000, budget).unwrap();
+        // The extremes the bounds allow are under the budget.
+        deadlines(Some(SIGN_ROUND1_MS_MAX), Some(SIGN_ROUND2_MS_MAX))
+            .validate()
+            .unwrap();
+    }
+
+    #[test]
+    fn peer_deadlines_unknown_key_is_a_parse_error() {
+        let err = serde_json::from_str::<PeerDeadlinesConfig>(r#"{"sign_round3_ms": 1}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("sign_round3_ms"), "{err}");
     }
 }

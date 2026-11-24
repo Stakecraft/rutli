@@ -831,7 +831,8 @@ impl CallClass {
 }
 
 /// The liveness constants above, as one value: production defaults, overridable by tests
-/// ([`GrpcPeer::with_liveness`], [`Node::with_liveness`]). Not configuration: no knob reaches it.
+/// ([`GrpcPeer::with_liveness`], [`Node::with_liveness`]). Only `round1` and `round2` come from
+/// configuration (`[peer_deadlines]`, [`crate::config::Config::liveness`]); the rest are constants.
 #[derive(Clone, Debug)]
 pub struct Liveness {
     pub round1: Duration,

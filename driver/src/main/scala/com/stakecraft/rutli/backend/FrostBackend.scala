@@ -573,13 +573,19 @@ class FrostBackend(
   /** Endpoint `i` failed in a way that should cost it the lead: if it is still the preferred leader,
     * the next endpoint in ring order is, so the next call starts elsewhere. A compare-and-set, so it
     * never overrides a newer value another call wrote. */
-  private def demote(i: Int): Unit = {
+  private def demote(i: Int): Unit = demote(i, (i + 1) % channels.size)
+
+  /** [[demote]] with the endpoint that takes the lead named: `to`, the one that served the call,
+    * for an endpoint whose demotion was held back until the call was served (it said it lacks the
+    * key). The next endpoint in the ring is not known to be good then: it may be one that failed
+    * later in the same walk. */
+  private def demote(i: Int, to: Int): Unit = {
     // Recorded even when another call already moved the lead: it is still evidence that this node
-    // failed just now, and it only delays the first endpoint's recovery.
+    // failed just now, and it only delays the first endpoint's recovery. Before the lead moves, so
+    // that startIndex never sees the lead off endpoint 0 without its demotion time.
     demotedAt.set(i, System.nanoTime())
-    val next = (i + 1) % channels.size
-    if (preferred.compareAndSet(i, next) && next != i)
-      logger.info(s"FROST: leader is now ${endpoints(next)} (was ${endpoints(i)}); leader order ${leaderOrder(next)}")
+    if (preferred.compareAndSet(i, to) && to != i)
+      logger.info(s"FROST: leader is now ${endpoints(to)} (was ${endpoints(i)}); leader order ${leaderOrder(to)}")
   }
 
   /** When each endpoint last lost the lead (System.nanoTime; 0 = never). */
@@ -657,7 +663,15 @@ class FrostBackend(
     * For such a call, what it fails with once every endpoint has failed is decided over the whole
     * walk, not by the endpoint that happened to be asked last ([[rosterVerdict]]). Without it the
     * last endpoint's error is thrown, as before. A failure for which `retryOn` does not hold is
-    * thrown at once either way. */
+    * thrown at once either way.
+    *
+    * `lacksKey` names the failures that say only "I do not have this key" (NOT_FOUND). Such an
+    * endpoint is not at fault unless the cluster has the key: it loses the lead only when a later
+    * endpoint serves the call, and not at all when the call ends with the roster's "not found" or
+    * with the retryable [[unconfirmed]]. Otherwise a lookup of a key that exists nowhere would
+    * take the lead from every endpoint, and with it the sign rotation ([[signStart]]) for
+    * [[leaderRecovery]]. A failure it does not name costs the lead at once, as `demoteOn` says;
+    * one it names costs the lead later only if `demoteOn` holds for it too. */
   private def withCheckedFailover[A](
       what: String,
       retryOn: Status => Boolean,
@@ -672,6 +686,7 @@ class FrostBackend(
       // than once for one call (a sign that learns the cluster id again) passes the same value.
       budgetEnd: Long,
       wholeRoster: Option[Either[StatusRuntimeException, Rejected] => Option[Boolean]] = None,
+      lacksKey: Either[StatusRuntimeException, Rejected] => Boolean = (_: Either[StatusRuntimeException, Rejected]) => false,
   )(op: SignerGrpc.SignerBlockingStub => A): A = {
     val n = channels.size
     // One attempt in flight at a time: the next cosigner is asked only once this attempt has failed
@@ -702,6 +717,10 @@ class FrostBackend(
         case Right(answer) =>
           // After this call's own demotions the preference is normally `i` already; if another call
           // changed it meanwhile, its value stands.
+          // The cluster has the key: the endpoints that said they lack it lose the lead now, to
+          // the endpoint that served — not to the next one in the ring, which may be one that
+          // failed later in this walk.
+          seen.lackedKeyAt.reverse.foreach(j => demote(j, i))
           preferred.compareAndSet(observed, i)
           answer
         case Left(failure) =>
@@ -725,7 +744,10 @@ class FrostBackend(
             case Left(e)  => Option(e.getStatus.getDescription).fold(code)(d => s"$code: $d")
             case Right(r) => s"$code: ${r.error.getMessage}"
           }
-          val seenNow: Seen = failure match {
+          // Held back only where this call would have demoted: `lacksKey` delays a demotion, it
+          // never adds one that `demoteOn` does not make.
+          val deferred: Boolean = loseLead && lacksKey(failure)
+          val counted: Seen = failure match {
             case Left(e) if isNodeDown(e.getStatus)      => seen.copy(unreachable = Some(endpoints(i) -> e))
             case f =>
               wholeRoster.flatMap(own => own(f)) match {
@@ -733,7 +755,8 @@ class FrostBackend(
                 case None         => seen.copy(other = Some(error))
               }
           }
-          if (loseLead) demote(i)
+          val seenNow: Seen = if (deferred) counted.copy(lackedKeyAt = i :: counted.lackedKeyAt) else counted
+          if (loseLead && !deferred) demote(i)
           if (!retry) throw error
           if (k + 1 < n) {
             val next = endpoints((i + 1) % n)
@@ -822,7 +845,8 @@ class FrostBackend(
     * UNIMPLEMENTED for `EcdhDerive`. While the driver no longer refuses ECIES because a silent
     * cosigner might be old, such an answer is treated here as "this node may be old or missing the
     * key": the next cosigner is asked, and the answering node does **not** become the preferred
-    * leader (review M1, 2026-10-09 decision; if it was the preferred one it loses that). `stale`
+    * leader (review M1, 2026-10-09 decision; if it was the preferred one it loses that, once
+    * another cosigner has served the call — when none does, nobody is demoted for it). `stale`
     * recognises such an answer; leader-sick statuses fail over and demote as usual, and any other
     * status is returned at once and leaves the lead where it is (see [[withFailover]]).
     *
@@ -869,6 +893,8 @@ class FrostBackend(
         stales: Int,
         unreachable: Option[(String, StatusRuntimeException)],
         sick: Option[StatusRuntimeException],
+        // Endpoint indices that gave a stale answer, latest first: demoted only if the call is served.
+        staleAt: List[Int],
     ): A = {
       val i = (start + k) % n
       val outcome: Either[StatusRuntimeException, A] =
@@ -901,11 +927,13 @@ class FrostBackend(
             case Some(to) =>
               logger.warn(s"FROST: $what via ${endpoints(i)} failed (${e.getStatus.getCode}); failing over to $to")
               notes.add(s"failover=${endpoints(i)}→$to reason=${e.getStatus.getCode}")
-              attempt(k + 1, firstStale, stales, down, lastSick)
+              attempt(k + 1, firstStale, stales, down, lastSick, staleAt)
             case None => exhausted(firstStale, stales, down, lastSick)
           }
         case o if stale(o) =>
-          demote(i)
+          // Not demoted here: a stale answer costs the lead only when another cosigner then serves
+          // the call (below). A key that is nowhere, or a blob no cosigner's secret opens, is not
+          // these cosigners' fault, and demoting all of them would switch the sign rotation off.
           val (reason, meaning) = o.fold(e => (e.getStatus.getCode.toString, MayBeOld), staleAnswer)
           val first = firstStale.getOrElse(o)
           next match {
@@ -914,11 +942,14 @@ class FrostBackend(
               val note = if (knownEc) "ec-failover" else "failover"
               logger.warn(s"FROST: $what via ${endpoints(i)} answered $reason for $key — $meaning; asking $to")
               notes.add(s"$note=${endpoints(i)}→$to reason=$reason")
-              attempt(k + 1, Some(first), stales + 1, unreachable, sick)
+              attempt(k + 1, Some(first), stales + 1, unreachable, sick, i :: staleAt)
             case None => exhausted(Some(first), stales + 1, unreachable, sick)
           }
         case Right(answer) =>
-          preferred.compareAndSet(start, i) // see withCheckedFailover
+          // The cluster serves the key: the cosigners that answered stale lose the lead, to the
+          // one that served (see withCheckedFailover).
+          staleAt.reverse.foreach(j => demote(j, i))
+          preferred.compareAndSet(start, i)
           answer
         case Left(e) =>
           // A real answer (RESOURCE_EXHAUSTED, INVALID_ARGUMENT, ...), returned at once as before.
@@ -927,7 +958,7 @@ class FrostBackend(
           throw e
       }
     }
-    attempt(0, None, 0, None, None)
+    attempt(0, None, 0, None, None, Nil)
   }
 
   /** [[clusterCall]] for [[withEcFailover]]. */
@@ -949,7 +980,8 @@ class FrostBackend(
     * makes the answer the cluster's only while the cosigner can reach those peers and read what
     * they hold: one with a missing or unreadable replica that is cut off from the others answers
     * NOT_FOUND for a key the cluster has. So the next cosigner is asked, the one that lacks the key
-    * loses the lead, and what the call ends with when no cosigner serves it is decided over the
+    * loses the lead once another cosigner has served the call (not when no cosigner has the key:
+    * `lacksKey` of [[withCheckedFailover]]), and what the call ends with when none serves it is decided over the
     * whole roster ([[rosterVerdict]]): NOT_FOUND once all but one cosigner said so
     * ([[ownAnswerQuorum]]), retryable while one that may hold the key could not be reached.
     *
@@ -979,6 +1011,8 @@ class FrostBackend(
         attemptTimeout,
         System.nanoTime() + requestTimeout.toNanos,
         Some(hostedKeyIsNotThere _),
+        // A cosigner without the key loses the lead only if another one has it.
+        (failure: Either[StatusRuntimeException, Rejected]) => hostedKeyIsNotThere(failure).isDefined,
       )(op)
     })
   }
@@ -2031,12 +2065,20 @@ class FrostBackend(
           case Left(e)         => if (e.getStatus.getCode == Status.Code.NOT_FOUND) Some(true) else None
           case Right(rejected) => if (rejected.code == GroupKeyMismatch) Some(true) else None
         }
+      // NOT_FOUND says only that this cosigner lacks the key (`lacksKey` of withCheckedFailover).
+      val lacksFrostKey = (failure: Either[StatusRuntimeException, Rejected]) =>
+        failure match {
+          case Left(e)  => e.getStatus.getCode == Status.Code.NOT_FOUND
+          case Right(_) => false
+        }
       Option(pinnedKeys.get(keyId)) match {
         case None if lostPin(keyId) => Future.failed(lostPinError(keyId))
         case None =>
-          // Not pinned: any cosigner's group key answers the question. Nothing here pins. A
-          // NOT_FOUND does not cost its node the lead, as before, and the lead moves only by a
-          // sick node's demotion.
+          // Not pinned: any cosigner's group key answers the question, and nothing checks the
+          // answer (the key is believed only at its first pin, by a majority). So this call decides
+          // nothing about the lead: NOT_FOUND asks the next cosigner and costs nobody the lead, and
+          // a cosigner that answers does not take it (NoPreference). Only a sick or unreachable
+          // cosigner loses the lead, as everywhere. Nothing here pins.
           val notes = currentNotes.get
           Future(blocking {
             val start = startIndex()
@@ -2046,8 +2088,6 @@ class FrostBackend(
               isLeaderSick,
               notes,
               (_: String, _: GroupKeyReply) => None,
-              // A cosigner that answers after another one's NOT_FOUND does not take the lead for
-              // that: NOT_FOUND did not cost the first one the lead either.
               NoPreference,
               start,
               (_: Int) => (),
@@ -2087,6 +2127,9 @@ class FrostBackend(
               attemptTimeout,
               System.nanoTime() + requestTimeout.toNanos,
               Some(ownAnswer),
+              // NOT_FOUND costs a cosigner the lead only if another one then answers the pinned
+              // key. Another key than the pin is reported and demoted at once (reportDissent).
+              lacksFrostKey,
             )(_.groupKey(req))
           }).map(_ => ())
       }
@@ -2382,6 +2425,8 @@ object FrostBackend {
       lastOwn: Option[(String, Exception)] = None,
       unreachable: Option[(String, StatusRuntimeException)] = None,
       other: Option[Exception] = None,
+      // Endpoint indices that said they lack the key, latest first: demoted only if the call is served.
+      lackedKeyAt: List[Int] = Nil,
   )
 
   /** An answer the driver checked and refused to use (see `withCheckedFailover`): `code` names it

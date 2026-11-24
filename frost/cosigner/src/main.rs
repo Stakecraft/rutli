@@ -949,6 +949,7 @@ async fn main() -> Result<()> {
         Err(e) => tracing::warn!(error = %e, "could not check for unrefreshed imported keys"),
     }
     let mut node = Node::new(identifier, cfg.max_signers(), cfg.threshold, keystore)
+        .with_liveness(cfg.liveness())
         .with_require_epoch_match(cfg.signing_policy.require_epoch_match);
     if !cfg.signing_policy.require_epoch_match {
         tracing::info!(
@@ -1233,11 +1234,10 @@ async fn main() -> Result<()> {
             // node's certificate cannot answer at peer 2's endpoint; and, pinned, cosigner2's key,
             // so a certificate minted under the CA or kept from a replaced node cannot either.
             let dial = tls.as_ref().map(|t| t.peer_dial(p)).transpose()?;
-            peers.push(Arc::new(GrpcPeer::connect_lazy(
-                ident(p.identifier)?,
-                &p.endpoint,
-                dial,
-            )?));
+            peers.push(Arc::new(
+                GrpcPeer::connect_lazy(ident(p.identifier)?, &p.endpoint, dial)?
+                    .with_liveness(cfg.liveness()),
+            ));
         }
     }
     peers.sort_by_key(|p| identifier_index(p.identifier()));
@@ -1674,12 +1674,15 @@ fn offline_ceremony_node(cfg: &Config) -> Result<Arc<Node>> {
         .map(|_| offline_sealer(cfg))
         .transpose()?;
     let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), sealer)?;
-    let node = Arc::new(Node::new(
-        ident(cfg.identifier)?,
-        cfg.max_signers(),
-        cfg.threshold,
-        keystore,
-    ));
+    let node = Arc::new(
+        Node::new(
+            ident(cfg.identifier)?,
+            cfg.max_signers(),
+            cfg.threshold,
+            keystore,
+        )
+        .with_liveness(cfg.liveness()),
+    );
     let tls = cfg
         .tls
         .as_ref()
@@ -1688,11 +1691,10 @@ fn offline_ceremony_node(cfg: &Config) -> Result<Arc<Node>> {
     let mut mesh: Vec<Arc<dyn PeerApi>> = Vec::new();
     for p in cfg.peers.iter().filter(|p| p.identifier != cfg.identifier) {
         let dial = tls.as_ref().map(|t| t.peer_dial(p)).transpose()?;
-        mesh.push(Arc::new(GrpcPeer::connect_lazy(
-            ident(p.identifier)?,
-            &p.endpoint,
-            dial,
-        )?));
+        mesh.push(Arc::new(
+            GrpcPeer::connect_lazy(ident(p.identifier)?, &p.endpoint, dial)?
+                .with_liveness(cfg.liveness()),
+        ));
     }
     node.set_mesh(mesh)?;
     Ok(node)

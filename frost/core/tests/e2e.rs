@@ -33,6 +33,30 @@ fn canton_digest(msg: &[u8]) -> Vec<u8> {
     out
 }
 
+/// What participant `id` receives of a broadcast round: everyone else's package.
+fn others_than<V: Clone>(
+    broadcast: &BTreeMap<Identifier, V>,
+    id: Identifier,
+) -> BTreeMap<Identifier, V> {
+    broadcast
+        .iter()
+        .filter(|(&k, _)| k != id)
+        .map(|(&k, v)| (k, v.clone()))
+        .collect()
+}
+
+/// What participant `id` receives of the point-to-point round: each other's package addressed to it.
+fn inbox_of<V: Clone>(
+    outbox: &BTreeMap<Identifier, BTreeMap<Identifier, V>>,
+    id: Identifier,
+) -> BTreeMap<Identifier, V> {
+    outbox
+        .iter()
+        .filter(|(&from, _)| from != id)
+        .map(|(&from, o)| (from, o.get(&id).unwrap().clone()))
+        .collect()
+}
+
 /// Run a full 2-of-3 DKG in-process; returns each cosigner (with its own temp nonce store).
 fn dkg_cluster(tmp: &tempfile::TempDir) -> Vec<Cosigner> {
     let ids: Vec<Identifier> = (1u16..=MAX_SIGNERS)
@@ -56,32 +80,26 @@ fn dkg_cluster(tmp: &tempfile::TempDir) -> Vec<Cosigner> {
         BTreeMap<Identifier, frost::keys::dkg::round2::Package>,
     > = BTreeMap::new();
     for (&id, p) in &mut participants {
-        let others: BTreeMap<_, _> = r1
-            .iter()
-            .filter(|(&k, _)| k != id)
-            .map(|(&k, v)| (k, v.clone()))
-            .collect();
-        r2_outbox.insert(id, p.part2(&others).unwrap());
+        r2_outbox.insert(id, p.part2(&others_than(&r1, id)).unwrap());
     }
 
     // Part 3 — deliver the point-to-point round-2 packages and finalize.
     let mut cosigners = Vec::new();
     for (&id, p) in &mut participants {
-        let others_r1: BTreeMap<_, _> = r1
-            .iter()
-            .filter(|(&k, _)| k != id)
-            .map(|(&k, v)| (k, v.clone()))
-            .collect();
-        let inbox: BTreeMap<_, _> = r2_outbox
-            .iter()
-            .filter(|(&from, _)| from != id)
-            .map(|(&from, outbox)| (from, outbox.get(&id).unwrap().clone()))
-            .collect();
-        let (key_package, pubkey_package) = p.part3(&others_r1, &inbox).unwrap();
+        let (key_package, pubkey_package) = p
+            .part3(&others_than(&r1, id), &inbox_of(&r2_outbox, id))
+            .unwrap();
         let store = NonceStore::open(tmp.path().join(format!("cosigner-{id:?}"))).unwrap();
         cosigners.push(Cosigner::new(key_package, pubkey_package, store));
     }
     cosigners
+}
+
+/// The DKG group key as the cosigners hold it, and the independent strict verifier built from it.
+fn group_key_and_dalek_verifier(cosigners: &[Cosigner]) -> ([u8; 32], ed25519_dalek::VerifyingKey) {
+    let group_key = group_verifying_key_bytes(cosigners[0].public_key_package()).unwrap();
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
+    (group_key, vk)
 }
 
 /// Leader-side happy path with the given subset of cosigners.
@@ -122,8 +140,7 @@ fn dkg_then_threshold_sign_verifies_under_strict_dalek() {
     let sig = sign_with(&[&cosigners[0], &cosigners[2]], "session-aaaa", &message).unwrap();
 
     // Independent strict verification: ed25519-dalek against the DKG group key.
-    let group_key = group_verifying_key_bytes(cosigners[0].public_key_package()).unwrap();
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
+    let (group_key, vk) = group_key_and_dalek_verifier(&cosigners);
     let dalek_sig = ed25519_dalek::Signature::from_bytes(&sig);
     vk.verify_strict(&message, &dalek_sig)
         .expect("FROST output must be a standard RFC 8032 Ed25519 signature");
@@ -142,8 +159,7 @@ fn different_quorums_produce_valid_sigs_under_same_group_key() {
     let tmp = tempfile::tempdir().unwrap();
     let cosigners = dkg_cluster(&tmp);
     let message = canton_digest(b"OwnerToKeyMapping");
-    let group_key = group_verifying_key_bytes(cosigners[0].public_key_package()).unwrap();
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
+    let (_, vk) = group_key_and_dalek_verifier(&cosigners);
 
     for (i, quorum) in [
         vec![&cosigners[0], &cosigners[1]],
@@ -196,8 +212,7 @@ fn below_threshold_aggregation_fails() {
         Ok(sig) => {
             // If FROST permitted single-participant flow structurally, the signature must NOT
             // verify under the group key.
-            let group_key = group_verifying_key_bytes(cosigners[0].public_key_package()).unwrap();
-            let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
+            let (_, vk) = group_key_and_dalek_verifier(&cosigners);
             assert!(
                 vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig))
                     .is_err(),
@@ -353,12 +368,7 @@ fn refresh_keeps_group_key_and_invalidates_pre_refresh_shares() {
     let mut r2out: BTreeMap<Identifier, BTreeMap<Identifier, frost::keys::dkg::round2::Package>> =
         BTreeMap::new();
     for (&id, p) in &mut parts {
-        let others: BTreeMap<_, _> = r1
-            .iter()
-            .filter(|(&k, _)| k != id)
-            .map(|(&k, v)| (k, v.clone()))
-            .collect();
-        r2out.insert(id, p.part2(&others).unwrap());
+        r2out.insert(id, p.part2(&others_than(&r1, id)).unwrap());
     }
     let mut refreshed: Vec<(
         Identifier,
@@ -367,18 +377,13 @@ fn refresh_keeps_group_key_and_invalidates_pre_refresh_shares() {
     )> = Vec::new();
     for (&id, p) in &mut parts {
         let (_, old_kp, old_pkp_i) = dealt.iter().find(|(i, _, _)| *i == id).unwrap();
-        let others: BTreeMap<_, _> = r1
-            .iter()
-            .filter(|(&k, _)| k != id)
-            .map(|(&k, v)| (k, v.clone()))
-            .collect();
-        let inbox: BTreeMap<_, _> = r2out
-            .iter()
-            .filter(|(&from, _)| from != id)
-            .map(|(&from, o)| (from, o.get(&id).unwrap().clone()))
-            .collect();
         let (nkp, npkp) = p
-            .part3(&others, &inbox, old_pkp_i.clone(), old_kp.clone())
+            .part3(
+                &others_than(&r1, id),
+                &inbox_of(&r2out, id),
+                old_pkp_i.clone(),
+                old_kp.clone(),
+            )
             .unwrap();
         refreshed.push((id, nkp, npkp));
     }
@@ -434,8 +439,7 @@ fn signature_is_over_exactly_the_34_byte_payload() {
     let sig = sign_with(&[&cosigners[1], &cosigners[2]], "session-exact", &message).unwrap();
     assert_eq!(sig.len(), 64);
 
-    let group_key = group_verifying_key_bytes(cosigners[0].public_key_package()).unwrap();
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
+    let (_, vk) = group_key_and_dalek_verifier(&cosigners);
 
     // Tampered message must not verify — confirms the signature binds the exact payload bytes.
     let mut tampered = message.clone();

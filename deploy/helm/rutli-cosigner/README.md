@@ -160,6 +160,7 @@ without OnDelete.
 | `hostedKeys.enabled` | `false` | Cluster-hosted RSA/ECIES/AES keys — replicated whole keys, not threshold shares |
 | `hostedKeys.deleteAllowlist` | `[]` | Delete role (audit M2): client CNs whose signed delete intents tombstone hosted keys. Empty = no deletes; never a cosigner CN. `deleteAcl`, `deleteApprovalThreshold` (≥ 1 in production), `deleteGraceSecs` (604800) — `docs/hosted-keys.md`, Delete |
 | `keyfile` | `{}` | Key-file format (audit M4), rendered verbatim as `keyfile`: `cluster_uuid`, `write_version` (1 or 2), `accept_v1` — `docs/disaster-recovery.md` §3h |
+| `peerDeadlines` | `{}` | Peer round deadlines of a signing session, rendered as `peer_deadlines` when set: `signRound1Ms` (500–5000, default 2000), `signRound2Ms` (1000–9000, default 5000). Empty = the defaults, which are recommended; any in-bounds value is accepted under the production profile. A value out of bounds fails `helm template`. Set it only after every cosigner runs a release that knows the section: an older node refuses the unknown key at startup — `docs/architecture.md` |
 | `maintenanceNodes` | `[]` | perNode only: node ids whose cosigner container runs no daemon (`sleep infinity`, never Ready), for `restore`, `keyfile`, `hosted-undelete` and the ceremony tools, which take the instance lock |
 | `backup.enabled` | `false` | perNode only: per-pod backup sidecar to a per-node destination (below) |
 

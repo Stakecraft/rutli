@@ -223,9 +223,13 @@ pub const PEER_CALLS: &[&str] = &[
     "local_share",
 ];
 /// Upper bounds (seconds) of `rutli_peer_call_duration_seconds`: 0.33, 0.67, 1.67 are a third of
-/// the 1 s abort, 2 s round-1 and 5 s round-2 deadlines; 1, 2, 3, 5 the deadlines themselves.
+/// the 1 s abort, 2 s round-1 and 5 s round-2 deadlines; 1, 2, 3, 5 the deadlines themselves, and
+/// 1.05, 2.1, 3.15, 5.25 sit just above them, so a call that timed out at a default deadline reads
+/// as about that deadline instead of as the next bucket's top. 4, 6, 7, 8, 9 and 9.5 cover the
+/// configurable round deadlines (round 1 up to 5 s, round 2 up to 9 s) to within a second.
 pub const PEER_CALL_DURATION_BUCKETS: &[f64] = &[
-    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.33, 0.5, 0.67, 1.0, 1.67, 2.0, 3.0, 5.0, 10.0,
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.33, 0.5, 0.67, 1.0, 1.05, 1.67, 2.0, 2.1, 3.0, 3.15,
+    4.0, 5.0, 5.25, 6.0, 7.0, 8.0, 9.0, 9.5, 10.0,
 ];
 /// Histogram, label `result` (ok|error): one sign round 1 on this node as a member, for a remote
 /// leader or its own (`Node::sign_round1_as`): the keystore gate, caps, epoch check, intent
