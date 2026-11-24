@@ -433,8 +433,12 @@ impl PeerApi for LocalPeer {
         key_id: &str,
         kind: &'static str,
     ) -> Result<()> {
+        // Reads the key store for a hosted-key fence: through `Node::blocking`, as over gRPC.
+        let (ceremony_id, key_id, asker) =
+            (ceremony_id.to_owned(), key_id.to_owned(), self.asker());
         self.node
-            .ceremony_fence_from(ceremony_id, key_id, kind, self.asker().as_deref())
+            .blocking(move |n| n.ceremony_fence_from(&ceremony_id, &key_id, kind, asker.as_deref()))
+            .await
     }
     async fn ceremony_release(&self, ceremony_id: &str, key_id: &str) -> Result<()> {
         self.node

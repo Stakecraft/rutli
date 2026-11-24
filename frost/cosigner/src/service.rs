@@ -1531,9 +1531,15 @@ impl Peer for PeerSvc {
                     "a ceremony intent is only valid on a dkg, refresh or genkey fence, not {kind}"
                 )))
             }
+            // A delete's fence reads the key store (whether a hosted record sits under the id, and
+            // that it is no FROST share): on a blocking thread, like every store access, so a hung
+            // volume parks that thread and not a runtime worker.
             _ => self
                 .node
-                .ceremony_fence_from(&r.ceremony_id, &r.key_id, kind, asker.as_deref())
+                .blocking(move |n| {
+                    n.ceremony_fence_from(&r.ceremony_id, &r.key_id, kind, asker.as_deref())
+                })
+                .await
                 .map_err(Status::from)?,
         }
         Ok(Response::new(pb::CeremonyFenceReply {}))
