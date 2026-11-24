@@ -3,4 +3,4 @@
   the constants, for a cluster whose burst latency leaves less than a 3x margin. A node rejects the
   section until it runs this release, so set it only after every node is upgraded. The
   `rutli_peer_call_duration_seconds` histogram gains buckets at 1.05, 2.1, 3.15 and 5.25 s, just above
-  the deadlines.
+  the default deadlines, and at 4, 6, 7, 8, 9 and 9.5 s for configured ones.

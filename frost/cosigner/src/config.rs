@@ -172,7 +172,7 @@ impl PeerDeadlinesConfig {
     }
 }
 
-/// Both rounds of one attempt must fit in the sign budget. The bounds keep the sum at 17 s at most
+/// Both rounds of one attempt must fit in the sign budget. The bounds keep the sum at 14 s at most
 /// today; this guards a later raise of them.
 fn check_round_sum(r1: u64, r2: u64, budget_ms: u64) -> crate::Result<()> {
     if r1 + r2 >= budget_ms {

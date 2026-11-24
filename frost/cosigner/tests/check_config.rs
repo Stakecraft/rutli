@@ -116,14 +116,13 @@ fn check_config_rejects_peer_deadlines_outside_their_bounds() {
     let (code, out) = run(tmp.path(), &ok, &["check-config"]);
     assert_eq!(code, 0, "{out}");
 
-    // Each bound; and a pair whose sum would pass the 20 s sign budget (round 2 alone is already
-    // past its bound, so the bound names it).
+    // Each bound, just outside it. (The sum check cannot fire within the bounds: 5 s + 9 s is
+    // under the 20 s sign budget; it is unit-tested in config.rs.)
     for (r1, r2, key) in [
         (499, 5000, "sign_round1_ms"),
         (5001, 5000, "sign_round1_ms"),
         (2000, 999, "sign_round2_ms"),
-        (2000, 12001, "sign_round2_ms"),
-        (5000, 15000, "sign_round2_ms"),
+        (2000, 9001, "sign_round2_ms"),
     ] {
         let mut bad = enforced();
         bad["peer_deadlines"] = serde_json::json!({"sign_round1_ms": r1, "sign_round2_ms": r2});
