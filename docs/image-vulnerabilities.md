@@ -17,8 +17,9 @@ scan on 2026-11-24 of the 0.4.0 image, which has the same base as `frost/Dockerf
 
 ## Where it comes from
 
-All of it is in the Debian packages of the runtime base (`debian:stable-slim`, trixie); the scan finds
-none in the Rust binary. The TLS stack is compiled into the binary (rustls, aws-lc-rs), so OpenSSL is
+All of it is in the Debian packages of the runtime base (`debian:stable-slim`, trixie). The scan reads
+the OS package database only: the image carries no Rust dependency metadata, so the crates in the
+binary are covered by `cargo deny` and `cargo audit` in CI, not by this table. The TLS stack is compiled into the binary (rustls, aws-lc-rs), so OpenSSL is
 not a dependency of the daemon; it is in the image because the slim base ships it.
 
 - **Has a fix in Debian's security repository** (libc 2.41-12+deb13u5, zlib 1.3.1-1+deb13u1): applied

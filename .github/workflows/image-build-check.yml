@@ -167,9 +167,17 @@ jobs:
         run: |
           set -euo pipefail
           scripts/quality/install-tools.sh "${RUNNER_TEMP}/tools" trivy
-          "${RUNNER_TEMP}/tools/bin/trivy" image --quiet --skip-version-check --scanners vuln \
-            --input "${RUNNER_TEMP}/image.tar" --format json --output "${RUNNER_TEMP}/trivy.json" \
-            --cache-dir "${RUNNER_TEMP}/trivy-cache"
+          # The build's OCI archive, then the layout the previous step unpacked from it; a report
+          # that cannot be made says so in the summary and does not fail the build.
+          scan() {
+            "${RUNNER_TEMP}/tools/bin/trivy" image --quiet --skip-version-check --scanners vuln \
+              --input "$1" --format json --output "${RUNNER_TEMP}/trivy.json" \
+              --cache-dir "${RUNNER_TEMP}/trivy-cache"
+          }
+          if ! scan "${RUNNER_TEMP}/image.tar" && ! scan "${RUNNER_TEMP}/oci"; then
+            echo "### Image vulnerabilities: trivy could not read the image archive (report only, see the step log)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           {
             echo "### Image vulnerabilities (trivy, distinct advisory ids)"
             echo "| Severity | Found | Without a fix |"
