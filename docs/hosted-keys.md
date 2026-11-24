@@ -224,9 +224,9 @@ skips what it cannot parse, `KeyInfo` says `exists: false`) — the shape that e
      hosted key, an answer that says "I do not have it" (UNIMPLEMENTED or NOT_FOUND from
      `EcdhDerive`, NOT_FOUND from `PublicKey`, `exists: false` from `KeyInfo`) sends the request to
      the next cosigner, and that node is not made the preferred leader. The audit entry carries
-     `ec-failover=<from>→<to> reason=…`. For a key the driver knows to be RSA or AES the same
-     answer sends the request to the next cosigner too, noted as `failover=<from>→<to>
-     reason=NOT_FOUND`. The driver re-asks `Capabilities` after 60 s while any node was silent, so a
+     `ec-failover=<from>→<to> reason=…` for an ECIES decrypt. For an RSA or AES key, and for a
+     key whose type the driver has not seen yet, the same answer sends the request to the next
+     cosigner too, noted as `failover=<from>→<to> reason=NOT_FOUND`. The driver re-asks `Capabilities` after 60 s while any node was silent, so a
      returning old node also stops new EC keys being routed to the cluster.
    - The same goes for a cosigner that holds the key id but **wrong EC material** (a stale or
      corrupt replica): its `EcdhDerive` succeeds with a well-formed but wrong shared secret, and the

@@ -845,7 +845,8 @@ class FrostBackend(
     * decrypt as an ECIES failure even when another cosigner was unreachable, because the
     * ciphertext is the counterparty's and must not be able to buy retries.
     *
-    * `staleAnswer` names a stale *answer* (a `Right`) for the WARN and the `ec-failover` note: its
+    * `staleAnswer` names a stale *answer* (a `Right`) for the WARN and the `ec-failover` note
+    * (`failover` when the key's type is not known yet, `knownEc = false`): its
     * reason code and what it may mean. A stale status is named by its gRPC code. Each endpoint is
     * asked at most once, so one call costs at most n cosigner round trips. */
   private def withEcFailover[A](
@@ -853,6 +854,9 @@ class FrostBackend(
       notes: AuditNotes,
       stale: Either[StatusRuntimeException, A] => Boolean,
       staleAnswer: A => (String, String),
+      // False for a call on a key whose type the driver does not know yet (PublicKey, KeyInfo): the
+      // key may turn out to be RSA or AES, so the hop is noted as a plain `failover=`.
+      knownEc: Boolean,
   )(op: SignerGrpc.SignerBlockingStub => A): A = {
     val n = channels.size
     val start = startIndex()
@@ -906,8 +910,10 @@ class FrostBackend(
           val first = firstStale.getOrElse(o)
           next match {
             case Some(to) =>
-              logger.warn(s"FROST: $what via ${endpoints(i)} answered $reason for an EC hosted key — $meaning; asking $to")
-              notes.add(s"ec-failover=${endpoints(i)}→$to reason=$reason")
+              val key = if (knownEc) "an EC hosted key" else "a hosted key that may be EC"
+              val note = if (knownEc) "ec-failover" else "failover"
+              logger.warn(s"FROST: $what via ${endpoints(i)} answered $reason for $key — $meaning; asking $to")
+              notes.add(s"$note=${endpoints(i)}→$to reason=$reason")
               attempt(k + 1, Some(first), stales + 1, unreachable, sick)
             case None => exhausted(Some(first), stales + 1, unreachable, sick)
           }
@@ -929,9 +935,10 @@ class FrostBackend(
       what: String,
       stale: Either[StatusRuntimeException, A] => Boolean,
       staleAnswer: A => (String, String) = (_: A) => ("NOT_FOUND", MayBeOld),
+      knownEc: Boolean = false,
   )(op: SignerGrpc.SignerBlockingStub => A): Future[A] = {
     val notes = currentNotes.get
-    Future(blocking(withEcFailover(what, notes, stale, staleAnswer)(op)))
+    Future(blocking(withEcFailover(what, notes, stale, staleAnswer, knownEc)(op)))
   }
 
   /** [[clusterCall]] for a call on a hosted key the driver knows not to be EC (RSA decrypt,
@@ -1937,6 +1944,7 @@ class FrostBackend(
             case Right(opened) => opened.isLeft
           },
           _ => ("ECIES_AFTER_ECDH", "its shared secret did not open the ciphertext (wrong key material, or a forged blob)"),
+          knownEc = true,
         ) { stub =>
           val reply = stub.ecdhDerive(req)
           // The JVM cannot promise this is the only copy of Z: the protobuf ByteString holds one
