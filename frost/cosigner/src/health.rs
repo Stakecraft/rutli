@@ -480,6 +480,9 @@ pub async fn probe(health: &Arc<KeystoreHealth>) -> std::result::Result<(), Stri
 /// Each tick first samples the load gauges ([`sample_load_gauges`]): the signatures this node leads
 /// and, when started from inside the async runtime, that runtime's own metrics. From this thread
 /// they stay current while the runtime is saturated, which is when they are read.
+///
+/// The `rutli_runtime_*` gauges are sampled only if this is called from inside the Tokio runtime
+/// (it captures that handle's metrics at spawn); called from anywhere else, they are absent.
 pub fn spawn_monitor(node: Arc<Node>, interval: Duration) -> std::thread::JoinHandle<()> {
     let runtime = tokio::runtime::Handle::try_current()
         .ok()

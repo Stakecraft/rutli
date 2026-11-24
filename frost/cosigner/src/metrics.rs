@@ -889,7 +889,7 @@ pub fn describe() {
     describe_gauge!(
         RUNTIME_BUSY_SECONDS,
         Unit::Seconds,
-        "Seconds the async runtime's workers spent busy, all workers together (cumulative)"
+        "Seconds the async runtime's workers spent busy, all workers together (cumulative gauge: only grows, use rate())"
     );
     describe_gauge!(
         KEYSTORE_UNREADABLE,
@@ -1236,7 +1236,12 @@ mod tests {
             describe();
             prime();
             for (name, _) in HISTOGRAM_BUCKETS {
-                metrics::histogram!(*name, "result" => "ok").record(0.0002);
+                if *name == SIGN_JOURNAL_FSYNC_DURATION {
+                    // Recorded without labels in production.
+                    metrics::histogram!(*name).record(0.0002);
+                } else {
+                    metrics::histogram!(*name, "result" => "ok").record(0.0002);
+                }
             }
             refresh_runtime_gauges(&runtime.metrics());
         });
@@ -1261,7 +1266,11 @@ mod tests {
             );
             assert!(out.contains(&format!("# HELP {name} ")), "{name}:\n{out}");
             for le in *buckets {
-                let line = format!(r#"{name}_bucket{{result="ok",le="{le}"}} "#);
+                let line = if *name == SIGN_JOURNAL_FSYNC_DURATION {
+                    format!(r#"{name}_bucket{{le="{le}"}} "#)
+                } else {
+                    format!(r#"{name}_bucket{{result="ok",le="{le}"}} "#)
+                };
                 assert!(out.contains(&line), "missing {line:?}:\n{out}");
             }
         }

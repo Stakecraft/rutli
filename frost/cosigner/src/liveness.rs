@@ -175,7 +175,8 @@ pub struct LeadGuard {
 
 impl Drop for LeadGuard {
     fn drop(&mut self) {
-        let left = self.load.leading.fetch_sub(1, Ordering::AcqRel) - 1;
+        self.load.leading.fetch_sub(1, Ordering::AcqRel);
+        let left = self.load.leading.load(Ordering::Acquire);
         metrics::gauge!(crate::metrics::SIGNS_IN_FLIGHT).set(left as f64);
     }
 }
@@ -194,7 +195,8 @@ impl SignLoad {
     /// racing cannot leave it wrong for long).
     pub fn lead(self: &Arc<Self>) -> LeadGuard {
         let count = self.leading.fetch_add(1, Ordering::AcqRel) + 1;
-        metrics::gauge!(crate::metrics::SIGNS_IN_FLIGHT).set(count as f64);
+        let now = self.leading.load(Ordering::Acquire);
+        metrics::gauge!(crate::metrics::SIGNS_IN_FLIGHT).set(now as f64);
         LeadGuard {
             load: self.clone(),
             count,

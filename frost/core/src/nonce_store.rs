@@ -75,7 +75,10 @@ impl NonceStore {
         let started = Instant::now();
         let result = self.burn(session_id);
         if let Some(observe) = self.observer {
-            observe(started.elapsed(), result.is_ok());
+            // A metric must never change a burn's outcome (the release profile unwinds).
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                observe(started.elapsed(), result.is_ok())
+            }));
         }
         result
     }
@@ -272,21 +275,37 @@ mod tests {
     /// The observer hears every consume with its outcome: a burn and a refused reuse.
     #[test]
     fn the_observer_hears_each_consume_and_its_outcome() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static OK: AtomicUsize = AtomicUsize::new(0);
+        static ERR: AtomicUsize = AtomicUsize::new(0);
+        fn count(_took: std::time::Duration, ok: bool) {
+            let counter = if ok { &OK } else { &ERR };
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
         let tmp = tempfile::tempdir().unwrap();
-        let heard = |session: &str| {
-            let store = NonceStore::open(tmp.path())
-                .unwrap()
-                .with_observer(|took, ok| panic!("heard ok={ok} after {took:?}"));
-            let call = std::panic::catch_unwind(|| store.consume(session));
-            let said = call.expect_err("the observer was called");
-            said.downcast_ref::<String>().cloned().unwrap_or_default()
-        };
-        assert!(heard("s1").starts_with("heard ok=true"));
-        assert!(heard("s1").starts_with("heard ok=false"));
-        assert!(NonceStore::open(tmp.path())
+        let store = NonceStore::open(tmp.path()).unwrap().with_observer(count);
+        store.consume("s1").unwrap();
+        assert_eq!(
+            (OK.load(Ordering::SeqCst), ERR.load(Ordering::SeqCst)),
+            (1, 0)
+        );
+        assert!(matches!(store.consume("s1"), Err(CoreError::NonceReuse(_))));
+        assert_eq!(
+            (OK.load(Ordering::SeqCst), ERR.load(Ordering::SeqCst)),
+            (1, 1)
+        );
+    }
+
+    /// A panicking observer changes nothing: the burn still succeeds and the marker stands.
+    #[test]
+    fn a_panicking_observer_does_not_change_a_burns_outcome() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = NonceStore::open(tmp.path())
             .unwrap()
-            .is_consumed("s1")
-            .unwrap());
+            .with_observer(|_, _| panic!("the observer failed"));
+        store.consume("s2").unwrap();
+        assert!(store.is_consumed("s2").unwrap());
+        assert!(matches!(store.consume("s2"), Err(CoreError::NonceReuse(_))));
     }
 
     #[test]
