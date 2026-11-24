@@ -63,7 +63,7 @@ builds it, plus the generator.
 | `limit-rate` | 400 signatures on a key limited to 120 a minute | at least 120 and at most 180 succeed (each is charged on the two nodes that signed it), the rest are `RESOURCE_EXHAUSTED` |
 | `limit-ceremony` | 80 DKGs at once (a node holds 64 ceremony sessions), then 10 DKGs of one key at once, each client retrying `UNAVAILABLE` and `ABORTED` up to six times with jittered backoff (`--retry-aborted 6`), two refreshes back to back with the refresher's certificate (as a refresh job runs them; the load-test configs list it in `refresh_allowlist`) | the 80: refusals only with the codes a busy or refusing node gives; the contested key: every client ends with the one group key or `ALREADY_EXISTS` pointing at it (the generator asks `GroupKey`), never two keys; a refresh leaves the group key unchanged |
 | `limit-decrypt` | 12 000 `EcdhDerive` on a key limited to 6 000 a minute | no more than the bucket and its refill succeed, the surplus is `RESOURCE_EXHAUSTED` |
-| `limit-sessions` | 1 500 signatures of one key asked of one leader at the same moment | refusals and timeouts are allowed, wrong answers are not; the nodes stay up |
+| `limit-sessions` | 1 500 signatures of one key asked of one leader within one second, over 30 connections (50 requests on each) | refusals and timeouts are allowed, wrong answers are not; the nodes stay up |
 | `recovery` | a short stream on both keys after all of the above | every request succeeds |
 
 Every scenario also fails if a cosigner process died and was started again during it (unless
