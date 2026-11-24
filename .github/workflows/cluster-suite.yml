@@ -56,19 +56,38 @@ jobs:
           docker build -f frost/Dockerfile.perf -t rutli-perf:local frost
 
       # The migration suite's ceremony runs on the previous release's cosigners (the upgrade suite
-      # comes after it), and a ceremony's dealer must be of the same release: built from that tag's
-      # sources with this tree's frost/Dockerfile.dealer.
+      # comes after it), and a ceremony's dealer must be of the same release. The expected commit is
+      # the one the chart's digest-pinned release image records (its OCI label
+      # org.opencontainers.image.revision, set when the release was published); the release tag must
+      # name that commit, and the dealer is built from the commit itself with this tree's
+      # frost/Dockerfile.dealer (older tags have none; it copies the context and builds rutli-dealer,
+      # nothing else, and is reviewed with every change). A tag that names another commit stops the job.
       - name: Build the previous release's dealer
         run: |
           set -euo pipefail
-          tag="$(sed -n 's/^  tag: "\([0-9][^@"]*\).*/\1/p' deploy/helm/rutli-cosigner/values.yaml | head -n 1)"
-          [ -n "$tag" ] || { echo "::error::no image tag in deploy/helm/rutli-cosigner/values.yaml"; exit 1; }
-          # v* tags are protected (only admins create them, docs/release-process.md); the commit the
-          # tag names is recorded here, next to the build.
-          commit="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/v${tag}^{}" | cut -f1)"
-          [ -n "$commit" ] || commit="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/v${tag}" | cut -f1)"
-          echo "previous release v${tag} = ${commit}" | tee -a "$GITHUB_STEP_SUMMARY"
-          docker build -f- -t "rutli-dealer:$tag" "https://github.com/${GITHUB_REPOSITORY}.git#v${tag}:frost" <frost/Dockerfile.dealer
+          values=deploy/helm/rutli-cosigner/values.yaml
+          repo="$(sed -n 's/^  repository: \(.*\)$/\1/p' "$values" | head -n 1)"
+          tag="$(sed -n 's/^  tag: "\([0-9][^@"]*\)@.*/\1/p' "$values" | head -n 1)"
+          digest="$(sed -n 's/^  tag: "[^@"]*@\(sha256:[0-9a-f]\{64\}\)".*/\1/p' "$values" | head -n 1)"
+          [ -n "$repo" ] && [ -n "$tag" ] && [ -n "$digest" ] || { echo "::error::no digest-pinned image in $values"; exit 1; }
+          # Every platform of the release index must record the same commit.
+          expected=""
+          for platform in linux/amd64 linux/arm64; do
+            docker pull -q --platform "$platform" "$repo@$digest" >/dev/null
+            rev="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$repo@$digest")"
+            [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::$repo@$digest ($platform) records no commit"; exit 1; }
+            [ -z "$expected" ] || [ "$rev" = "$expected" ] || { echo "::error::$repo@$digest: $platform built from $rev, not $expected"; exit 1; }
+            expected="$rev"
+          done
+          url="https://github.com/${GITHUB_REPOSITORY}.git"
+          commit="$(git ls-remote "$url" "refs/tags/v${tag}^{}" | cut -f1)"
+          [ -n "$commit" ] || commit="$(git ls-remote "$url" "refs/tags/v${tag}" | cut -f1)"
+          if [ "$commit" != "$expected" ]; then
+            echo "::error::tag v${tag} names ${commit:-nothing}, but the release image $repo@$digest was built from $expected"
+            exit 1
+          fi
+          echo "previous release v${tag} = ${expected} (the release image's commit and the tag agree)" | tee -a "$GITHUB_STEP_SUMMARY"
+          docker build -f- -t "rutli-dealer:$tag" "${url}#${expected}:frost" <frost/Dockerfile.dealer
           echo "DEALER_IMAGE=rutli-dealer:$tag" >>"$GITHUB_ENV"
 
       - name: Cluster
