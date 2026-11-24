@@ -189,6 +189,28 @@ decryptions in `limit-decrypt`, and the second refresh of a key within the inter
   outside the region.
 - **The build was a branch head, not a release.**
 
+## Memory
+
+A cosigner's resident memory follows the sign sessions it holds in flight. Peaks measured in the
+cluster suite (three nodes, 2-of-3, signing only, peak resident set as the kernel reports it):
+
+| Load | Peak resident set |
+|---|---|
+| idle, after start | 16 to 19 MB |
+| 1 500 signatures in flight through one leader (`limit-sessions`) | 80 to 92 MB |
+| ramp past the throughput knee, 260 to 300 signatures a second on two keys, thousands in flight | 122 to 167 MB |
+
+That comes to about 50 KB per session in flight at moderate concurrency, and up to 75 KB at the
+overloaded peak. The memory stays near its peak afterwards: the process keeps what it allocated
+and does not grow further.
+
+The chart's default limit follows one rule: the working set is 1.5 times the highest one
+measured (167 MB × 1.5, rounded up to 256 Mi), plus the memory-backed `/tmp` (64 Mi), so
+`resources.limits.memory: 320Mi`. The pending-session caps bound one key's sessions on a node
+(1 024), but not the number of busy keys. A cluster that keeps more sessions in flight (more busy
+keys, more participants) needs about 75 KB × the extra sessions × 1.5 on top.
+`RutliCosignerMemoryNearLimit` warns at 80 % of the limit.
+
 ## Benchmarks worth publishing next
 
 Add these when you want grant/audit-grade tables (script + freeze a row in this doc per run). The
