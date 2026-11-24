@@ -101,7 +101,8 @@ fn a_marker_that_cannot_be_removed_fails_the_pass() {
     set_mode(&dir, 0o700);
     // The refusal of the removal itself (the directory cannot be written to): reading and
     // syncing the sentinel and the directory work in a read-only directory, so any earlier step
-    // that failed would not be this error. Run with the removal skipped, the pass succeeds.
+    // that failed would not be this error. Run with the removal skipped, the pass succeeds. (That a
+    // complete sentinel is never rewritten is `a_complete_sentinel_is_kept_as_it_is` in the crate.)
     assert!(
         matches!(&verdict, Err(CoreError::Io(e)) if e.kind() == std::io::ErrorKind::PermissionDenied),
         "got {verdict:?}"
