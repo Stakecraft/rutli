@@ -277,7 +277,7 @@ as the Compose end-to-end test, not a second copy:
      directory in memory, a new pod every run;
    - the NetworkPolicy holds only where the network plugin enforces policies, and other policies
      in the namespace add to it. Before anything is copied in, the pod tries to reach cosigner 1,
-     the API service, its nameserver, its own node and an address outside the cluster, and to
+     the API service, its nameserver and an address outside the cluster, and to
      resolve a name through its resolver; only a timeout or no answer on every one counts as
      isolated, and anything reachable fails the suite. The kind
      job passes `--allow-unisolated-dealer`: kind's default plugin enforces no policies, and its

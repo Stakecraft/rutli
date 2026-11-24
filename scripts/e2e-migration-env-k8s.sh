@@ -199,22 +199,21 @@ YAML
   # throwaway cluster whose network plugin enforces no policies, with the public test key only).
   # Policies add up, so another one in the namespace could open some destinations and not others:
   # targets of different kinds, so that one with a policy of its own cannot pass for isolation.
-  # Cosigner 1's pod (gRPC), the Kubernetes API service, the pod's own nameserver (TCP), the dealer's
-  # own node (the kubelet: policies may exempt the local node) and an address outside the cluster;
-  # then a DNS lookup through the pod's resolver (UDP first). Inside the pod a connection exits 10, a
+  # Cosigner 1's pod (gRPC), the Kubernetes API service, the pod's own nameserver (TCP) and an
+  # address outside the cluster; then a DNS lookup through the pod's resolver (UDP first). Not the
+  # pod's own node: network plugins may exempt it from policies, and a conforming cluster would fail.
+  # On an IPv6-only cluster set E2E_DEALER_PROBE_EXTERNAL (IP/port, bare IPv6) or none. Inside the pod a connection exits 10, a
   # refusal 11, a timeout 124; any other exit is kubectl's or a missing tool's, and stops the run.
-  local ip api ns node target rc reachable="" targets=() external="${E2E_DEALER_PROBE_EXTERNAL:-1.1.1.1/443}"
+  local ip api ns target rc reachable="" targets=() external="${E2E_DEALER_PROBE_EXTERNAL:-1.1.1.1/443}"
   ip="$(_k get pod "$(_pod 1)" -o jsonpath='{.status.podIP}')"
   api="$(kubectl -n default get service kubernetes -o jsonpath='{.spec.clusterIP}')"
-  node="$(_k get pod "$DEALER_POD" -o jsonpath='{.status.hostIP}')"
   ns="$(_k exec "$DEALER_POD" -- sed -n 's/^nameserver[[:space:]]*//p' /etc/resolv.conf | head -n 1)"
   [[ "$ip" =~ ^[0-9a-fA-F.:]+$ ]] || fail "no pod IP for cosigner 1 to probe the dealer's isolation with"
   [[ "$api" =~ ^[0-9a-fA-F.:]+$ ]] || fail "no API service IP to probe the dealer's isolation with"
-  [[ "$node" =~ ^[0-9a-fA-F.:]+$ ]] || fail "no node IP for the dealer pod to probe its isolation with"
   [[ "$ns" =~ ^[0-9a-fA-F.:]+$ ]] || fail "no nameserver in the dealer pod's resolv.conf to probe its isolation with"
-  [[ "$external" =~ ^([0-9.]+|\[[0-9a-fA-F:]+\])/[0-9]+$ || "$external" = none ]] \
+  [[ "$external" =~ ^[0-9a-fA-F.:]+/[0-9]+$ || "$external" = none ]] \
     || fail "E2E_DEALER_PROBE_EXTERNAL must be IP/port or none, not '$external' (a name would need the DNS the pod must not have)"
-  targets=("$ip/9101" "$api/443" "$ns/53" "$node/10250")
+  targets=("$ip/9101" "$api/443" "$ns/53")
   [ "$external" = none ] || targets+=("$external")
   for target in "${targets[@]}"; do
     rc=0
@@ -303,21 +302,25 @@ _dealer_in_pod() {
 }
 
 # Delete the dealer pod and wait; its deny-all NetworkPolicy goes only once the pod is gone, never
-# while it might still hold key material. Returns non-zero if the pod is still there.
+# while it might still hold key material. Returns 1 if the pod may still be there, 2 if only the
+# NetworkPolicy could not be deleted; the caller decides what that means (Step 8 or the cleanup).
 _dealer_down() {
   _kq delete pod "$DEALER_POD" --wait=true --timeout=120s --ignore-not-found >/dev/null 2>&1 || true
   # Gone only when the API says so: an error of `get` keeps the policy.
   local left
   left="$(_kq get pod "$DEALER_POD" --ignore-not-found -o name 2>/dev/null)" || return 1
   [ -z "$left" ] || return 1
-  _kq delete networkpolicy "$DEALER_POD" --ignore-not-found >/dev/null 2>&1 || {
-    echo "WARNING: the dealer's NetworkPolicy $DEALER_POD could not be deleted" >&2
-    CLEANUP_FAILED="$CLEANUP_FAILED dealer-networkpolicy"
-  }
+  _kq delete networkpolicy "$DEALER_POD" --ignore-not-found >/dev/null 2>&1 || return 2
 }
 
 env_destroy_dealer() { # Step 8: the dealer's "host" and its memory-backed work dir go with the pod
-  _dealer_down || fail "the dealer pod is still there"
+  local rc=0
+  _dealer_down || rc=$?
+  case "$rc" in
+    0) ;;
+    2) echo "WARNING: the dealer's NetworkPolicy could not be deleted yet; the cleanup tries again" >&2 ;;
+    *) fail "the dealer pod is still there" ;;
+  esac
 }
 
 # --- no Canton on the cluster ----------------------------------------------------------------------
@@ -345,10 +348,19 @@ env_cleanup() {
       CLEANUP_FAILED="$CLEANUP_FAILED local-work-dir"
     fi
   fi
-  _dealer_down || {
-    echo "WARNING: the dealer pod $DEALER_POD is still there (its NetworkPolicy kept); delete it by hand" >&2
-    CLEANUP_FAILED="$CLEANUP_FAILED dealer-pod"
-  }
+  local down=0
+  _dealer_down || down=$?
+  case "$down" in
+    0) ;;
+    2)
+      echo "WARNING: the dealer's NetworkPolicy $DEALER_POD could not be deleted" >&2
+      CLEANUP_FAILED="$CLEANUP_FAILED dealer-networkpolicy"
+      ;;
+    *)
+      echo "WARNING: the dealer pod $DEALER_POD is still there (its NetworkPolicy kept); delete it by hand" >&2
+      CLEANUP_FAILED="$CLEANUP_FAILED dealer-pod"
+      ;;
+  esac
   # A ceremony that failed before every node installed its share leaves a sealed one-time recipient
   # secret on those nodes: abort-import removes it (never an installed share without its flag).
   if [ "$rc" -ne 0 ] && [ -n "${KEY_ID:-}" ] && [ -n "${CEREMONY:-}" ]; then

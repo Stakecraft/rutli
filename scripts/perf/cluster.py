@@ -286,6 +286,55 @@ class Suite(base.Runner):
         result_path = os.path.join(a.work, f"migration-{prefix.rstrip('-')}.json")
         stage = {}
 
+        # A SIGTERM while the ceremony is being stopped or cleaned up is held until that is done.
+        deferred_term, held_term = [], {}
+
+        def hold_term():
+            if "previous" not in held_term:
+                held_term["previous"] = signal.signal(signal.SIGTERM, lambda signum, _f: deferred_term.append(signum))
+
+        def fallback_cleanup():
+            try:
+                self.cluster.kubectl("delete", "pod", dealer, "--wait=true", "--timeout=120s",
+                                     "--ignore-not-found", timeout=180, check=False)
+                # Its deny-all NetworkPolicy goes only once the API confirms the pod is gone (an
+                # error of `get` keeps the policy).
+                left = self.cluster.kubectl("get", "pod", dealer, "--ignore-not-found", "-o",
+                                            "name", timeout=60, check=False)
+                gone = left.returncode == 0 and not left.stdout.strip()
+            except subprocess.TimeoutExpired:
+                gone = False
+            deleted = False
+            if gone:
+                # A hung API here must not hide the ceremony's result: the policy then stays.
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    deleted = self.cluster.kubectl("delete", "networkpolicy", dealer,
+                                                   "--ignore-not-found", timeout=60, check=False).returncode == 0
+                if not deleted:
+                    log("  WARNING: the dealer's NetworkPolicy could not be deleted. Delete it by hand.")
+            else:
+                log("  WARNING: the dealer pod may still be there; its NetworkPolicy is kept. Delete it by hand.")
+            # The ceremony's files in the cosigners' memory-backed /tmp (requests, bundles,
+            # founding backups), once more: the script's own cleanup may not have reached them.
+            for n in NODES:
+                try:
+                    gone_tmp = self.cluster.kubectl(
+                        "exec", self.cluster.pod(n), "-c", "cosigner", "--", "sh", "-c",
+                        "rm -rf /tmp/r[0-9].json /tmp/share-*.json /tmp/backup-founding-node*",
+                        timeout=60, check=False).returncode == 0
+                except subprocess.TimeoutExpired:
+                    gone_tmp = False
+                if not gone_tmp:
+                    log(f"  WARNING: the ceremony's files in {n}'s /tmp could not be removed. Remove them by hand.")
+            try:
+                gone_tmp = self.cluster.kubectl(
+                    "exec", "rutli-perf-loadgen", "--", "rm", "-f", "/tmp/e2e-operator.json",
+                    "/tmp/e2e-refresher.json", timeout=60, check=False).returncode == 0
+            except subprocess.TimeoutExpired:
+                gone_tmp = False
+            if not gone_tmp:
+                log("  WARNING: the client configs in the load generator's /tmp could not be removed.")
+
         def body():
             env = dict(os.environ, E2E_ENV="k8s", E2E_STAGES="ceremony", E2E_PREFIX=prefix,
                        RUTLI_NAMESPACE=self.cluster.ns, E2E_CERTS=os.path.join(a.work, "certs"),
@@ -303,6 +352,7 @@ class Suite(base.Runner):
                 stdout, stderr = proc.communicate(timeout=1800)
                 out = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
             except BaseException as e:
+                hold_term()
                 # A timeout, Ctrl-C or any other error here: stop the script before the pod goes.
                 # SIGTERM to its whole group first (a kubectl in flight stops too); bash then runs its
                 # EXIT trap, which shreds its work dir and removes the dealer pod. SIGKILL after 10 min.
@@ -322,41 +372,14 @@ class Suite(base.Runner):
             finally:
                 # Whatever happened to the script (a timeout kills it before its own cleanup), the
                 # dealer pod and what its memory holds go now, not at its 30-minute deadline. A
-                # second SIGTERM must not cut this short; the handler comes back after it.
-                previous_term = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                # SIGTERM meanwhile waits until this cleanup is done, then ends the run.
+                hold_term()
                 try:
-                    self.cluster.kubectl("delete", "pod", dealer, "--wait=true", "--timeout=120s",
-                                         "--ignore-not-found", timeout=180, check=False)
-                    # Its deny-all NetworkPolicy goes only once the API confirms the pod is gone (an
-                    # error of `get` keeps the policy).
-                    left = self.cluster.kubectl("get", "pod", dealer, "--ignore-not-found", "-o",
-                                                "name", timeout=60, check=False)
-                    gone = left.returncode == 0 and not left.stdout.strip()
-                except subprocess.TimeoutExpired:
-                    gone = False
-                deleted = False
-                if gone:
-                    # A hung API here must not hide the ceremony's result: the policy then stays.
-                    with contextlib.suppress(subprocess.TimeoutExpired):
-                        deleted = self.cluster.kubectl("delete", "networkpolicy", dealer,
-                                                       "--ignore-not-found", timeout=60, check=False).returncode == 0
-                    if not deleted:
-                        log("  WARNING: the dealer's NetworkPolicy could not be deleted. Delete it by hand.")
-                else:
-                    log("  WARNING: the dealer pod may still be there; its NetworkPolicy is kept. Delete it by hand.")
-                # The ceremony's files in the cosigners' memory-backed /tmp (requests, bundles,
-                # founding backups), once more: the script's own cleanup may not have reached them.
-                for n in NODES:
-                    try:
-                        gone_tmp = self.cluster.kubectl(
-                            "exec", self.cluster.pod(n), "-c", "cosigner", "--", "sh", "-c",
-                            "rm -rf /tmp/r[0-9].json /tmp/share-*.json /tmp/backup-founding-node*",
-                            timeout=60, check=False).returncode == 0
-                    except subprocess.TimeoutExpired:
-                        gone_tmp = False
-                    if not gone_tmp:
-                        log(f"  WARNING: the ceremony's files in {n}'s /tmp could not be removed. Remove them by hand.")
-                signal.signal(signal.SIGTERM, previous_term)
+                    fallback_cleanup()
+                finally:
+                    signal.signal(signal.SIGTERM, held_term["previous"])
+                if deferred_term:
+                    raise SystemExit(128 + deferred_term[0])
             stage.update({"seconds": round(time.time() - started, 1), "dealer_image": image,
                           "steps": [line[4:] for line in out.stdout.splitlines() if line.startswith("==> ")]})
             for line in out.stdout.splitlines():
@@ -1177,7 +1200,7 @@ def redact(text):
     """Text on its way into cluster.json and the log: long hex or base64 runs (key bytes, shares,
     sealed secrets) masked, should a failing ceremony ever print them."""
     text = re.sub(r"[0-9A-Fa-f]{32,}", "[hex]", text)
-    return re.sub(r"[A-Za-z0-9+/_-]{40,}={0,2}", "[base64]", text)
+    return re.sub(r"[A-Za-z0-9+/_-]{32,}={0,2}", "[base64]", text)
 
 
 def terminated(signum, _frame):
