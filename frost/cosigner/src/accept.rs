@@ -91,6 +91,17 @@ pub fn connection_limit(fd_soft_limit: u64) -> usize {
         .min(MAX_CONNECTIONS)
 }
 
+/// The backlog the kernel actually applies for a request of `requested`: on Linux the smaller of it
+/// and `net.core.somaxconn` (read from `/proc`); `None` where that cannot be read.
+pub fn effective_backlog(requested: u32) -> Option<u32> {
+    let cap: u32 = std::fs::read_to_string("/proc/sys/net/core/somaxconn")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(requested.min(cap))
+}
+
 /// Bind the gRPC listener on `addr` with a listen backlog of `backlog` (see [`LISTEN_BACKLOG`]),
 /// with `SO_REUSEADDR` set as `TcpListener::bind` sets it on Unix.
 pub fn bind(addr: std::net::SocketAddr, backlog: u32) -> io::Result<tokio::net::TcpListener> {
@@ -637,6 +648,14 @@ mod tests {
                 "after the handshake errors pass unchanged"
             );
         });
+    }
+
+    #[test]
+    fn the_effective_backlog_never_exceeds_what_was_asked() {
+        if let Some(b) = effective_backlog(LISTEN_BACKLOG) {
+            assert!((1..=LISTEN_BACKLOG).contains(&b));
+            assert_eq!(effective_backlog(1), Some(1));
+        }
     }
 
     #[test]

@@ -1432,12 +1432,23 @@ async fn main() -> Result<()> {
             tls.is_some(),
         ),
     );
-    tracing::info!(
-        %addr,
-        connection_limit,
-        listen_backlog = rutli_cosigner::accept::LISTEN_BACKLOG,
-        "gRPC serving Signer + Peer (the kernel caps the backlog at net.core.somaxconn)"
-    );
+    let backlog = rutli_cosigner::accept::LISTEN_BACKLOG;
+    match rutli_cosigner::accept::effective_backlog(backlog) {
+        Some(effective) if effective < backlog => tracing::warn!(
+            %addr,
+            connection_limit,
+            listen_backlog = effective,
+            requested = backlog,
+            "gRPC serving Signer + Peer; net.core.somaxconn caps the listen backlog below what was \
+             asked: a burst of new connections may wait for SYN retransmissions"
+        ),
+        effective => tracing::info!(
+            %addr,
+            connection_limit,
+            listen_backlog = effective.unwrap_or(backlog),
+            "gRPC serving Signer + Peer"
+        ),
+    }
 
     let mut server = tonic::transport::Server::builder()
         // A peer that vanished without closing (host down, a dropped NAT entry) is found by the
