@@ -238,7 +238,7 @@ jobs:
           gh release upload "$TAG" out/* --clobber
           # Only files of this workflow's own kind are removed; anything else on the release (notes,
           # reports, a binary for another platform) stays.
-          ours='^(rutli-(driver|dealer)-.+|SHA256SUMS|LICENSE|THIRD-PARTY-LICENSES-rust\.txt)(\.sigstore\.json)?$'
+          ours='^(rutli-driver-[0-9A-Za-z.-]+\.(jar|spdx\.json)|rutli-dealer-[0-9A-Za-z.-]+(-linux-(x86_64|aarch64)|\.spdx\.json)|SHA256SUMS|LICENSE|THIRD-PARTY-LICENSES-rust\.txt)(\.sigstore\.json)?$'
           gh release view "$TAG" --json assets --jq '.assets[].name' | while read -r name; do
             if [[ "$name" =~ $ours ]] && [ ! -e "out/${name}" ]; then
               echo "removing ${name}, which is not in this set"
