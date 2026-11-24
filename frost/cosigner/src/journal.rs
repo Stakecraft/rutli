@@ -1340,8 +1340,26 @@ mod tests {
             max_bytes: u64::MAX,
         };
         KeyJournal::open(&dir, now, two_days).unwrap();
-        // Three days old: gone. A day and a half: inside the two days. The newest is always kept.
+        // Three days old: gone. A day and a half: inside the two days. The newest is brand new.
         assert_eq!(names(&dir), [segment_name(3), segment_name(5)]);
+    }
+
+    #[test]
+    fn the_newest_segment_is_never_deleted_whatever_its_age_or_the_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = journal_with_entries(tmp.path(), &[T, T + 1, T + 2, T + 3, T + 4]);
+        let segs = split_segment(&dir, &[2, 2, 1]);
+        let now = T + 5;
+        // Every segment is far past the retention age, and the cap is smaller than any of them.
+        for (i, seg) in segs.iter().enumerate() {
+            set_age(seg, now, (10 - i as u64) * DAY_MS);
+        }
+        let strict = Retention {
+            days: 1,
+            max_bytes: 1,
+        };
+        KeyJournal::open(&dir, now, strict).unwrap();
+        assert_eq!(names(&dir), [segment_name(5)]);
     }
 
     #[test]
@@ -1412,6 +1430,13 @@ mod tests {
         let _restore = RestoreMode(root.clone());
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).unwrap();
         if std::fs::File::open(&root).is_ok() {
+            // Running as root (or with CAP_DAC_OVERRIDE) the mode is ignored and this test would
+            // prove nothing. Locally that is a skip; in CI it must be loud, so that a job that
+            // starts running as root cannot silently drop the coverage.
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "this test needs file permissions to be enforced, but the CI job runs as root"
+            );
             eprintln!("skipped: permissions are not enforced here (running as root)");
             return;
         }
@@ -1421,12 +1446,15 @@ mod tests {
                 "a new key directory must be synced into its parent, which cannot be opened",
             );
         assert!(matches!(err, DaemonError::Io(_)), "{err}");
-        // The failed attempt did create the key directory (before the parent could not be synced).
-        // From here on it exists: opening it, even in a parent that cannot be opened, must not
-        // try to sync the parent again.
+        // The failed attempt did create the key directory before the parent could not be synced.
+        // Remove it again: with the parent readable, a genuinely new key directory is created and
+        // synced into it.
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::remove_dir_all(root.join("k")).unwrap();
         j.append_charged(entry("k", &format!("{:032x}", 2)), UNLIMITED, T)
             .unwrap();
+        // From here on it exists: opening it, even in a parent that cannot be opened, must not
+        // try to sync the parent again.
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).unwrap();
         let again = SignJournal::open(&root, 1, FOREVER).unwrap();
         again
