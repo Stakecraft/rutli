@@ -221,7 +221,7 @@ jobs:
       # writes the notes and publishes it. An existing release only gets the files. The builds are
       # not reproducible: a second run would leave two sets of checksums and attestations that both
       # verify, so a release that already has SHA256SUMS is not touched unless the run was started with
-      # replace_published; then the files that are not in the new set are removed.
+      # replace_published; then this workflow's files that are not in the new set are removed.
       - name: Attach to the release
         run: |
           set -euo pipefail
@@ -236,8 +236,14 @@ jobs:
             gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes "Draft created by the release assets workflow; notes to follow."
           fi
           gh release upload "$TAG" out/* --clobber
+          # Only files of this workflow's own kind are removed; anything else on the release (notes,
+          # reports, a binary for another platform) stays.
+          ours='^(rutli-(driver|dealer)-.+|SHA256SUMS|LICENSE|THIRD-PARTY-LICENSES-rust\.txt)(\.sigstore\.json)?$'
           gh release view "$TAG" --json assets --jq '.assets[].name' | while read -r name; do
-            [ -e "out/${name}" ] || { echo "removing ${name}, which is not in this set"; gh release delete-asset "$TAG" "$name" --yes; }
+            if [[ "$name" =~ $ours ]] && [ ! -e "out/${name}" ]; then
+              echo "removing ${name}, which is not in this set"
+              gh release delete-asset "$TAG" "$name" --yes
+            fi
           done
 
       - name: Summary

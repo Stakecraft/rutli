@@ -143,7 +143,8 @@ The container image is verified as described in [SECURITY.md](../SECURITY.md#ver
 
 The files are always one set. The builds are not reproducible, so a repeated run (`workflow_dispatch`)
 would sign a second set; it refuses to touch a release that already carries `SHA256SUMS` unless it is
-started with `replace_published`, and then it replaces every file. The provenance names the tagged
+started with `replace_published`; then it replaces its files and removes its own files that the new
+run no longer produces (other attachments stay). The provenance names the tagged
 workflow file, whose jobs all run on the hosted runners that file lists; `--deny-self-hosted-runners`
 checks the runner of the signing job.
 
