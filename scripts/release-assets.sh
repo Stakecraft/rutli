@@ -68,7 +68,7 @@ cmd_install_tools() {
   echo "${SYFT_SHA256_AMD64}  ${tmp}/syft.tar.gz" | sha256sum -c -
   tar -xzf "$tmp/syft.tar.gz" -C "$tmp" syft
   install -m 0755 "$tmp/syft" "$bin/syft"
-  if [ -n "${GITHUB_PATH:-}" ]; then echo "$bin" >> "$GITHUB_PATH"; fi
+  if [ -n "${GITHUB_PATH:-}" ]; then echo "$bin" >>"$GITHUB_PATH"; fi
   PATH="$bin:$PATH" cosign version
   PATH="$bin:$PATH" syft version
 }
@@ -180,7 +180,7 @@ cmd_sums() {
   need_out "${1:-}"
   local tmp
   tmp="$(mktemp)"
-  (cd "$1" && find . -maxdepth 1 -type f ! -name '*.sigstore.json' ! -name SHA256SUMS -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum) > "$tmp"
+  (cd "$1" && find . -maxdepth 1 -type f ! -name '*.sigstore.json' ! -name SHA256SUMS -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum) >"$tmp"
   mv "$tmp" "$1/SHA256SUMS"
   cat "$1/SHA256SUMS"
 }
