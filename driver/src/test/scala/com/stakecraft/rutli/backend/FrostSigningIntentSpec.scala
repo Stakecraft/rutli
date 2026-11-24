@@ -343,6 +343,48 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
     }
   }
 
+  "a sign leader that answers from its own state (a ceremony holds the key)" should {
+
+    val inCeremony = Status.ABORTED.withDescription(
+      "a refresh ceremony (id refresh-0123456789abcdef0123456789abcdef) is already in progress for key " + Key
+    )
+
+    "lose the lead when a later leader's refusal ends the sign before every leader was asked" in {
+      val recs = Seq(new Recorder(Cluster), new Recorder(Cluster), new Recorder(Cluster))
+      val b = backend(recs.zipWithIndex.map { case (r, i) => serve(s"cosigner${i + 1}", r) -> s"cosigner${i + 1}" })
+      try {
+        recs(0).refuse = Some(inCeremony)
+        recs(1).refuse = Some(Status.PERMISSION_DENIED.withDescription("signing intent refused: test"))
+        val e = intercept[io.grpc.StatusRuntimeException](Await.result(b.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds))
+        e.getStatus.getCode shouldBe Status.Code.PERMISSION_DENIED
+        recs.map(_.signs.size) shouldBe Seq(1, 1, 0) // returned at once: the third was not asked
+        // Both still answer as before. The lead passed both, so the next sign reaches the third.
+        Await.result(b.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds) shouldBe ed25519(Digest)
+        recs.map(_.signs.size) shouldBe Seq(1, 1, 1)
+      } finally b.close()
+    }
+
+    "lose the lead when the sign is served only after the cluster id was learned again" in {
+      val recs = Seq(new Recorder("oldcluster000000"), new Recorder("oldcluster000000"), new Recorder("oldcluster000000"))
+      val b = backend(recs.zipWithIndex.map { case (r, i) => serve(s"cosigner${i + 1}", r) -> s"cosigner${i + 1}" })
+      try {
+        Await.result(b.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds)
+        recs.map(_.signs.size) shouldBe Seq(1, 0, 0)
+        // The cluster's id changes, and the first cosigner cannot sign now.
+        recs.foreach { r => r.clusterId = Cluster; r.accept = Some(Cluster) }
+        recs(0).refuse = Some(inCeremony)
+        val notes = new AuditNotes
+        Await.result(b.withAuditNotes(notes)(b.sign(Digest, Key, SigningAlgoSpec.Ed25519)), 20.seconds) shouldBe ed25519(Digest)
+        notes.render should include("intent-cluster=relearned")
+        // The second refused the stale id, then signed the retry: one sign, and the first lost the lead in it.
+        recs.map(_.signs.size) shouldBe Seq(2, 2, 0)
+        recs(0).refuse = None
+        Await.result(b.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds) shouldBe ed25519(Digest)
+        recs.map(_.signs.size) shouldBe Seq(2, 3, 0)
+      } finally b.close()
+    }
+  }
+
   "FrostBackend.deleteKey" should {
     "carry a delete intent (purpose delete-key, the delete digest), signed with the driver's mTLS key" in {
       val rec = new Recorder(Cluster)
