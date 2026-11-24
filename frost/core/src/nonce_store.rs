@@ -189,23 +189,16 @@ impl NonceStore {
     /// Make [`PRUNED_SENTINEL`] present, complete and durable, whether this pass creates it or an
     /// earlier one did. An earlier write may have stopped partway (a full disk) and left the file
     /// short, or not yet fsynced: an existing sentinel is checked against [`SENTINEL_TEXT`] and
-    /// fsynced when complete, else rewritten into a temporary file of its own and renamed over it,
-    /// so the name exists throughout. The directory is fsynced last. Anything that is not a readable file under
-    /// the name is an error, and the pass removes nothing.
+    /// fsynced when complete. Otherwise, and when there is none yet, a complete one is written into
+    /// a temporary file of its own, fsynced and renamed into place, so the name only ever points at
+    /// a file whose fsync succeeded, and an existing one stays in place throughout. The directory is
+    /// fsynced last. Anything that is not a regular file under the name is an error, and the pass
+    /// removes nothing.
     fn write_sentinel(&self) -> Result<()> {
         let path = self.dir.join(PRUNED_SENTINEL);
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut f) => {
-                f.write_all(SENTINEL_TEXT)?;
-                f.sync_all()?;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                match complete_sentinel(&path)? {
-                    Some(f) => f.sync_all()?,
-                    None => self.rewrite_sentinel(&path)?,
-                }
-            }
-            Err(e) => return Err(e.into()),
+        match complete_sentinel(&path)? {
+            Some(f) => f.sync_all()?,
+            None => self.rewrite_sentinel(&path)?,
         }
         File::open(&self.dir)?.sync_all()?;
         Ok(())
@@ -260,10 +253,15 @@ impl NonceStore {
 }
 
 /// The sentinel at `path`, opened, when it holds exactly [`SENTINEL_TEXT`] (read at most one byte
-/// past it); `None` when it holds anything else. Only a regular file is opened: a symbolic link, a
-/// FIFO (which would block the open) or a directory under the name is an error.
+/// past it); `None` when it holds anything else or is not there. Only a regular file is opened: a
+/// symbolic link, a FIFO (which would block the open) or a directory under the name is an error.
 fn complete_sentinel(path: &Path) -> Result<Option<File>> {
-    if !fs::symlink_metadata(path)?.is_file() {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    if !meta.is_file() {
         return Err(CoreError::NonceStore(format!(
             "{} is not a regular file",
             path.display()
@@ -588,5 +586,32 @@ mod tests {
         for p in &leftovers {
             assert_eq!(fs::read(p).unwrap(), b"from before", "not ours: left alone");
         }
+    }
+
+    #[test]
+    fn a_new_sentinel_is_renamed_into_place_complete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = with_old_markers(&tmp);
+        assert!(!store.dir.join(PRUNED_SENTINEL).exists());
+        assert_eq!(
+            store
+                .prune_older_than(Duration::from_secs(900), 10)
+                .unwrap()
+                .removed,
+            2
+        );
+        assert_eq!(
+            fs::read(store.dir.join(PRUNED_SENTINEL)).unwrap(),
+            SENTINEL_TEXT
+        );
+        let names: Vec<_> = fs::read_dir(&store.dir)
+            .unwrap()
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .collect();
+        assert_eq!(
+            names,
+            vec![PRUNED_SENTINEL.to_string()],
+            "no temporary left"
+        );
     }
 }
