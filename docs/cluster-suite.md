@@ -273,7 +273,11 @@ as the Compose end-to-end test, not a second copy:
    must equal the one read back from the node's sealed state.
 3. **The dealer** runs in a pod of its own, `rutli-perf-dealer`:
    - no service account token, no network (a NetworkPolicy denies every connection), its work
-     directory in memory;
+     directory in memory, a new pod every run;
+   - the NetworkPolicy holds only where the network plugin enforces policies (kind's default one does
+     not). Before anything is copied in, the pod tries to reach a cosigner; the result records
+     `dealer_isolated`, and `E2E_REQUIRE_DEALER_ISOLATION=1` makes a reachable network a failure;
+   - the export password reaches the dealer through stdin, never in a command line;
    - files reach it and leave it through the machine that runs the suite;
    - it must refuse a wrong password, no password and a wrong fingerprint, then split with
      `--confirm-sas`.

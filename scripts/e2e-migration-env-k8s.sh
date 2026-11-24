@@ -39,6 +39,10 @@ env_init() {
   cp "$E2E_CERTS/ca.crt" "$WORK/certs/ca.crt"
   # shellcheck disable=SC2034  # the procedure runs "$DEALER" split-key …
   DEALER=_dealer_in_pod
+  DEALER_STARTED=0
+  # A dealer pod left by an interrupted run (and whatever its memory held) goes before anything else.
+  _k delete pod "$DEALER_POD" --wait=true --ignore-not-found >/dev/null
+  _k delete networkpolicy "$DEALER_POD" --ignore-not-found >/dev/null
 
   step "Cluster in namespace $NS: every cosigner healthy, the load generator ready"
   local i role
@@ -74,8 +78,10 @@ env_node_ls() { _in_node "$1" ls "$2"; }
 env_node_shred() { local n=$1; shift; _in_node "$n" rm -f -- "$@"; } # memory-backed /tmp: gone with the pages
 
 # --- the dealer pod -----------------------------------------------------------------------------
+DEALER_STARTED=0
+DEALER_ISOLATED=unknown
 _dealer_up() {
-  _k get pod "$DEALER_POD" >/dev/null 2>&1 && return 0
+  [ "$DEALER_STARTED" = 1 ] && return 0
   _k apply -f - >/dev/null <<YAML
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -118,14 +124,28 @@ spec:
       emptyDir: { medium: Memory, sizeLimit: 16Mi }
 YAML
   _k wait --for=condition=Ready "pod/$DEALER_POD" --timeout=300s >/dev/null || fail "the dealer pod did not start"
+  DEALER_STARTED=1
+  # Does the NetworkPolicy hold? Only a network plugin that enforces policies makes it so (kind's
+  # default one does not). Before anything is copied in, try to reach cosigner 1 from the pod.
+  # E2E_REQUIRE_DEALER_ISOLATION=1 makes a reachable network a failure; otherwise it is reported.
+  if _k exec "$DEALER_POD" -- bash -c "timeout 3 bash -c '</dev/tcp/rutli-node-1.$NS.svc/9101'" >/dev/null 2>&1; then
+    DEALER_ISOLATED=false
+    [ "${E2E_REQUIRE_DEALER_ISOLATION:-0}" = 1 ] && fail "the dealer pod reaches the network: its NetworkPolicy is not enforced here"
+    echo "WARNING: the dealer pod reaches the network: this cluster's network plugin does not enforce its NetworkPolicy"
+  else
+    DEALER_ISOLATED=true
+    echo "the dealer pod reaches no cosigner: its NetworkPolicy holds"
+  fi
+  export DEALER_ISOLATED
 }
 
 # `rutli-dealer` in the dealer pod, with the procedure's local paths: --in, --ca-cert and every
 # --recipient are copied in, --out-dir is copied back (only if the dealer wrote it), and
-# --password-env NAME passes that variable's value into the pod's environment for this call only.
+# --password-env NAME passes that variable's value into the dealer's environment for this call only,
+# through stdin: never in a command line (the process table, an audit log of `kubectl exec`).
 _dealer_in_pod() {
   _dealer_up
-  local args=() envs=() out="" remote_out="" flag val
+  local args=() pw_name="" out="" remote_out="" flag val
   _k exec "$DEALER_POD" -- sh -c 'mkdir -p /work/in && chmod 700 /work/in'
   while [ $# -gt 0 ]; do
     flag=$1
@@ -143,7 +163,7 @@ _dealer_in_pod() {
         shift 2
         ;;
       --password-env)
-        envs+=("$2=${!2:-}")
+        pw_name=$2
         args+=("$flag" "$2")
         shift 2
         ;;
@@ -154,7 +174,13 @@ _dealer_in_pod() {
     esac
   done
   local rc=0
-  _k exec "$DEALER_POD" -- env "${envs[@]+"${envs[@]}"}" rutli-dealer "${args[@]}" || rc=$?
+  if [ -n "$pw_name" ]; then
+    # shellcheck disable=SC2016  # expanded by the pod's shell
+    printf '%s\n' "${!pw_name:-}" | _k exec -i "$DEALER_POD" -- \
+      sh -c 'IFS= read -r v; export "$1=$v"; shift; exec rutli-dealer "$@"' sh "$pw_name" "${args[@]}" || rc=$?
+  else
+    _k exec "$DEALER_POD" -- rutli-dealer "${args[@]}" </dev/null || rc=$?
+  fi
   if [ -n "$remote_out" ] && _k exec "$DEALER_POD" -- test -d "$remote_out"; then
     (umask 077 && mkdir -p "$out")
     local f

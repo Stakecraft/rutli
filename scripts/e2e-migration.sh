@@ -140,7 +140,17 @@ refused() { # what  expected-message  command…
   echo "$what -> refused"
 }
 # Lessons f: on macOS GNU coreutils can shadow /bin/rm, which has -P. Files on the operator's machine.
-shred_local() { if [ "$(uname)" = Darwin ]; then /bin/rm -P -rf "$@"; else rm -rf "$@"; fi; }
+# Elsewhere each file is overwritten (shred -u) before the tree goes. On SSDs, copy-on-write file
+# systems and tmpfs neither is provable erasure (split-ceremony.md §4 Step 9, residual exposure).
+shred_local() {
+  if [ "$(uname)" = Darwin ]; then /bin/rm -P -rf "$@"; return; fi
+  local p
+  for p in "$@"; do
+    [ -e "$p" ] || continue
+    find "$p" -type f -exec shred -u {} + 2>/dev/null || true
+    rm -rf "$p"
+  done
+}
 commitment_errors() {
   local log
   while IFS= read -r log; do
@@ -728,7 +738,8 @@ main() {
     step_8_destroy_ceremony
     if [ -n "${E2E_RESULT:-}" ]; then
       jq -n --arg key_id "$KEY_ID" --arg fp "$NS_FP" --arg group "$GROUP" --arg ceremony "$CEREMONY" \
-        '{key_id: $key_id, fingerprint: $fp, group_key: $group, ceremony: $ceremony}' >"$E2E_RESULT"
+        --arg isolated "${DEALER_ISOLATED:-unknown}" \
+        '{key_id: $key_id, fingerprint: $fp, group_key: $group, ceremony: $ceremony, dealer_isolated: $isolated}' >"$E2E_RESULT"
     fi
     return
   fi
