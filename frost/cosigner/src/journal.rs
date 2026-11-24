@@ -1192,4 +1192,245 @@ mod tests {
         );
         assert_eq!(report.entries.last().unwrap().seq, n);
     }
+
+    // ---- Deterministic tests of the open / append / sweep paths: clock and sizes are injected ----
+
+    /// Retention that never deletes anything by age or size.
+    const FOREVER: Retention = Retention {
+        days: 100_000,
+        max_bytes: u64::MAX,
+    };
+    const UNLIMITED: Limits = Limits {
+        per_min: 0,
+        per_day: 0,
+        max_shares_per_charge: u32::MAX,
+    };
+    /// A fixed "now" for the tests below, in Unix milliseconds (2027-01-15).
+    const T: u64 = 1_800_000_000_000;
+
+    /// The key directory `root/k` holding one valid chained entry per element of `times` (each one
+    /// a charge, stamped with that time), as a single segment.
+    fn journal_with_entries(root: &Path, times: &[u64]) -> PathBuf {
+        let j = SignJournal::open(root, 1, FOREVER).unwrap();
+        for (i, t) in times.iter().enumerate() {
+            j.append_charged(entry("k", &format!("{i:032x}")), UNLIMITED, *t)
+                .unwrap();
+        }
+        root.join("k")
+    }
+
+    /// Rewrite the single segment of `dir` as one segment per element of `sizes` (that many
+    /// entries each), each named by the sequence number of its first entry, as the journal does.
+    fn split_segment(dir: &Path, sizes: &[usize]) -> Vec<PathBuf> {
+        let seg = segments(dir).unwrap().pop().unwrap();
+        let text = std::fs::read_to_string(&seg).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), sizes.iter().sum::<usize>());
+        std::fs::remove_file(&seg).unwrap();
+        let (mut first, mut at, mut out) = (1u64, 0usize, Vec::new());
+        for n in sizes {
+            let path = dir.join(segment_name(first));
+            let mut body = lines[at..at + n].join("\n");
+            body.push('\n');
+            std::fs::write(&path, body).unwrap();
+            out.push(path);
+            first += *n as u64;
+            at += n;
+        }
+        out
+    }
+
+    /// Make `path` look like it was last written `age_ms` before `now_ms`.
+    fn set_age(path: &Path, now_ms: u64, age_ms: u64) {
+        let when = std::time::UNIX_EPOCH + std::time::Duration::from_millis(now_ms - age_ms);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    /// The segment file names of `dir`, oldest first.
+    fn names(dir: &Path) -> Vec<String> {
+        segments(dir)
+            .unwrap()
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn the_rate_limit_ledger_is_read_back_from_the_segments_inside_the_last_day_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (min, hour) = (MINUTE_MS, 60 * MINUTE_MS);
+        // Entries 1 and 2 are ten days old, 3 two days, 4 and 5 are inside the last day.
+        let dir = journal_with_entries(
+            tmp.path(),
+            &[
+                T - 10 * DAY_MS,
+                T - 10 * DAY_MS,
+                T - 2 * DAY_MS,
+                T - hour,
+                T - 10 * min,
+            ],
+        );
+        let segs = split_segment(&dir, &[2, 2, 1]);
+        // The oldest segment is not read at all: the one after it starts more than a day back, so
+        // nothing before that can be in the window. Breaking it proves that.
+        std::fs::write(&segs[0], "not a journal\n").unwrap();
+        let k = KeyJournal::open(&dir, T, FOREVER).unwrap();
+        assert_eq!(k.seq, 5);
+        assert_eq!(k.charges.len(), 2, "only entries 4 and 5 are in the window");
+        assert_eq!(k.charges[0].0, T - hour);
+        assert_eq!(k.charges[1].0, T - 10 * min);
+    }
+
+    #[test]
+    fn an_entry_exactly_a_day_old_is_outside_the_window_and_a_millisecond_less_is_inside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = journal_with_entries(tmp.path(), &[T]);
+        let charges_at = |now| KeyJournal::open(&dir, now, FOREVER).unwrap().charges.len();
+        assert_eq!(charges_at(T + DAY_MS - 1), 1);
+        assert_eq!(charges_at(T + DAY_MS), 0);
+    }
+
+    #[test]
+    fn a_torn_line_in_a_closed_segment_refuses_to_open_and_the_intact_journal_opens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = journal_with_entries(tmp.path(), &[T, T + 1, T + 2, T + 3]);
+        let segs = split_segment(&dir, &[2, 2]);
+        KeyJournal::open(&dir, T + 4, FOREVER).unwrap();
+        let mut closed = std::fs::read(&segs[0]).unwrap();
+        closed.extend_from_slice(b"{\"seq\":3,\"ts_ms\":");
+        std::fs::write(&segs[0], closed).unwrap();
+        let err = KeyJournal::open(&dir, T + 4, FOREVER).err().unwrap();
+        assert!(
+            matches!(&err, DaemonError::Journal(m) if m.contains("torn line in a closed segment")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_missing_segment_breaks_the_chain_and_the_journal_refuses_to_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = journal_with_entries(tmp.path(), &[T, T + 1, T + 2, T + 3, T + 4]);
+        let segs = split_segment(&dir, &[2, 2, 1]);
+        KeyJournal::open(&dir, T + 5, FOREVER).unwrap();
+        // The middle segment gone: each remaining segment is intact on its own.
+        std::fs::remove_file(&segs[1]).unwrap();
+        let err = KeyJournal::open(&dir, T + 5, FOREVER).err().unwrap();
+        assert!(
+            matches!(&err, DaemonError::Journal(m) if m.contains("does not continue its chain")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn retention_by_age_deletes_the_closed_segments_older_than_the_days_and_no_others() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = journal_with_entries(tmp.path(), &[T, T + 1, T + 2, T + 3, T + 4]);
+        let segs = split_segment(&dir, &[2, 2, 1]);
+        let now = T + 5;
+        set_age(&segs[0], now, 3 * DAY_MS);
+        set_age(&segs[1], now, DAY_MS + DAY_MS / 2);
+        set_age(&segs[2], now, 0);
+        let two_days = Retention {
+            days: 2,
+            max_bytes: u64::MAX,
+        };
+        KeyJournal::open(&dir, now, two_days).unwrap();
+        // Three days old: gone. A day and a half: inside the two days. The newest is always kept.
+        assert_eq!(names(&dir), [segment_name(3), segment_name(5)]);
+    }
+
+    #[test]
+    fn retention_by_size_deletes_the_oldest_segments_until_the_total_fits_and_stops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = journal_with_entries(tmp.path(), &[T, T + 1, T + 2, T + 3]);
+        split_segment(&dir, &[1, 1, 1, 1]);
+        let sizes: Vec<u64> = segments(&dir)
+            .unwrap()
+            .iter()
+            .map(|p| std::fs::metadata(p).unwrap().len())
+            .collect();
+        let one = sizes[0];
+        assert!(sizes.iter().all(|s| *s == one), "equal entries: {sizes:?}");
+        // Four segments over a cap of two and a half: the two oldest go, then it fits.
+        let cap = Retention {
+            days: 100_000,
+            max_bytes: one * 5 / 2,
+        };
+        KeyJournal::open(&dir, T + 4, cap).unwrap();
+        assert_eq!(names(&dir), [segment_name(3), segment_name(4)]);
+        // Already within the cap: nothing more goes.
+        KeyJournal::open(&dir, T + 4, cap).unwrap();
+        assert_eq!(names(&dir), [segment_name(3), segment_name(4)]);
+    }
+
+    #[test]
+    fn a_rotated_segment_is_named_by_the_sequence_number_of_its_first_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let j = SignJournal::open(tmp.path(), 1, FOREVER).unwrap();
+        let dir = tmp.path().join("k");
+        let mut n = 0u64;
+        while segments(&dir).unwrap().len() < 3 {
+            let mut e = entry("k", &format!("{n:032x}"));
+            e.approvers = vec!["x".repeat(16_000)];
+            j.append_charged(e, UNLIMITED, T + n).unwrap();
+            n += 1;
+        }
+        let report = read_key_dir(&dir).unwrap();
+        assert_eq!(report.entries.len() as u64, n);
+        for seg in segments(&dir).unwrap() {
+            let (entries, _) = read_segment(&seg).unwrap();
+            let first = entries.first().expect("a closed or current segment").seq;
+            assert_eq!(
+                seg.file_name().unwrap().to_string_lossy(),
+                segment_name(first)
+            );
+        }
+    }
+
+    /// Restores a directory's permissions when dropped, so a failed assertion cannot leave a
+    /// temp directory the cleanup cannot remove.
+    struct RestoreMode(PathBuf);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    #[test]
+    fn a_new_key_directory_is_synced_into_its_parent_and_an_existing_one_is_not() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("journal");
+        let j = SignJournal::open(&root, 1, FOREVER).unwrap();
+        // Write and search, but not read: the parent can be written into but not opened to sync.
+        let _restore = RestoreMode(root.clone());
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).unwrap();
+        if std::fs::File::open(&root).is_ok() {
+            eprintln!("skipped: permissions are not enforced here (running as root)");
+            return;
+        }
+        let err = j
+            .append_charged(entry("k", &format!("{:032x}", 1)), UNLIMITED, T)
+            .expect_err(
+                "a new key directory must be synced into its parent, which cannot be opened",
+            );
+        assert!(matches!(err, DaemonError::Io(_)), "{err}");
+        // The failed attempt did create the key directory (before the parent could not be synced).
+        // From here on it exists: opening it, even in a parent that cannot be opened, must not
+        // try to sync the parent again.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        j.append_charged(entry("k", &format!("{:032x}", 2)), UNLIMITED, T)
+            .unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let again = SignJournal::open(&root, 1, FOREVER).unwrap();
+        again
+            .append_charged(entry("k", &format!("{:032x}", 3)), UNLIMITED, T + 1)
+            .unwrap();
+    }
 }
