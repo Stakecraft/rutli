@@ -102,12 +102,17 @@ fn concurrent_passes_do_not_fail_on_each_others_removals() {
         let dir = tmp.path().join("k.nonces");
         let all = sessions(N);
         drop(store_with_old_markers(&dir, &all));
+        // All passes start together, so their listings and removals overlap.
+        let start = std::sync::Barrier::new(4);
         let reports: Vec<PruneReport> = std::thread::scope(|scope| {
             let passes: Vec<_> = (0..4)
                 .map(|_| {
-                    let dir = dir.clone();
-                    scope
-                        .spawn(move || NonceStore::open(&dir).unwrap().prune_older_than(HORIZON, N))
+                    let (dir, start) = (dir.clone(), &start);
+                    scope.spawn(move || {
+                        let store = NonceStore::open(&dir).unwrap();
+                        start.wait();
+                        store.prune_older_than(HORIZON, N)
+                    })
                 })
                 .collect();
             passes
@@ -131,13 +136,13 @@ fn concurrent_passes_do_not_fail_on_each_others_removals() {
 /// child: `<test name>:<store directory>`.
 const CHILD: &str = "RUTLI_NONCE_FD_CHILD";
 
-/// Re-run this test binary for the test `name` alone, as a child with at most 64 file descriptors
+/// Re-run this test binary for the test `name` alone, as a child with at most 256 file descriptors
 /// (so using them all up is quick), on the store in `dir`.
 fn run_child(name: &str, dir: &Path) {
     let exe = std::env::current_exe().unwrap();
     let out = std::process::Command::new("sh")
         .arg("-c")
-        .arg("ulimit -n 64 && exec \"$0\" --exact \"$1\" --test-threads=1 --nocapture")
+        .arg("ulimit -n 256 && exec \"$0\" --exact \"$1\" --test-threads=1 --nocapture")
         .arg(&exe)
         .arg(name)
         .env(CHILD, format!("{name}:{}", dir.display()))
@@ -148,6 +153,12 @@ fn run_child(name: &str, dir: &Path) {
         "child failed:\n{}\n{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
+    );
+    // The child really ran the test: a filter that matches nothing passes too.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("test result: ok. 1 passed"),
+        "the child ran no test:\n{stdout}"
     );
 }
 
@@ -166,7 +177,7 @@ fn all_descriptors_but_one(dir: &Path) -> Vec<File> {
         held.push(f);
         assert!(held.len() < 1 << 20, "no descriptor limit");
     }
-    held.pop();
+    assert!(held.pop().is_some(), "no descriptor could be opened at all");
     let listing = fs::read_dir(dir).expect("one descriptor is free");
     assert!(
         File::open("/dev/null").is_err(),
