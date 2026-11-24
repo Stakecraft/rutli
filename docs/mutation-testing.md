@@ -49,7 +49,7 @@ allowed:
 MUTANTS_TESTS="--lib --test ceremony_intent" scripts/mutants.sh intent
 ```
 
-In CI, `intent` is the largest module and runs in four shards (`--shard k/4`, one job each; their numbers are added up per file). A manual run can name the modules it wants:
+In CI, the modules that take hours run in shards (`--shard k/n`, one job each; their numbers are added up per file): `intent` and `journal` in four, `seal` in three. Unsharded they ran 3.5 to 4 hours against the 240-minute limit of a job (2026-11-22 and 2026-11-24 runs); a module that gets within 30 % of the limit again is split the same way (the matrix is in the `plan` job of `mutants.yml`). A manual run can name the modules it wants:
 
 ```bash
 gh workflow run mutants.yml --ref main -f modules="intent journal"
