@@ -35,7 +35,10 @@ COSIGN_SHA256_AMD64="424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf
 SYFT_VERSION="1.57.2"
 SYFT_SHA256_AMD64="ad92bd3ec1b94a3df01d4d0aec199afa9c42b72e86da436ff5f837914d32706b"
 
-die() { echo "release-assets: $*" >&2; exit 1; }
+die() {
+  echo "release-assets: $*" >&2
+  exit 1
+}
 
 sbt_version() {
   sed -n 's/^ThisBuild \/ version *:= *"\([^"]*\)".*/\1/p' "$REPO/build.sbt" | head -n 1
