@@ -133,7 +133,7 @@ metrics endpoint: that line and the `failover=` notes in the audit log show the 
 
 | Value | Where each sign starts | Load for 2-of-3 |
 |---|---|---|
-| `sticky` (default) | The preferred leader, as before 0.5.0. | One node leads every sign and releases a share for all of them; the other two release one for half each. |
+| `sticky` (default) | The preferred leader, as before 0.5.0. | While the preferred leader is healthy, it leads every sign and releases a share for all of them; the other two release one for half each. |
 | `rotate` | The next endpoint in turn, among the healthy ones: not demoted within `leader-recovery`, and not a cosigner that answered another group key for that key. If none is healthy, the sticky choice. | Each node leads 1/3 of the signs. With the cosigners picking the second member by the request id, each node releases a share for 2/3 of them. |
 
 Rotation changes only where a sign starts. One Canton call still has one attempt in flight, keeps
@@ -156,10 +156,11 @@ every signature and the other two in about half each. Under `rotate` each node t
 2/3 of the key's rate. A limit sized for the key's whole rate holds on every node in both modes. A
 limit sized for the share a non-leading node used to see does not: check those before switching.
 
-**The default.** `sticky` is the default in 0.5.0, so an upgrade changes nothing about where signs
-start. `rotate` is new in this release and has not yet run on the two test stands for the two weeks
-asked of a default; it is switched on there by hand and becomes the default in a later release.
-Operators who want it now set `sign-leader = rotate`, after checking the per-node rate limits above.
+**The default.** `sticky` is the default in 0.5.0: leaving the setting unset keeps the policy of
+earlier releases and does not switch rotation on. `rotate` is new in this release and has not yet
+run on the two test stands for the two weeks asked of a default; it is switched on there by hand and
+becomes the default in a later release. Operators who want it now set `sign-leader = rotate`, after
+checking the per-node rate limits above.
 
 **What Canton waits for.** Canton puts no deadline on a KMS driver call. It retries a *retryable*
 failure forever, with a backoff up to 10 s (`KmsConfig.retries.failures`, Canton 3.6/3.7). The
