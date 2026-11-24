@@ -1470,7 +1470,10 @@ mod tests {
     /// here the certificate chain, which the test verifier has no CA for).
     #[test]
     fn every_verification_refuses_an_intent_over_the_size_limit_and_only_that() {
-        let v = verifier_with(&SigningPolicyConfig::default());
+        let v = verifier_with(&SigningPolicyConfig::default()).with_delete_policy(DeletePolicy {
+            allowlist: HashSet::from(["deleter".to_string()]),
+            ..Default::default()
+        });
         let sized = |n: usize| format!("intent of {n} bytes");
         let over = intent_at_the_size_limit(1);
         let exact = intent_at_the_size_limit(0);
@@ -1480,6 +1483,8 @@ mod tests {
             v.verify_ceremony(&empty, CeremonyKind::Dkg, "k", "c", 1_000)
                 .unwrap_err(),
             v.verify_generate(&empty, "k", "ed25519", 0, "c", 1_000)
+                .unwrap_err(),
+            v.verify_delete(&empty, "k", 1_000, Expiry::Enforce)
                 .unwrap_err(),
         ] {
             assert!(err.to_string().contains(&sized(0)), "{err}");
@@ -1505,6 +1510,15 @@ mod tests {
                     .unwrap_err()
                     .to_string(),
                 v.verify_generate(&exact, "k", "ed25519", 0, "c", 1_000)
+                    .unwrap_err()
+                    .to_string(),
+            ),
+            (
+                "verify_delete",
+                v.verify_delete(&over, "k", 1_000, Expiry::Enforce)
+                    .unwrap_err()
+                    .to_string(),
+                v.verify_delete(&exact, "k", 1_000, Expiry::Enforce)
                     .unwrap_err()
                     .to_string(),
             ),
