@@ -1750,6 +1750,10 @@ class FrostBackend(
                   budgetEnd,
                   // A leader's own "cannot sign" is not the cluster's while a cosigner was unreachable.
                   Some(signAnswerIsLeaderLocal _),
+                  // And it costs that leader the lead only when another leader then signs: when
+                  // every leader answers so (the shares are gone, a ceremony holds the key on all of
+                  // them), none is at fault and none leaves the rotation.
+                  signLeaderCannotSignNow _,
                 )(_.sign(built))
               catch {
                 // A cosigner says the intent names another cluster: the learned id is wrong (one
@@ -2356,6 +2360,19 @@ object FrostBackend {
       case Right(rejected) => if (rejected.code == BadSignature) Some(true) else None
     }
 
+  /** `lacksKey` of [[withCheckedFailover]] for a sign: the leader's own status that says it cannot
+    * sign this key now ([[signAnswerIsLeaderLocal]]: NOT_FOUND, FAILED_PRECONDITION, ABORTED,
+    * UNIMPLEMENTED). Such a leader loses the lead once another leader has signed, and the signature
+    * has verified against the pinned group key — then the cluster can sign and this leader cannot.
+    * When every leader answers so, nobody is demoted: otherwise a sign for a key whose shares are
+    * gone, or one that arrives while a ceremony holds the key everywhere, would take every
+    * cosigner out of the sign rotation for [[leaderRecovery]], for every key.
+    *
+    * A signature that does not verify is not in this set: a leader that returns one is demoted at
+    * once, whether or not another leader signs. So are INTERNAL, UNKNOWN and an unreachable leader. */
+  private def signLeaderCannotSignNow(failure: Either[StatusRuntimeException, Rejected]): Boolean =
+    failure.isLeft && signAnswerIsLeaderLocal(failure).isDefined
+
   /** Which error statuses take the lead from a SIGN leader (see [[withCheckedFailover]]): every
     * status the sign fails over on, and also the refusals returned at once — with an intent.
     *
@@ -2365,6 +2382,9 @@ object FrostBackend {
     * not change what can be signed. Keeping the lead on a refusing node would let one compromised
     * cosigner stop every sign by answering with a refusal while it leads, from process start when
     * it is endpoint 0.
+    *
+    * A leader's own "cannot sign now" loses it the lead only once another leader has signed
+    * ([[signLeaderCannotSignNow]]).
     *
     * Not demoted:
     *   - a cluster-id refusal that makes the driver learn the id again: the stale id was the
