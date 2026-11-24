@@ -870,9 +870,12 @@ class FrostBackend(
 
   /** The specs the cosigners hold the hosted key `keyId` under, each asked for its own copy
     * (`KeyInfo`, local only, all at once): spec → how many cosigners. A cosigner that does not
-    * answer within `budget`, lacks the key or names no spec has no vote. */
-  private def specVotes(keyId: String, budget: FiniteDuration): Map[String, Int] =
-    probeCopies(keyId, budget)
+    * answer, lacks the key or names no spec has no vote. Each gets one attempt deadline
+    * ([[attemptTimeout]]), whatever the read has used of its request timeout: it is one more
+    * attempt at every cosigner, and a read whose walk used the budget up on cosigners answering
+    * under another spec would otherwise end the same way at every retry. */
+  private def specVotes(keyId: String): Map[String, Int] =
+    probeCopiesWithin(keyId, attemptTimeout)
       .collect { case (_, Right(info)) if info.getExists && info.getSpec.nonEmpty => info.getSpec }
       .groupBy(identity)
       .map { case (spec, votes) => spec -> votes.size }
@@ -895,18 +898,14 @@ class FrostBackend(
     *     outlive the others' agreement. Otherwise the known spec stays: a reply under it is the
     *     answer; without one the read fails, retryable when the walk ended on a cosigner that
     *     could not be reached, final otherwise. A reply under another spec is never handed on.
-    * A refusal the walk met (RESOURCE_EXHAUSTED, PERMISSION_DENIED, ...) stands as it is. The
-    * cosigners are asked within what is left of the read's request timeout (`started`), and for
-    * [[SpecVoteFloor]] at least: a walk that used the budget up on cosigners answering under
-    * another spec would otherwise end the same way at every retry. When another read has changed
-    * what the driver knows meanwhile, this one is to be made again. */
+    * A refusal the walk met (RESOURCE_EXHAUSTED, PERMISSION_DENIED, ...) stands as it is. When
+    * another read has changed what the driver knows meanwhile, this one is to be made again. */
   private def settleSpec[R](
       keyId: String,
       what: String,
       known: Option[String],
       seen: SpecsSeen[R],
       notes: AuditNotes,
-      started: Long,
   )(specOf: R => String, absent: R => Boolean, usable: R => Unit)(call: Future[R]): Future[R] = {
     def askAgain(under: String, knownNow: String): KmsDriverException =
       KmsDriverException(
@@ -945,8 +944,7 @@ class FrostBackend(
           if (refusal || !seen.otherThan(knownAs)) Future.fromTry(outcome.map(stillKnown))
           else
             Future(blocking {
-              val left = requestTimeout - (System.nanoTime() - started).nanos
-              val votes = specVotes(keyId, left.max(SpecVoteFloor).min(attemptTimeout + ProbeSlack))
+              val votes = specVotes(keyId)
               // The other spec enough cosigners hold the key under, with the first reply of this
               // read under it that can be handed on. Without such a reply nothing changes: a
               // spec is learned only together with an answer under it.
@@ -2214,7 +2212,6 @@ class FrostBackend(
       // One cosigner's reply does not change the spec the driver knows the key by: a reply under
       // another spec is that cosigner's own answer and is passed over (settleSpec).
       val notes = currentNotes.get
-      val started = System.nanoTime()
       val known = Option(hostedSpecOf.get(keyId))
       val seen = new SpecsSeen[PublicKeyReply]
       val ask = (stub: SignerGrpc.SignerBlockingStub) => {
@@ -2235,7 +2232,7 @@ class FrostBackend(
           )(ask)
         else clusterCallWholeRoster[PublicKeyReply]("publicKey", keyId, otherSpec = other)(ask)
       val canton = (reply: PublicKeyReply) => hostedPublicKey(keyId, reply.getSpec, reply.getPublicKeyDer.toByteArray)
-      settleSpec(keyId, "publicKey", known, seen, notes, started)(
+      settleSpec(keyId, "publicKey", known, seen, notes)(
         _.getSpec,
         (_: PublicKeyReply) => false,
         (reply: PublicKeyReply) => { canton(reply); () },
@@ -2330,7 +2327,6 @@ class FrostBackend(
       // As for getPublicKey: `exists = false` from one cosigner is confirmed with the others before
       // it is believed.
       val notes = currentNotes.get
-      val started = System.nanoTime()
       val known = Option(hostedSpecOf.get(keyId))
       val seen = new SpecsSeen[KeyInfoReply]
       val ask = (stub: SignerGrpc.SignerBlockingStub) => {
@@ -2352,7 +2348,7 @@ class FrostBackend(
             counts = (reply: KeyInfoReply) => !reply.getExists,
           )(ask)
         else clusterCallWholeRoster[KeyInfoReply]("keyInfo", keyId, !_.getExists, other)(ask)
-      settleSpec(keyId, "keyInfo", known, seen, notes, started)(
+      settleSpec(keyId, "keyInfo", known, seen, notes)(
         (reply: KeyInfoReply) => if (reply.getExists) reply.getSpec else "",
         (reply: KeyInfoReply) => !reply.getExists,
         (_: KeyInfoReply) => (),
@@ -2620,9 +2616,6 @@ object FrostBackend {
 
   /** No attempt starts with less of the call's budget left than this: it could not succeed. */
   private val MinAttempt: FiniteDuration = 50.millis
-  /** The least time the cosigners get to say what they hold a hosted key under, when a read that
-    * saw a spec disagreement has little of its request timeout left. */
-  private val SpecVoteFloor: FiniteDuration = 1.second
   /** How much longer than its calls' deadline the hosted-key copy probe waits for them. */
   private val ProbeSlack: FiniteDuration = 200.millis
   /** `observed` for a [[withCheckedFailover]] call whose answer must not make its node the

@@ -66,7 +66,7 @@ class FrostHostedKeySpecSpec extends AnyWordSpec with Matchers {
         case Lacks        => lacks
         case Down(reason) =>
           val trailers = new Metadata
-          trailers.put(ReasonTrailer, reason)
+          if (reason.nonEmpty) trailers.put(ReasonTrailer, reason)
           obs.onError(Status.UNAVAILABLE.withDescription("test: down").asRuntimeException(trailers))
       }
     }
@@ -129,6 +129,12 @@ class FrostHostedKeySpecSpec extends AnyWordSpec with Matchers {
   private def read(backend: FrostBackend, r: Read, notes: AuditNotes = new AuditNotes): Any =
     await(backend.withAuditNotes(notes)(r.run(backend)))
 
+  /** What a read told Canton the key is: `getPublicKey` says, `keyExistsAndIsActive` does not. */
+  private def toldBy(result: Any): Option[Any] = result match {
+    case key: PublicKey => Some(key.spec)
+    case _              => None
+  }
+
   /** The key as a later read finds it, every cosigner answering under `spec` again: what Canton is
     * told it is, and whether that read changed what the driver knows. */
   private def laterRead(backend: FrostBackend, nodes: IndexedSeq[Node], spec: String): (Any, Boolean) = {
@@ -176,7 +182,7 @@ class FrostHostedKeySpecSpec extends AnyWordSpec with Matchers {
           withCluster(Some(known)) { (backend, nodes) =>
             answering(nodes, roster)
             val notes = new AuditNotes
-            read(backend, r, notes)
+            toldBy(read(backend, r, notes)).foreach(_ shouldBe atCanton(otherThan(known)))
             notes.render should include(s"hosted-spec=$known→${otherThan(known)}")
             // Known by the other spec from now on: a read under it changes nothing.
             laterRead(backend, nodes, otherThan(known)) shouldBe (atCanton(otherThan(known)) -> false)
@@ -235,7 +241,7 @@ class FrostHostedKeySpecSpec extends AnyWordSpec with Matchers {
           // serves the read under the spec the driver knows. Two of three hold it as EC.
           answering(nodes, Seq(Under(Ec), Under(Ec), Under(Rsa)))
           val notes = new AuditNotes
-          read(backend, r, notes)
+          toldBy(read(backend, r, notes)).foreach(_ shouldBe EncryptionKeySpec.EcP256)
           notes.render should include(s"hosted-spec=$Rsa→$Ec")
           // And it stays EC while the third cosigner goes on answering RSA.
           await(backend.getPublicKey(Key)).spec shouldBe EncryptionKeySpec.EcP256
