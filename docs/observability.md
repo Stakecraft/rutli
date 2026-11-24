@@ -313,6 +313,13 @@ sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
     check that every node's backup sidecar logged `BACKUP_TRIGGER` and `BACKUP_OK` after the commit.
     A refusal right after a manual run is expected
     (docs/ceremonies.md, "Refresh interval").
+11. **A cosigner's working set above 80 % of its memory limit** (alert
+    `RutliCosignerMemoryNearLimit`, Kubernetes, from cAdvisor and kube-state-metrics) — at the limit
+    the kernel kills the cosigner in the middle of signing. Memory follows the sign sessions in
+    flight (`rutli_pending_sign_sessions`, about 75 KB each at peak) and stays near its peak
+    afterwards, so one burst can leave a node close to the limit. If sessions are stuck
+    (`RutliPendingSessionsGrowing`), find the peer or driver holding them. Otherwise raise
+    `resources.limits.memory` as [performance.md](performance.md), "Memory", describes.
 
    **The other shape: `NOT_SERVING: keystore … unresponsive`** — the probe did not fail, it never
    returned: a dead NFS/CSI mount, or a volume frozen by a snapshot hook (`fsfreeze`). A probe that
