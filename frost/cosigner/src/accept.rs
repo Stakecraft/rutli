@@ -63,6 +63,12 @@ impl Deadline {
 }
 /// The most connections served at once, however high the descriptor limit.
 pub const MAX_CONNECTIONS: usize = 4096;
+/// The listen backlog the gRPC socket asks for: connections the kernel completes before the accept
+/// loop takes them. `TcpListener::bind` asks for 128, which a burst of new clients (every driver
+/// reconnecting after a restart) overflows; the kernel then drops their SYNs and each client waits
+/// out its SYN retransmissions (1 s, 3 s, ...) before it is even connected. The kernel caps the
+/// value at `net.core.somaxconn` (4096 by default since Linux 5.4).
+pub const LISTEN_BACKLOG: u32 = 4096;
 /// Descriptors kept back from the connection cap for key files, journal segments, the instance
 /// lock, outbound peer channels and the metrics listener; under a low limit, half of it is kept.
 pub const FD_RESERVE: u64 = 256;
@@ -83,6 +89,20 @@ pub fn connection_limit(fd_soft_limit: u64) -> usize {
     usize::try_from(cap)
         .unwrap_or(usize::MAX)
         .min(MAX_CONNECTIONS)
+}
+
+/// Bind the gRPC listener on `addr` with a listen backlog of `backlog` (see [`LISTEN_BACKLOG`]),
+/// with `SO_REUSEADDR` set as `TcpListener::bind` sets it on Unix.
+pub fn bind(addr: std::net::SocketAddr, backlog: u32) -> io::Result<tokio::net::TcpListener> {
+    let socket = if addr.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()?
+    } else {
+        tokio::net::TcpSocket::new_v6()?
+    };
+    #[cfg(unix)]
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(backlog)
 }
 
 /// A source of accepted connections ([`tokio::net::TcpListener`], or a fake in tests).
