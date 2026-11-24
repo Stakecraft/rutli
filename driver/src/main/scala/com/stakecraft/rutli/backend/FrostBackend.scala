@@ -81,12 +81,13 @@ import scala.util.control.NonFatal
   *   - Writes (hosted GenerateKey, DeleteKey) fail over only when the node is down, and a DKG
   *     ceremony only on a refused connection (UNAVAILABLE): a ceremony is never blindly re-run
   *     against another leader.
-  *   - For the operations other than sign, any other status (NOT_FOUND, RESOURCE_EXHAUSTED, ...) is
-  *     a real answer from a live node and is returned immediately, never masked by trying another
-  *     node. For sign, NOT_FOUND and the other node-state answers do fail over (see above).
+  *   - For the operations other than sign, a refusal (RESOURCE_EXHAUSTED, PERMISSION_DENIED,
+  *     INVALID_ARGUMENT, ...) is a real answer from a live node and is returned immediately, never
+  *     masked by trying another node. NOT_FOUND is one cosigner's answer about its own store: for
+  *     a write (DeleteKey) it is returned as it is, for everything else the next point applies.
   *   - Where one cosigner's own answer is not the cluster's — "not found" in
   *     `keyExistsAndIsActive` for a FROST key, in a group-key read and in every call on a hosted
-  *     key that is or may be EC ([[withEcFailover]]); a sign leader's NOT_FOUND,
+  *     key ([[withEcFailover]], [[clusterCallWholeRoster]]); a sign leader's NOT_FOUND,
   *     FAILED_PRECONDITION, ABORTED, UNIMPLEMENTED or unverifiable signature — the other cosigners
   *     are asked, and the outcome is decided over the whole roster, whatever the order
   *     ([[rosterVerdict]]): the answer is final once enough endpoints gave it that the rest could
@@ -825,10 +826,9 @@ class FrostBackend(
     * recognises such an answer; leader-sick statuses fail over and demote as usual, and any other
     * status is returned at once and leaves the lead where it is (see [[withFailover]]).
     *
-    * `acceptAfterStale` decides whether an answer found after a stale one is used. For a key the
-    * driver has not seen yet it is "only if the answer says the key is EC": for any other key type,
-    * the first node's NOT_FOUND / does-not-exist stays the answer, exactly as without this path, so
-    * FROST/RSA/AES semantics are unchanged.
+    * An answer found after a stale one is used whatever the key's type turns out to be: a
+    * cosigner that lacks a key the others hold is routed around for an RSA or AES key as well
+    * ([[clusterCallWholeRoster]] is the same rule for a key known not to be EC).
     *
     * How the walk ends when no answer was used is decided over the whole roster, whatever the order
     * the endpoints were asked in (the rule of [[rosterVerdict]]):
@@ -852,7 +852,6 @@ class FrostBackend(
       what: String,
       notes: AuditNotes,
       stale: Either[StatusRuntimeException, A] => Boolean,
-      acceptAfterStale: A => Boolean,
       staleAnswer: A => (String, String),
   )(op: SignerGrpc.SignerBlockingStub => A): A = {
     val n = channels.size
@@ -912,8 +911,6 @@ class FrostBackend(
               attempt(k + 1, Some(first), stales + 1, unreachable, sick)
             case None => exhausted(Some(first), stales + 1, unreachable, sick)
           }
-        case Right(answer) if firstStale.nonEmpty && !acceptAfterStale(answer) =>
-          settle(firstStale.get) // not an EC key after all: the first answer stands, as before
         case Right(answer) =>
           preferred.compareAndSet(start, i) // see withCheckedFailover
           answer
@@ -931,11 +928,52 @@ class FrostBackend(
   private def clusterCallEc[A](
       what: String,
       stale: Either[StatusRuntimeException, A] => Boolean,
-      acceptAfterStale: A => Boolean,
       staleAnswer: A => (String, String) = (_: A) => ("NOT_FOUND", MayBeOld),
   )(op: SignerGrpc.SignerBlockingStub => A): Future[A] = {
     val notes = currentNotes.get
-    Future(blocking(withEcFailover(what, notes, stale, acceptAfterStale, staleAnswer)(op)))
+    Future(blocking(withEcFailover(what, notes, stale, staleAnswer)(op)))
+  }
+
+  /** [[clusterCall]] for a call on a hosted key the driver knows not to be EC (RSA decrypt,
+    * symmetric crypto, PublicKey, KeyInfo), where one cosigner's "not found" is not the cluster's
+    * answer either.
+    *
+    * A cosigner answers NOT_FOUND from its own store after asking its peers (read-repair). That
+    * makes the answer the cluster's only while the cosigner can reach those peers and read what
+    * they hold: one with a missing or unreadable replica that is cut off from the others answers
+    * NOT_FOUND for a key the cluster has. So the next cosigner is asked, the one that lacks the key
+    * loses the lead, and what the call ends with when no cosigner serves it is decided over the
+    * whole roster ([[rosterVerdict]]): NOT_FOUND once all but one cosigner said so
+    * ([[ownAnswerQuorum]]), retryable while one that may hold the key could not be reached.
+    *
+    * `absent` recognises an answer that says the key is not there (`KeyInfo.exists = false`); it
+    * ends the call as a [[NoSuchElementException]] when it is the roster's verdict. Every other
+    * status keeps its meaning: a leader-sick one fails over, and a refusal — RESOURCE_EXHAUSTED
+    * above all, the per-node decrypt limit — is returned at once and leaves the lead where it is.
+    * One attempt deadline per cosigner, inside the call's request timeout, as for [[clusterCall]]. */
+  private def clusterCallWholeRoster[A](what: String, keyId: String, absent: A => Boolean = (_: A) => false)(
+      op: SignerGrpc.SignerBlockingStub => A
+  ): Future[A] = {
+    val notes = currentNotes.get
+    val notFoundOrSick = (s: Status) => isLeaderSick(s) || s.getCode == Status.Code.NOT_FOUND
+    Future(blocking {
+      val start = startIndex()
+      withCheckedFailover[A](
+        what,
+        notFoundOrSick,
+        notFoundOrSick,
+        notes,
+        (_: String, answer: A) =>
+          if (absent(answer)) Some(Rejected(KeyAbsent, new NoSuchElementException(s"key not found or inactive: $keyId")))
+          else None,
+        start,
+        start,
+        (_: Int) => (),
+        attemptTimeout,
+        System.nanoTime() + requestTimeout.toNanos,
+        Some(hostedKeyIsNotThere _),
+      )(op)
+    })
   }
 
   private final val MayBeOld = "that cosigner may predate ec-p256-ecies or lack the key"
@@ -1838,7 +1876,7 @@ class FrostBackend(
           .setKeyId(keyId)
           .setCiphertext(ByteString.copyFrom(ciphertext))
           .build()
-        clusterCall("decrypt", isLeaderSick, isLeaderSick)(_.decrypt(req)).map(_.getPlaintext.toByteArray)
+        clusterCallWholeRoster[com.stakecraft.rutli.grpc.DecryptReply]("decrypt", keyId)(_.decrypt(req)).map(_.getPlaintext.toByteArray)
       case EncryptionAlgoSpec.EciesHkdfHmacSha256Aes128Cbc =>
         decryptEcies(ciphertext, keyId)
     }
@@ -1898,7 +1936,6 @@ class FrostBackend(
             case Left(e)       => oldOrMissing(e)
             case Right(opened) => opened.isLeft
           },
-          _ => true,
           _ => ("ECIES_AFTER_ECDH", "its shared secret did not open the ciphertext (wrong key material, or a forged blob)"),
         ) { stub =>
           val reply = stub.ecdhDerive(req)
@@ -1932,7 +1969,7 @@ class FrostBackend(
     if (ids.isHosted(keyId)) {
       val req =
         SymmetricRequest.newBuilder().setKeyId(keyId).setData(ByteString.copyFrom(data)).build()
-      clusterCall("symmetricEncrypt", isLeaderSick, isLeaderSick)(_.symmetricEncrypt(req)).map(_.getData.toByteArray)
+      clusterCallWholeRoster[com.stakecraft.rutli.grpc.SymmetricReply]("symmetricEncrypt", keyId)(_.symmetricEncrypt(req)).map(_.getData.toByteArray)
     } else delegate.encryptSymmetric(data, keyId)
 
   override def decryptSymmetric(ciphertext: Array[Byte], keyId: String): Future[Array[Byte]] =
@@ -1942,7 +1979,7 @@ class FrostBackend(
         .setKeyId(keyId)
         .setData(ByteString.copyFrom(ciphertext))
         .build()
-      clusterCall("symmetricDecrypt", isLeaderSick, isLeaderSick)(_.symmetricDecrypt(req)).map(_.getData.toByteArray)
+      clusterCallWholeRoster[com.stakecraft.rutli.grpc.SymmetricReply]("symmetricDecrypt", keyId)(_.symmetricDecrypt(req)).map(_.getData.toByteArray)
     } else delegate.decryptSymmetric(ciphertext, keyId)
 
   override def getPublicKey(keyId: String): Future[PublicKey] =
@@ -1956,16 +1993,16 @@ class FrostBackend(
       val req = PublicKeyRequest.newBuilder().setKeyId(keyId).build()
       // The cluster returns X.509 SubjectPublicKeyInfo DER — exactly what Canton's PublicKey wants —
       // and the spec it holds the key under, which decides what Canton is told it is.
-      // For a key that is (or may be) EC, a NOT_FOUND may come from a cosigner that predates the
-      // spec: confirm it with the others (withEcFailover). A key known to be RSA keeps the plain path.
+      // One cosigner's NOT_FOUND is confirmed with the others before it is believed, whatever the
+      // key's type: for a key that is (or may be) EC it may come from a cosigner that predates the
+      // spec (withEcFailover), for any key from one with a missing replica (clusterCallWholeRoster).
       val call =
         if (mayBeEc(keyId))
           clusterCallEc[PublicKeyReply](
             "publicKey",
             { case Left(e) => e.getStatus.getCode == Status.Code.NOT_FOUND; case Right(_) => false },
-            _.getSpec == EcSpec,
           )(_.publicKey(req))
-        else clusterCall("publicKey", isLeaderSick, isLeaderSick)(_.publicKey(req))
+        else clusterCallWholeRoster[PublicKeyReply]("publicKey", keyId)(_.publicKey(req))
       call.map { reply =>
         learnSpec(keyId, reply.getSpec)
         hostedPublicKey(keyId, reply.getSpec, reply.getPublicKeyDer.toByteArray)
@@ -2048,8 +2085,8 @@ class FrostBackend(
     }
     else if (ids.isHosted(keyId)) {
       val req = KeyInfoRequest.newBuilder().setKeyId(keyId).build()
-      // As for getPublicKey: `exists = false` for a key that is (or may be) EC is confirmed with the
-      // other cosigners before it is believed.
+      // As for getPublicKey: `exists = false` from one cosigner is confirmed with the others before
+      // it is believed.
       val call =
         if (mayBeEc(keyId))
           clusterCallEc[KeyInfoReply](
@@ -2058,9 +2095,8 @@ class FrostBackend(
               case Left(e)      => e.getStatus.getCode == Status.Code.NOT_FOUND
               case Right(reply) => !reply.getExists
             },
-            _.getSpec == EcSpec,
           )(_.keyInfo(req))
-        else clusterCall("keyInfo", isLeaderSick, isLeaderSick)(_.keyInfo(req))
+        else clusterCallWholeRoster[KeyInfoReply]("keyInfo", keyId, !_.getExists)(_.keyInfo(req))
       call.map { reply =>
         if (!reply.getExists) throw new NoSuchElementException(s"key not found or inactive: $keyId")
         learnSpec(keyId, reply.getSpec)
@@ -2316,6 +2352,17 @@ object FrostBackend {
   /** The failover note's reason for a hosted-key reply too few cosigners confirmed because some
     * were silent. */
   private val Unconfirmed = "UNCONFIRMED"
+  /** The failover note's reason for a hosted-key answer that says the key is not there. */
+  private val KeyAbsent = "NOT_FOUND"
+
+  /** `wholeRoster` of [[FrostBackend.clusterCallWholeRoster]]: a cosigner's NOT_FOUND, or its answer
+    * that the key does not exist, is its own and counts towards the bound at which it is final. */
+  private def hostedKeyIsNotThere(failure: Either[StatusRuntimeException, Rejected]): Option[Boolean] =
+    failure match {
+      case Left(e)         => if (e.getStatus.getCode == Status.Code.NOT_FOUND) Some(true) else None
+      case Right(rejected) => if (rejected.code == KeyAbsent) Some(true) else None
+    }
+
   /** The failover note's reason for a group key that is not the pin. */
   private val GroupKeyMismatch = "GROUP_KEY_MISMATCH"
 
