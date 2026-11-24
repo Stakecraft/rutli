@@ -54,12 +54,14 @@ class FrostNotFoundDemotionSpec extends AnyWordSpec with Matchers {
   private final class Node extends SignerGrpc.SignerImplBase {
     val name: String = s"lead-${InProcessServerBuilder.generateName()}"
     val signs = new AtomicInteger
+    val hostedCalls = new AtomicInteger
     @volatile var hosted: State = Missing
     @volatile var frostKeyMissing: Boolean = false
 
     private def noSuchKey[R](obs: StreamObserver[R]): Unit =
       obs.onError(Status.NOT_FOUND.withDescription("no such key").asRuntimeException())
-    private def serve[R](obs: StreamObserver[R])(holds: => R)(missing: => Unit): Unit =
+    private def serve[R](obs: StreamObserver[R])(holds: => R)(missing: => Unit): Unit = {
+      hostedCalls.incrementAndGet()
       hosted match {
         case Failing(status)  => obs.onError(status.asRuntimeException())
         case Missing          => missing
@@ -67,6 +69,7 @@ class FrostNotFoundDemotionSpec extends AnyWordSpec with Matchers {
           obs.onNext(holds)
           obs.onCompleted()
       }
+    }
 
     override def groupKey(req: GroupKeyRequest, obs: StreamObserver[GroupKeyReply]): Unit =
       if (frostKeyMissing) noSuchKey(obs)
@@ -101,7 +104,9 @@ class FrostNotFoundDemotionSpec extends AnyWordSpec with Matchers {
   /** Three cosigners and a backend that rotates signs over them, with the FROST key pinned. With
     * `learnRsa` the backend has also read the hosted key's public key, so it knows the key is RSA
     * and uses the calls for a key that is not EC. Then the cosigners' hosted state is `hosted`. */
-  private def withCluster[A](hosted: Seq[State], learnRsa: Boolean = false)(body: (FrostBackend, IndexedSeq[Node]) => A): A = {
+  private def withCluster[A](hosted: Seq[State], learnRsa: Boolean = false, pin: Boolean = true)(
+      body: (FrostBackend, IndexedSeq[Node]) => A
+  ): A = {
     val nodes = hosted.toIndexedSeq.map(_ => new Node)
     val servers = nodes.map(node => InProcessServerBuilder.forName(node.name).directExecutor().addService(node).build().start())
     val backend =
@@ -118,7 +123,7 @@ class FrostNotFoundDemotionSpec extends AnyWordSpec with Matchers {
           InProcessChannelBuilder.forName(endpoint).directExecutor().build()
       }
     try {
-      await(backend.getPublicKey(FrostKey)) // pins the group key; uses no sign turn
+      if (pin) await(backend.getPublicKey(FrostKey)) // pins the group key; uses no sign turn
       if (learnRsa) {
         nodes.foreach(_.hosted = Holds)
         await(backend.getPublicKey(HostedKey)).spec shouldBe EncryptionKeySpec.Rsa2048
@@ -135,7 +140,7 @@ class FrostNotFoundDemotionSpec extends AnyWordSpec with Matchers {
   private def signs(backend: FrostBackend, nodes: IndexedSeq[Node], count: Int): Seq[Int] = {
     val before = nodes.map(_.signs.get)
     (1 to count).foreach(_ => await(backend.sign(Digest, FrostKey, SigningAlgoSpec.Ed25519)) shouldBe groupSign(Digest))
-    nodes.map(_.signs.get).zip(before).map { case (now, then) => now - then }
+    nodes.map(_.signs.get).zip(before).map { case (now, prev) => now - prev }
   }
 
   /** A hosted-key call, and whether it needs the backend to know the key is RSA first. */
@@ -189,6 +194,28 @@ class FrostNotFoundDemotionSpec extends AnyWordSpec with Matchers {
     }
   }
 
+  "keyExistsAndIsActive for a FROST key the driver has not pinned" should {
+
+    "leave the sign rotation as it was when no cosigner has the key" in {
+      withCluster(Nowhere, pin = false) { (backend, nodes) =>
+        nodes.foreach(_.frostKeyMissing = true)
+        val thrown = intercept[StatusRuntimeException](await(backend.keyExistsAndIsActive(FrostKey)))
+        thrown.getStatus.getCode shouldBe Status.Code.NOT_FOUND
+        nodes.foreach(_.frostKeyMissing = false)
+        signs(backend, nodes, 6) shouldBe Seq(2, 2, 2)
+      }
+    }
+
+    "take the lead from a cosigner that lacks the key when another one has it" in {
+      withCluster(Nowhere, pin = false) { (backend, nodes) =>
+        nodes(0).frostKeyMissing = true
+        await(backend.keyExistsAndIsActive(FrostKey))
+        // The first sign pins the key from the two cosigners that have it.
+        signs(backend, nodes, 6) shouldBe Seq(0, 4, 2)
+      }
+    }
+  }
+
   "a cosigner that lacks a hosted key another cosigner serves" should {
 
     "lose the lead: it is not a sign start until leader-recovery has passed" in {
@@ -197,6 +224,23 @@ class FrostNotFoundDemotionSpec extends AnyWordSpec with Matchers {
           await(lookup.run(backend))
           // Turns 0 and 3 would start at the first cosigner; they go to the next healthy one.
           signs(backend, nodes, 6) shouldBe Seq(0, 4, 2)
+        }
+      }
+    }
+  }
+
+  "a lookup served after a cosigner without the key that sits between two sick ones (five cosigners)" should {
+
+    "give the lead to the cosigner that served, not to the sick one after the cosigner without the key" in {
+      val sick: State = Failing(Status.INTERNAL.withDescription("key store unreadable"))
+      for (lookup <- lookups) withClue(s"${lookup.name}: ") {
+        withCluster(Seq(sick, Missing, sick, Holds, Holds), lookup.learnRsa) { (backend, nodes) =>
+          await(lookup.run(backend))
+          // Everything is healthy again; the next call starts at the preferred leader.
+          nodes.foreach(_.hosted = Holds)
+          val before = nodes.map(_.hostedCalls.get)
+          await(lookup.run(backend))
+          nodes.map(_.hostedCalls.get).zip(before).map { case (now, prev) => now - prev } shouldBe Seq(0, 0, 0, 1, 0)
         }
       }
     }
