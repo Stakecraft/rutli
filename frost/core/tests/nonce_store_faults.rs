@@ -82,35 +82,42 @@ fn a_marker_that_cannot_be_examined_fails_the_pass() {
     }
 }
 
-/// A marker that cannot be removed (the directory is read-only, the complete sentinel already
-/// there) fails the pass: it is never counted as gone, nor silently kept. The sentinel must be
-/// complete: a sentinel with other content is rewritten first, which a read-only directory refuses
-/// before any marker is touched, and the removal would not be reached.
+/// A marker that cannot be removed fails the pass: it is never counted as gone, nor silently
+/// kept. The "marker" is a directory under the marker's name: unlinking a directory is refused
+/// whatever the permissions, in a directory that is otherwise fully writable, so the removal is
+/// the only step that can fail (with a read-only directory, rewriting the sentinel would fail
+/// the same way and the removal might not be reached). The sentinel is complete, so a pass has no
+/// reason to rewrite it; the test checks that it did not.
 #[test]
 fn a_marker_that_cannot_be_removed_fails_the_pass() {
+    use std::os::unix::fs::MetadataExt;
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("k.nonces");
-    let store = store_with_old_markers(&dir, &sessions(2));
+    let store = store_with_old_markers(&dir, &sessions(1));
+    let marker = dir.join("s-0.used");
+    fs::remove_file(&marker).unwrap();
+    fs::create_dir(&marker).unwrap();
+    File::open(&marker)
+        .unwrap()
+        .set_modified(SystemTime::now() - HOUR)
+        .unwrap();
     let sentinel = complete_sentinel_bytes();
-    fs::write(dir.join(PRUNED_SENTINEL), &sentinel).unwrap();
-    if !permissions_enforced(&dir) {
-        return;
-    }
-    set_mode(&dir, 0o500);
+    let sentinel_path = dir.join(PRUNED_SENTINEL);
+    fs::write(&sentinel_path, &sentinel).unwrap();
+    let inode = fs::metadata(&sentinel_path).unwrap().ino();
+
     let verdict = store.prune_older_than(HORIZON, 10);
-    set_mode(&dir, 0o700);
-    // The refusal of the removal itself (the directory cannot be written to): reading and
-    // syncing the sentinel and the directory work in a read-only directory, so any earlier step
-    // that failed would not be this error. Run with the removal skipped, the pass succeeds. (That a
-    // complete sentinel is never rewritten is `a_complete_sentinel_is_kept_as_it_is` in the crate.)
+
+    assert!(matches!(verdict, Err(CoreError::Io(_))), "got {verdict:?}");
+    assert!(marker.is_dir(), "the marker is still there");
     assert!(
-        matches!(&verdict, Err(CoreError::Io(e)) if e.kind() == std::io::ErrorKind::PermissionDenied),
-        "got {verdict:?}"
+        store.is_consumed("s-0").unwrap(),
+        "s-0 must still be burned"
     );
-    assert_eq!(fs::read(dir.join(PRUNED_SENTINEL)).unwrap(), sentinel);
-    for s in sessions(2) {
-        assert!(store.is_consumed(&s).unwrap(), "{s} must still be burned");
-    }
+    // The complete sentinel was left as it was: not rewritten (a rewrite would succeed here and
+    // give the file a new inode).
+    assert_eq!(fs::metadata(&sentinel_path).unwrap().ino(), inode);
+    assert_eq!(fs::read(&sentinel_path).unwrap(), sentinel);
 }
 
 /// Passes over the same store at once: none fails on a marker another removed first (between its
