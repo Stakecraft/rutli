@@ -34,7 +34,17 @@
 # Canton bootstrap script and the procedure script leave marker files), PREFIX, DEALER, and the
 # helpers step and fail.
 
-: "${CANTON_HOME:?Set CANTON_HOME to an extracted Canton 3.6.1 release}"
+: "${CANTON_HOME:?Set CANTON_HOME to an extracted Canton 3.6.x or 3.7.x release}"
+# The release's version, from its jar (lib/canton-open-source-<version>.jar).
+_jars=("$CANTON_HOME"/lib/canton-open-source-*.jar)
+[ -e "${_jars[0]}" ] || fail "no lib/canton-open-source-*.jar in $CANTON_HOME"
+CANTON_VERSION="$(basename "${_jars[0]}" .jar)"
+CANTON_VERSION="${CANTON_VERSION#canton-open-source-}"
+case "$CANTON_VERSION" in
+  3.6.*) CANTON_KEY_EXPORT_GATE="features.enable-preview-commands" ;;
+  3.7.*) CANTON_KEY_EXPORT_GATE="parameters.enable-key-download" ;;
+  *) fail "unsupported Canton release '$CANTON_VERSION' in $CANTON_HOME (3.6.x or 3.7.x)" ;;
+esac
 JAVA_HOME="${CANTON_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home}}"
 export JAVA_HOME
 BASE_PORT="${E2E_BASE_PORT:-19800}"
@@ -196,8 +206,11 @@ canton {
   // Console waits (retry_until_true, admin commands, pings) default to 1 min and 30 s. A loaded CI
   // runner can be slower than that without anything being wrong; a real failure still fails.
   parameters.timeouts.console { bounded = 3.minutes, ledger-command = 3.minutes, ping = 2.minutes }
-  // Step 2.1: the participant refuses ExportKeyPair without it, and the console needs it as well.
+  // Step 2.1. The console needs preview commands for keys.secret.download_to on a remote node. The
+  // participant's own gate for ExportKeyPair is the same flag on Canton 3.6 and
+  // parameters.enable-key-download on Canton 3.7, a key Canton 3.6 refuses as unknown.
   features.enable-preview-commands = yes
+$(if [ "$CANTON_KEY_EXPORT_GATE" = parameters.enable-key-download ]; then echo "  parameters.enable-key-download = yes"; fi)
   // repair.import_acs (the stand-in for the Splice party migrator's ACS import).
   features.enable-repair-commands = yes
   sequencers.sequencer1 {

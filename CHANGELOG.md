@@ -423,6 +423,11 @@ Upgrading a 0.4.x cluster to 0.5.0: [docs/upgrading-to-0.5.md](docs/upgrading-to
   contracts, and the checks of Step 7 and Step 8 that a script can make. Wrong passwords, wrong fingerprints and a
   dealt bundle after the refresh are refused on the way. Step 6 is the Splice re-onboard and needs a Splice network: the
   script makes the same topology changes from the new participant instead, and the Splice step is left to a LocalNet job.
+- **The migration e2e also runs on Canton 3.7.2**, the version Splice 0.10.1 ships, as a second step of the e2e workflow.
+  On 3.7 the participant serves the key export only with `canton.parameters.enable-key-download`, which the script
+  sets there (3.6 refuses the key as unknown and gates the export with preview commands). The sequencer connections that
+  `docs/migration.md` §10 (lesson a) saves and restores are now written at the synchronizer's protocol version: protocol
+  version 35 no longer exists on Canton 3.7, so writing them at 35 fails there.
 
 ### Security
 

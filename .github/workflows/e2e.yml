@@ -6,8 +6,9 @@
 #   scripts/e2e-split-ceremony.sh       split ceremony, refresh, signing policy (no Canton)
 #   scripts/e2e-carry-protocol-keys.sh  carried signing, sequencer-auth and ECIES keys on Canton 3.6.1
 #   scripts/e2e-ecies-hosted.sh         hosted ECIES keys on Canton 3.6.1, key-file v2 and deletes
-#   scripts/e2e-migration.sh            the whole migration of docs/migration.md on Canton 3.6.1
-#                                       (export, split, new participant, rollback, party move, verify)
+#   scripts/e2e-migration.sh            the whole migration of docs/migration.md, on Canton 3.6.1 and
+#                                       again on Canton 3.7.2 (the Splice 0.10.1 version): export,
+#                                       split, new participant, rollback, party move, verify
 #
 # One job builds the cosigner and the driver jar once and runs the scripts one after another, so the
 # whole workflow takes one runner. Each script is its own step (its own time in the run summary)
@@ -43,6 +44,11 @@ env:
   # the release asset). To bump: change CANTON_TAG, CANTON_VERSION and CANTON_SHA256 together.
   CANTON_VERSION: "3.6.1"
   CANTON_SHA256: 45285086270327cb3a7a095cc501d850f274490032aa2a13ff8811f72ba3bfee
+  # The Canton 3.7 release the migration script runs as well (Splice 0.10.1 ships 3.7.2; on 3.7 the key
+  # export is gated by parameters.enable-key-download). The driver jar is the one built against
+  # CANTON_TAG: the KMS driver API is byte-identical from v3.6.1 to v3.7.3 (docs/splice-0.10.md).
+  CANTON37_VERSION: "3.7.2"
+  CANTON37_SHA256: dc90cb3497f8cddc86298e1d8c6f1c2a5c4bf6c9e4b35b2c641f0d94fa732092
   SBT_OPTS: "-Xmx4g -Xss8m"
 
 # Least privilege; nothing here writes to the repository.
@@ -62,8 +68,9 @@ jobs:
   e2e:
     name: E2E ceremonies (split, carry, ECIES hosted)
     runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-latest' }}
-    # Builds (cold: ~15 min) plus the three step timeouts below, with room to spare.
-    timeout-minutes: 120
+    # Builds (cold: ~15 min) plus the five script steps below (18 + 4 x 28 min caps). A healthy run
+    # takes a few minutes per script; the caps are for a hung one, and at most one hangs at a time.
+    timeout-minutes: 150
     env:
       # The scripts keep their work dirs (KEEP=1) under $E2E_TMP, uploaded when a step fails.
       KEEP: "1"
@@ -143,6 +150,28 @@ jobs:
       - name: CANTON_HOME
         run: echo "CANTON_HOME=$HOME/.cache/rutli-e2e/canton-open-source-${CANTON_VERSION}" >> "$GITHUB_ENV"
 
+      # The Canton 3.7 release for the second migration run; see CANTON37_VERSION.
+      - name: Cache Canton 3.7 release
+        id: canton37-release-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/rutli-e2e/canton-open-source-${{ env.CANTON37_VERSION }}
+          key: canton-release-${{ runner.os }}-${{ env.CANTON37_VERSION }}-${{ env.CANTON37_SHA256 }}
+      - name: Download Canton 3.7 release
+        if: steps.canton37-release-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          tarball="canton-open-source-${CANTON37_VERSION}.tar.gz"
+          tmp="$(mktemp -d)"
+          curl -fsSL --retry 3 -o "${tmp}/${tarball}" \
+            "https://github.com/digital-asset/canton/releases/download/v${CANTON37_VERSION}/${tarball}"
+          echo "${CANTON37_SHA256}  ${tmp}/${tarball}" | sha256sum -c -
+          mkdir -p "$HOME/.cache/rutli-e2e"
+          rm -rf "$HOME/.cache/rutli-e2e/canton-open-source-${CANTON37_VERSION}"
+          tar -xzf "${tmp}/${tarball}" -C "$HOME/.cache/rutli-e2e"
+          rm -rf "$tmp"
+          test -x "$HOME/.cache/rutli-e2e/canton-open-source-${CANTON37_VERSION}/bin/canton"
+
       # grpcurl (the split ceremony's raw gRPC calls) is pinned by version and sha256 and installed
       # without sudo. To bump: set GRPCURL_VERSION, then GRPCURL_SHA256 to the linux_x86_64 line of
       # that release's grpcurl_<version>_checksums.txt.
@@ -221,6 +250,16 @@ jobs:
           TMPDIR: ${{ env.E2E_TMP }}
           SKIP_BUILD: "1"
         run: timeout -k 30s 28m scripts/e2e-migration.sh
+
+      - name: e2e-migration.sh on Canton 3.7
+        if: ${{ !cancelled() && steps.build-rust.outcome == 'success' && steps.build-jar.outcome == 'success' }}
+        timeout-minutes: 30
+        env:
+          TMPDIR: ${{ env.E2E_TMP }}
+          SKIP_BUILD: "1"
+        run: |
+          export CANTON_HOME="$HOME/.cache/rutli-e2e/canton-open-source-${CANTON37_VERSION}"
+          timeout -k 30s 28m scripts/e2e-migration.sh
 
       # Logs, configs, journals and the driver audit of every script, on any failure (and when the job
       # timeout cancels a run that is not a superseded pull request run). Key material

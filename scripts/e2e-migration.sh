@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
-# End-to-end: the whole migration procedure of docs/migration.md (Flow 2b) on a real Canton 3.6.1
-# participant, as far as open-source Canton goes without Splice.
+# End-to-end: the whole migration procedure of docs/migration.md (Flow 2b) on a real Canton
+# participant, 3.6.x or 3.7.x, as far as open-source Canton goes without Splice.
 #
-#   CANTON_HOME=~/.cache/canton-3.6.1/canton-open-source-3.6.1 scripts/e2e-migration.sh
+#   CANTON_HOME=~/.cache/canton-3.7.2/canton-open-source-3.7.2 scripts/e2e-migration.sh
 #   (from the repo root; KEEP=1 keeps the work dir; SKIP_BUILD=1 reuses existing binaries)
 #
 # This file is the procedure. How the cosigners and Canton are started and reached is the
@@ -70,10 +70,14 @@
 # Not covered, and why:
 #   - Step 6 as written (dump Secret, `migrateValidatorParty`, ACS import from Scan, wallet,
 #     ValidatorLicense, traffic top-up): Splice only. It needs a LocalNet job.
-#   - Step 2.1 on Canton 3.7 (`enable-key-download`): this runs Canton 3.6.1.
 #   - Everything Kubernetes or Helm (pods, PVCs, NetworkPolicy, `kubectl cp`, Helm rollback), the
 #     air-gapped dealer host, witnesses, and destruction of copies outside this machine (WAL,
 #     replicas, dumps, object storage, snapshots).
+#
+# Canton 3.6 and 3.7 run the same procedure. What differs: the participant's server-side gate for
+# the export (Step 2.1: preview commands on 3.6, `parameters.enable-key-download` on 3.7, set by the
+# environment), and the protocol version (36 on 3.6, 37 on 3.7; PV 35 no longer exists on 3.7, so
+# Lessons a's connection bytes are written at the synchronizer's version, not at 35).
 #
 # Requires: cargo, sbt, jq, openssl, an OpenJDK 17+ (Oracle's JDK refuses Canton's unsigned
 # BouncyCastle for Cipher; set CANTON_JAVA_HOME, otherwise JAVA_HOME, otherwise Homebrew's openjdk).
@@ -485,7 +489,7 @@ Files.write(Paths.get(IDENTITY_FILE), idSnap.toByteArray)
 // Lessons a: the sequencer connections saved as bytes and restored, through reflection.
 val toInt = (s: com.digitalasset.canton.admin.api.client.data.SequencerConnections) => s.getClass.getMethod("toInternal").invoke(s).asInstanceOf[com.digitalasset.canton.sequencing.SequencerConnections]
 val fromInt = (i: com.digitalasset.canton.sequencing.SequencerConnections) => { val o = com.digitalasset.canton.admin.api.client.data.SequencerConnections; o.getClass.getMethod("fromInternal", classOf[com.digitalasset.canton.sequencing.SequencerConnections]).invoke(o, i).asInstanceOf[com.digitalasset.canton.admin.api.client.data.SequencerConnections] }
-val savedConnections: Array[Byte] = toInt(syncCfg.sequencerConnections).toByteArray(ProtocolVersion.v35)
+val savedConnections: Array[Byte] = toInt(syncCfg.sequencerConnections).toByteArray(PV)
 val restoredConnections = fromInt(com.digitalasset.canton.sequencing.SequencerConnections.fromTrustedByteArray(savedConnections).fold(e => sys.error(e.toString), identity))
 check(restoredConnections == syncCfg.sequencerConnections, s"sequencer connections changed in the round trip: $restoredConnections")
 val restoredCfg = syncCfg.copy(sequencerConnections = restoredConnections)
@@ -688,7 +692,7 @@ main() {
   EXPORT_PW="$(openssl rand -base64 24)" # Step 2.3: random, at least 24 characters, in the environment only
   export E2E_OLD_ID="$OLD_ID" E2E_NEW_ID_ROLLED_BACK="$NEW_ID_ROLLED_BACK" E2E_NEW_ID="$NEW_ID"
 
-  step "Run Canton 3.6.1; it stays up until the end"
+  step "Run Canton $CANTON_VERSION; it stays up until the end"
   write_bootstrap "$WORK/e2e.canton"
   env_canton_start "$WORK/e2e.canton"
 
