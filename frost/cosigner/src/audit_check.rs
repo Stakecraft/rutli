@@ -295,6 +295,69 @@ pub fn cross_check(
     opts: &Options,
 ) -> Report {
     let mut r = Report::default();
+    info_driver_audit_summary(&mut r, audit);
+    let driver = group_driver_signs(audit);
+    let idx = index_journals(&mut r, audit, journals);
+    flag_journaled_not_audited(&mut r, &idx.journaled, &driver);
+    let mut counts = DriverCounts {
+        compared: idx.compared,
+        ..Default::default()
+    };
+    check_audited_signs(&mut r, &driver, &idx, opts, &mut counts);
+    report_unattributable_signs(&mut r, audit, &idx.no_intent, opts);
+    check_nothing_to_compare(&mut r, audit, journals, counts.compared);
+    info_verdict(&mut r, counts.compared);
+    r
+}
+
+/// What the journals hold, indexed for [`cross_check`].
+#[derive(Default)]
+struct JournalIndex {
+    /// Cosigner side, keyed on the authorized operation: (key, request id) -> message (its
+    /// SHA-256, the driver's `msg=`) -> the journaled digest and the journals that recorded it.
+    /// Retries of one driver call re-sign the intent (a new intent hash) but keep the request id
+    /// and the message, so the message, not the intent hash, is what one driver sign pins.
+    journaled: BTreeMap<(String, String), BTreeMap<String, Journaled>>,
+    /// The earliest entry per key.
+    first_ts: BTreeMap<String, u64>,
+    /// Entries without an intent, by (journal, key): count, first and last timestamp.
+    no_intent: BTreeMap<(String, String), (usize, u64, u64)>,
+    /// Journal entries older than the driver audit log's first entry.
+    skipped_old: usize,
+    /// Signatures actually put side by side: journaled signs inside the driver audit's window.
+    compared: usize,
+}
+
+/// Counters of the driver-side pass of [`cross_check`].
+#[derive(Default)]
+struct DriverCounts {
+    /// Signatures put side by side so far (journaled and audited ones).
+    compared: usize,
+    /// Audited signs older than the supplied journals, or for keys no journal holds.
+    skipped_retention: usize,
+    /// Audited signs without `msg=` that were compared on the request id only.
+    legacy_compared: usize,
+}
+
+/// What the driver-side pass reads for one `(key, request id)` of the driver audit.
+struct GroupCtx<'a> {
+    key: &'a str,
+    rid: &'a str,
+    /// The messages journaled under this key and request id, if any.
+    by_message: Option<&'a BTreeMap<String, Journaled>>,
+    first_ts: &'a BTreeMap<String, u64>,
+    opts: &'a Options,
+}
+
+impl GroupCtx<'_> {
+    /// Whether an audited sign predates the journals of its key, with no journal holding it.
+    fn too_old(&self, s: &DriverSign) -> bool {
+        self.first_ts.get(self.key).is_none_or(|&t| s.ts_ms < t) && self.by_message.is_none()
+    }
+}
+
+/// Add the one-line summary of the driver audit to the report.
+fn info_driver_audit_summary(r: &mut Report, audit: &DriverAudit) {
     r.info(format!(
         "driver audit: {} entries, {} sign(s) ({} with an intent, {} with a message digest){}",
         audit.entries,
@@ -311,6 +374,10 @@ pub fn cross_check(
             ""
         }
     ));
+}
+
+/// The driver audit's sign lines grouped by `(key, request id)`.
+fn group_driver_signs(audit: &DriverAudit) -> BTreeMap<(String, String), DriverGroup<'_>> {
     // Driver side, by (key, request id): its lines by message (`msg=`), plus those of an older
     // driver that carry no message digest. The driver draws a fresh random request id for every
     // sign and binds one message to it, so each line stands for one authorized message.
@@ -329,189 +396,275 @@ pub fn cross_check(
             }
         }
     }
-    // Cosigner side, keyed on the authorized operation: (key, request id) -> message (its SHA-256,
-    // the driver's `msg=`) -> the journaled digest and the journals that recorded it. Retries of one
-    // driver call re-sign the intent (a new intent hash) but keep the request id and the message, so
-    // the message, not the intent hash, is what one driver sign pins. Plus the earliest entry per
-    // key.
-    let mut journaled: BTreeMap<(String, String), BTreeMap<String, Journaled>> = BTreeMap::new();
-    let mut first_ts: BTreeMap<String, u64> = BTreeMap::new();
-    let mut no_intent: BTreeMap<(String, String), (usize, u64, u64)> = BTreeMap::new();
-    let mut skipped_old = 0usize;
-    // Signatures actually put side by side: journaled signs inside the driver audit's window, and
-    // audited ok signs inside the journals' window.
-    let mut compared = 0usize;
-    for (label, entries) in journals {
-        if entries.is_empty() {
-            // Not a failure on its own: with t < n a node the leaders never pick journals nothing.
-            // `--min-journals` still holds every audited sign to the threshold.
-            r.info(format!(
-                "WARNING: journal {label} is empty — that node took part in no signature, or the path is wrong \
-                 (a node's data_dir/journal, one subdirectory per key) or the copy failed"
-            ));
-        }
-        r.info(format!(
-            "journal {label}: {} entr{} over {} key(s)",
-            entries.len(),
-            if entries.len() == 1 { "y" } else { "ies" },
-            entries
-                .iter()
-                .map(|e| e.key_id.as_str())
-                .collect::<BTreeSet<_>>()
-                .len()
-        ));
-        for e in entries {
-            let first = first_ts.entry(e.key_id.clone()).or_insert(e.ts_ms);
-            *first = (*first).min(e.ts_ms);
-            match e.purpose.as_str() {
-                PURPOSE_SIGN => {
-                    if audit.first_ts_ms.is_none_or(|t| e.ts_ms < t) {
-                        skipped_old += 1;
-                        continue;
-                    }
-                    compared += 1;
-                    journaled
-                        .entry((e.key_id.clone(), e.request_id.clone()))
-                        .or_default()
-                        .entry(message_sha256(&e.digest))
-                        .or_insert_with(|| (e.digest.clone(), BTreeSet::new()))
-                        .1
-                        .insert(label.clone());
-                }
-                PURPOSE_NO_INTENT => {
-                    let n = no_intent
-                        .entry((label.clone(), e.key_id.clone()))
-                        .or_insert((0, e.ts_ms, e.ts_ms));
-                    n.0 += 1;
-                    n.1 = n.1.min(e.ts_ms);
-                    n.2 = n.2.max(e.ts_ms);
-                }
-                _ => {} // sign-test: the operator's fixed digest, not a driver signature
-            }
-        }
-    }
-    if skipped_old > 0 {
-        r.info(format!("{skipped_old} journal entr(ies) older than the driver audit log's first entry: not compared"));
-    }
+    driver
+}
 
-    let join = |labels: &BTreeSet<String>| labels.iter().cloned().collect::<Vec<_>>().join(", ");
-    let describe = |sha: &str, (digest, labels): &Journaled| {
-        format!("message {digest} (msg={sha}) at {}", join(labels))
-    };
-    // 1. Journaled at a cosigner, absent from the driver audit — every message of the request id —
-    // or journaled over messages the driver did not sign under that request id.
-    for ((key, rid), by_message) in &journaled {
+/// Index every journal entry: the signs inside the driver audit's window, the earliest entry per
+/// key and the entries without an intent.
+fn index_journals(
+    r: &mut Report,
+    audit: &DriverAudit,
+    journals: &[(String, Vec<JournalEntry>)],
+) -> JournalIndex {
+    let mut idx = JournalIndex::default();
+    for (label, entries) in journals {
+        info_journal_summary(r, label, entries);
+        for e in entries {
+            index_journal_entry(audit, label, e, &mut idx);
+        }
+    }
+    if idx.skipped_old > 0 {
+        r.info(format!(
+            "{} journal entr(ies) older than the driver audit log's first entry: not compared",
+            idx.skipped_old
+        ));
+    }
+    idx
+}
+
+/// Report one journal's entry count, with a warning when it is empty.
+fn info_journal_summary(r: &mut Report, label: &str, entries: &[JournalEntry]) {
+    if entries.is_empty() {
+        // Not a failure on its own: with t < n a node the leaders never pick journals nothing.
+        // `--min-journals` still holds every audited sign to the threshold.
+        r.info(format!(
+            "WARNING: journal {label} is empty — that node took part in no signature, or the path is wrong \
+             (a node's data_dir/journal, one subdirectory per key) or the copy failed"
+        ));
+    }
+    r.info(format!(
+        "journal {label}: {} entr{} over {} key(s)",
+        entries.len(),
+        if entries.len() == 1 { "y" } else { "ies" },
+        entries
+            .iter()
+            .map(|e| e.key_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+    ));
+}
+
+/// Add one journal entry to the index.
+fn index_journal_entry(audit: &DriverAudit, label: &str, e: &JournalEntry, idx: &mut JournalIndex) {
+    let first = idx.first_ts.entry(e.key_id.clone()).or_insert(e.ts_ms);
+    *first = (*first).min(e.ts_ms);
+    match e.purpose.as_str() {
+        PURPOSE_SIGN => {
+            if audit.first_ts_ms.is_none_or(|t| e.ts_ms < t) {
+                idx.skipped_old += 1;
+                return;
+            }
+            idx.compared += 1;
+            idx.journaled
+                .entry((e.key_id.clone(), e.request_id.clone()))
+                .or_default()
+                .entry(message_sha256(&e.digest))
+                .or_insert_with(|| (e.digest.clone(), BTreeSet::new()))
+                .1
+                .insert(label.to_string());
+        }
+        PURPOSE_NO_INTENT => {
+            let n = idx
+                .no_intent
+                .entry((label.to_string(), e.key_id.clone()))
+                .or_insert((0, e.ts_ms, e.ts_ms));
+            n.0 += 1;
+            n.1 = n.1.min(e.ts_ms);
+            n.2 = n.2.max(e.ts_ms);
+        }
+        _ => {} // sign-test: the operator's fixed digest, not a driver signature
+    }
+}
+
+/// The journals that recorded a message, joined with `, `.
+fn join_labels(labels: &BTreeSet<String>) -> String {
+    labels.iter().cloned().collect::<Vec<_>>().join(", ")
+}
+
+/// A journaled message as the report names it: digest, `msg=` and the journals holding it.
+fn describe_journaled(sha: &str, (digest, labels): &Journaled) -> String {
+    format!("message {digest} (msg={sha}) at {}", join_labels(labels))
+}
+
+/// Step 1: flag what is journaled at a cosigner but absent from the driver audit — every message
+/// of the request id — or journaled over messages the driver did not sign under that request id.
+fn flag_journaled_not_audited(
+    r: &mut Report,
+    journaled: &BTreeMap<(String, String), BTreeMap<String, Journaled>>,
+    driver: &BTreeMap<(String, String), DriverGroup<'_>>,
+) {
+    for ((key, rid), by_message) in journaled {
         let Some(g) = driver.get(&(key.clone(), rid.clone())) else {
             for (sha, m) in by_message {
                 r.flag(format!(
                     "key {key} request {rid} was signed ({}) but is not in the driver audit log — the \
                      driver audit tail was truncated, or a signature was made outside the driver with \
                      its certificate",
-                    describe(sha, m)
+                    describe_journaled(sha, m)
                 ));
             }
             continue;
         };
-        // Messages no `msg=` line of this request id names.
-        let unmatched: Vec<_> = by_message
+        flag_out_of_band_messages(r, key, rid, by_message, g);
+    }
+}
+
+/// Flag the messages journaled under an audited request id that the driver did not sign.
+fn flag_out_of_band_messages(
+    r: &mut Report,
+    key: &str,
+    rid: &str,
+    by_message: &BTreeMap<String, Journaled>,
+    g: &DriverGroup<'_>,
+) {
+    // Messages no `msg=` line of this request id names.
+    let unmatched: Vec<_> = by_message
+        .iter()
+        .filter(|(sha, _)| !g.by_msg.contains_key(*sha))
+        .collect();
+    if g.legacy_lines == 0 {
+        // Every driver line names its message: each other message is out of band, by name.
+        let driver_signed = g
+            .by_msg
             .iter()
-            .filter(|(sha, _)| !g.by_msg.contains_key(*sha))
-            .collect();
-        if g.legacy_lines == 0 {
-            // Every driver line names its message: each other message is out of band, by name.
-            let driver_signed = g
-                .by_msg
-                .iter()
-                .map(|(m, s)| format!("msg={m} (seq {})", s.seq))
-                .collect::<Vec<_>>()
-                .join(", ");
-            for (sha, m) in unmatched {
-                r.flag(format!(
-                    "key {key} request {rid}: {} was signed OUT OF BAND — the driver audit log signed only \
-                     {driver_signed} under this request id, and the driver binds one message to each request \
-                     id, so this one was signed outside the driver with its certificate",
-                    describe(sha, m)
-                ));
-            }
-        } else if unmatched.len() > g.legacy_lines {
-            // An older driver's lines carry no message: count, as they cannot be told apart.
+            .map(|(m, s)| format!("msg={m} (seq {})", s.seq))
+            .collect::<Vec<_>>()
+            .join(", ");
+        for (sha, m) in unmatched {
             r.flag(format!(
-                "key {key} request {rid} was signed over {} different messages ({}) but the driver \
-                 audit log holds {} sign(s) for it (seq {}) — the driver binds one message to each \
-                 request id, so at least {} of them were signed outside the driver with its \
-                 certificate",
-                by_message.len(),
-                by_message.iter().map(|(sha, m)| describe(sha, m)).collect::<Vec<_>>().join("; "),
-                g.lines,
-                g.legacy.or_else(|| g.by_msg.values().next().copied()).map_or(0, |s| s.seq),
-                unmatched.len() - g.legacy_lines
+                "key {key} request {rid}: {} was signed OUT OF BAND — the driver audit log signed only \
+                 {driver_signed} under this request id, and the driver binds one message to each request \
+                 id, so this one was signed outside the driver with its certificate",
+                describe_journaled(sha, m)
+            ));
+        }
+    } else if unmatched.len() > g.legacy_lines {
+        // An older driver's lines carry no message: count, as they cannot be told apart.
+        r.flag(format!(
+            "key {key} request {rid} was signed over {} different messages ({}) but the driver \
+             audit log holds {} sign(s) for it (seq {}) — the driver binds one message to each \
+             request id, so at least {} of them were signed outside the driver with its \
+             certificate",
+            by_message.len(),
+            by_message
+                .iter()
+                .map(|(sha, m)| describe_journaled(sha, m))
+                .collect::<Vec<_>>()
+                .join("; "),
+            g.lines,
+            g.legacy
+                .or_else(|| g.by_msg.values().next().copied())
+                .map_or(0, |s| s.seq),
+            unmatched.len() - g.legacy_lines
+        ));
+    }
+}
+
+/// Step 2: flag what is in the driver audit (ok) but journaled by too few cosigners.
+fn check_audited_signs(
+    r: &mut Report,
+    driver: &BTreeMap<(String, String), DriverGroup<'_>>,
+    idx: &JournalIndex,
+    opts: &Options,
+    counts: &mut DriverCounts,
+) {
+    for ((key, rid), g) in driver {
+        let ctx = GroupCtx {
+            key: key.as_str(),
+            rid: rid.as_str(),
+            by_message: idx.journaled.get(&(key.clone(), rid.clone())),
+            first_ts: &idx.first_ts,
+            opts,
+        };
+        check_group_messages(r, g, &ctx, counts);
+        check_group_legacy(r, g, &ctx, counts);
+    }
+    if counts.skipped_retention > 0 {
+        r.info(format!(
+            "{} driver sign(s) older than the supplied journals (retention) or for keys no \
+             journal holds: not compared",
+            counts.skipped_retention
+        ));
+    }
+    if counts.legacy_compared > 0 {
+        r.info(format!(
+            "{} driver sign(s) without msg= (an older driver): matched on the request id only",
+            counts.legacy_compared
+        ));
+    }
+}
+
+/// Check each audited message of one `(key, request id)`, by name.
+fn check_group_messages(
+    r: &mut Report,
+    g: &DriverGroup<'_>,
+    ctx: &GroupCtx<'_>,
+    counts: &mut DriverCounts,
+) {
+    let (key, rid, opts) = (ctx.key, ctx.rid, ctx.opts);
+    for (msg, s) in &g.by_msg {
+        if !s.ok {
+            continue;
+        }
+        if ctx.too_old(s) {
+            counts.skipped_retention += 1;
+            continue;
+        }
+        counts.compared += 1;
+        let n = ctx
+            .by_message
+            .and_then(|m| m.get(msg))
+            .map_or(0, |(_, l)| l.len());
+        if n < opts.min_journals {
+            r.flag(format!(
+                "key {key} request {rid} msg={msg} (driver audit seq {}) signed ok but is in {n} of \
+                 the supplied journals (need {}) — a cosigner journal was lost or rolled back, or not \
+                 every journal was supplied",
+                s.seq, opts.min_journals
             ));
         }
     }
-    // 2. In the driver audit (ok), journaled by too few cosigners.
-    let mut skipped_retention = 0usize;
-    let mut legacy_compared = 0usize;
-    for ((key, rid), g) in &driver {
-        let by_message = journaled.get(&(key.clone(), rid.clone()));
-        let too_old =
-            |s: &DriverSign| first_ts.get(key).is_none_or(|&t| s.ts_ms < t) && by_message.is_none();
-        // Each audited message, by name.
-        for (msg, s) in &g.by_msg {
-            if !s.ok {
-                continue;
-            }
-            if too_old(s) {
-                skipped_retention += 1;
-                continue;
-            }
-            compared += 1;
-            let n = by_message
-                .and_then(|m| m.get(msg))
-                .map_or(0, |(_, l)| l.len());
-            if n < opts.min_journals {
-                r.flag(format!(
-                    "key {key} request {rid} msg={msg} (driver audit seq {}) signed ok but is in {n} of \
-                     the supplied journals (need {}) — a cosigner journal was lost or rolled back, or not \
-                     every journal was supplied",
-                    s.seq, opts.min_journals
-                ));
-            }
+}
+
+/// Check the line of an older driver (no `msg=`) of one `(key, request id)`: the most journals
+/// holding any one message of the request (several messages are flagged by step 1).
+fn check_group_legacy(
+    r: &mut Report,
+    g: &DriverGroup<'_>,
+    ctx: &GroupCtx<'_>,
+    counts: &mut DriverCounts,
+) {
+    let (key, rid, opts) = (ctx.key, ctx.rid, ctx.opts);
+    if let Some(s) = g.legacy.filter(|s| s.ok) {
+        if ctx.too_old(s) {
+            counts.skipped_retention += 1;
+            return;
         }
-        // An older driver's line: the most journals holding any one message of the request (several
-        // messages are flagged above).
-        if let Some(s) = g.legacy.filter(|s| s.ok) {
-            if too_old(s) {
-                skipped_retention += 1;
-                continue;
-            }
-            legacy_compared += 1;
-            compared += 1;
-            let n = by_message
-                .and_then(|m| m.values().map(|(_, l)| l.len()).max())
-                .unwrap_or(0);
-            if n < opts.min_journals {
-                r.flag(format!(
-                    "key {key} request {rid} (driver audit seq {}) signed ok but is in {n} of the supplied \
-                     journals (need {}) — a cosigner journal was lost or rolled back, or not every journal \
-                     was supplied",
-                    s.seq, opts.min_journals
-                ));
-            }
+        counts.legacy_compared += 1;
+        counts.compared += 1;
+        let n = ctx
+            .by_message
+            .and_then(|m| m.values().map(|(_, l)| l.len()).max())
+            .unwrap_or(0);
+        if n < opts.min_journals {
+            r.flag(format!(
+                "key {key} request {rid} (driver audit seq {}) signed ok but is in {n} of the supplied \
+                 journals (need {}) — a cosigner journal was lost or rolled back, or not every journal \
+                 was supplied",
+                s.seq, opts.min_journals
+            ));
         }
     }
-    if skipped_retention > 0 {
-        r.info(format!(
-            "{skipped_retention} driver sign(s) older than the supplied journals (retention) or for keys no \
-             journal holds: not compared"
-        ));
-    }
-    if legacy_compared > 0 {
-        r.info(format!(
-            "{legacy_compared} driver sign(s) without msg= (an older driver): matched on the request id only"
-        ));
-    }
-    // 3. Unattributable signatures.
-    for ((label, key), (n, first, last)) in &no_intent {
+}
+
+/// Step 3: report the signatures without an intent, which cannot be matched to the driver audit.
+fn report_unattributable_signs(
+    r: &mut Report,
+    audit: &DriverAudit,
+    no_intent: &BTreeMap<(String, String), (usize, u64, u64)>,
+    opts: &Options,
+) {
+    for ((label, key), (n, first, last)) in no_intent {
         let msg = format!(
             "{label}: {n} signature(s) with key {key} without a signing intent ({} .. {}) — cannot be \
              matched to the driver audit",
@@ -534,6 +687,15 @@ pub fn cross_check(
             "{legacy} driver sign(s) without an intent: not matchable"
         ));
     }
+}
+
+/// Record why the comparison proves nothing, when an empty side or no common window says so.
+fn check_nothing_to_compare(
+    r: &mut Report,
+    audit: &DriverAudit,
+    journals: &[(String, Vec<JournalEntry>)],
+    compared: usize,
+) {
     if audit.entries == 0 {
         r.empty(
             "the driver audit log is empty — copy the driver's audit-log-path (after the journals); an \
@@ -554,6 +716,10 @@ pub fn cross_check(
                 .into(),
         );
     }
+}
+
+/// Add the closing verdict line to the report.
+fn info_verdict(r: &mut Report, compared: usize) {
     r.info(match r.verdict() {
         Verdict::Consistent => format!(
             "consistent: {compared} signature record(s) compared; every journaled signature is in the driver \
@@ -564,7 +730,6 @@ pub fn cross_check(
             "NOT consistent: nothing to compare, so this run proves nothing (exit 3)".into()
         }
     });
-    r
 }
 
 /// `YYYY-MM-DDTHH:MM:SS[.fraction]Z` (Java's `Instant.toString`) as Unix epoch milliseconds.

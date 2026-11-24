@@ -212,6 +212,23 @@ impl Report {
         for b in &self.backups {
             out.push_str(&format!("  backup {}\n", printable(b)));
         }
+        self.push_finding_lines(&mut out);
+        self.push_issue_lines(&mut out);
+        self.push_summary_line(&mut out);
+        out.push_str("NOT CHECKED (no file walk sees these):\n");
+        for n in &self.not_checked {
+            out.push_str(&format!("  - {n}\n"));
+        }
+        out.push_str(match self.exit_code() {
+            0 => "result: nothing found on the paths given (exit 0)\n",
+            1 => "result: findings (exit 1)\n",
+            _ => "result: some paths could not be read; the scan is incomplete (exit 2)\n",
+        });
+        out
+    }
+
+    /// Append one `[finding]` line per finding, with its note.
+    fn push_finding_lines(&self, out: &mut String) {
         for f in &self.findings {
             out.push_str(&format!(
                 "[finding] {}: {} key={} epoch={} dek={}\n",
@@ -225,6 +242,10 @@ impl Report {
                 out.push_str(&format!("          {n}\n"));
             }
         }
+    }
+
+    /// Append the `[unclassified]`, `[error]` and `[changed]` lines.
+    fn push_issue_lines(&self, out: &mut String) {
         for u in &self.unclassified {
             out.push_str(&format!(
                 "[unclassified] {}: {}\n",
@@ -246,6 +267,10 @@ impl Report {
             };
             out.push_str(&format!("[changed] {}: {what}\n", printable(&c.path)));
         }
+    }
+
+    /// Append the `summary:` line with the finding counts by class.
+    fn push_summary_line(&self, out: &mut String) {
         let mut by_class: BTreeMap<Class, usize> = BTreeMap::new();
         for f in &self.findings {
             *by_class.entry(f.class).or_default() += 1;
@@ -266,16 +291,6 @@ impl Report {
             self.live.hosted,
             self.live.tombstones,
         ));
-        out.push_str("NOT CHECKED (no file walk sees these):\n");
-        for n in &self.not_checked {
-            out.push_str(&format!("  - {n}\n"));
-        }
-        out.push_str(match self.exit_code() {
-            0 => "result: nothing found on the paths given (exit 0)\n",
-            1 => "result: findings (exit 1)\n",
-            _ => "result: some paths could not be read; the scan is incomplete (exit 2)\n",
-        });
-        out
     }
 }
 
@@ -1183,19 +1198,17 @@ fn read_tar(
     shown: &str,
     mut on: impl FnMut(TarItem),
 ) -> std::result::Result<(), String> {
-    let io = |e: std::io::Error| e.to_string();
-    let len = f.metadata().map_err(io)?.len();
+    let len = f.metadata().map_err(io_error_text)?.len();
     let mut pos: u64 = 0;
     let mut next_name: Option<String> = None;
     let mut entries = 0usize;
-    let corrupt = |at: u64, what: &str| format!("not a readable tar at offset {at}: {what}");
     loop {
         if pos + 512 > len {
-            return Err(corrupt(pos, "truncated (no end-of-archive marker)"));
+            return Err(tar_corrupt(pos, "truncated (no end-of-archive marker)"));
         }
         let mut hdr = [0u8; 512];
-        f.seek(SeekFrom::Start(pos)).map_err(io)?;
-        f.read_exact(&mut hdr).map_err(io)?;
+        f.seek(SeekFrom::Start(pos)).map_err(io_error_text)?;
+        f.read_exact(&mut hdr).map_err(io_error_text)?;
         if hdr.iter().all(|b| *b == 0) {
             return Ok(());
         }
@@ -1205,89 +1218,145 @@ fn read_tar(
                 "more than {MAX_TAR_ENTRIES} entries; the rest of the archive was not read"
             ));
         }
-        let stored =
-            tar_num(&hdr[148..156]).ok_or_else(|| corrupt(pos, "bad header checksum field"))?;
-        let sum: u64 = hdr
-            .iter()
-            .enumerate()
-            .map(|(i, b)| {
-                if (148..156).contains(&i) {
-                    32
-                } else {
-                    u64::from(*b)
-                }
-            })
-            .sum();
-        if stored != sum {
-            return Err(corrupt(pos, "header checksum mismatch"));
-        }
-        let size = tar_num(&hdr[124..136]).ok_or_else(|| corrupt(pos, "bad size field"))?;
-        let data_at = pos + 512;
-        let padded = size
-            .checked_add(511)
-            .map(|s| s / 512 * 512)
-            .ok_or_else(|| corrupt(pos, "size overflow"))?;
-        if data_at.checked_add(padded).is_none_or(|end| end > len) {
-            return Err(corrupt(pos, "entry runs past the end of the file"));
-        }
-        let typeflag = hdr[156];
-        let read_meta = |f: &mut std::fs::File| -> std::result::Result<Vec<u8>, String> {
-            if size > MAX_TAR_META {
-                return Err(corrupt(pos, "extended header too large"));
-            }
-            let mut b = vec![0u8; size as usize];
-            f.seek(SeekFrom::Start(data_at)).map_err(io)?;
-            f.read_exact(&mut b).map_err(io)?;
-            Ok(b)
-        };
-        match typeflag {
-            b'L' => {
-                let b = read_meta(&mut f)?;
-                next_name = Some(cstr(&b));
-            }
-            b'x' => {
-                let b = read_meta(&mut f)?;
-                if let Some(p) = pax_path(&b) {
-                    next_name = Some(p);
-                }
-            }
-            b'0' | 0 | b'7' => {
-                let name = next_name.take().unwrap_or_else(|| {
-                    let n = cstr(&hdr[0..100]);
-                    let prefix = if &hdr[257..262] == b"ustar" {
-                        cstr(&hdr[345..500])
-                    } else {
-                        String::new()
-                    };
-                    if prefix.is_empty() {
-                        n
-                    } else {
-                        format!("{prefix}/{n}")
-                    }
-                });
-                let base = name.rsplit('/').next().unwrap_or(&name).to_string();
-                if candidate(&base) {
-                    let shown = format!("{shown}!{name}");
-                    if size > MAX_FILE {
-                        on(TarItem::TooLarge { shown });
-                    } else {
-                        let mut b = Zeroizing::new(vec![0u8; size as usize]);
-                        f.seek(SeekFrom::Start(data_at)).map_err(io)?;
-                        f.read_exact(&mut b).map_err(io)?;
-                        on(TarItem::Entry {
-                            shown,
-                            base,
-                            bytes: b,
-                        });
-                    }
-                }
-            }
-            _ => {
-                next_name = None;
-            }
-        }
-        pos = data_at + padded;
+        let x = tar_extent(&hdr, pos, len)?;
+        read_tar_entry(&mut f, shown, &hdr, &x, &mut next_name, &mut on)?;
+        pos = x.data_at + x.padded;
     }
+}
+
+/// Where an entry sits in a tar: its header's offset, its data size, where the data starts and the
+/// size rounded up to whole blocks.
+struct TarExtent {
+    pos: u64,
+    size: u64,
+    data_at: u64,
+    padded: u64,
+}
+
+/// An I/O error as the text the tar reader reports.
+fn io_error_text(e: std::io::Error) -> String {
+    e.to_string()
+}
+
+/// The error for a tar that cannot be read at offset `at`.
+fn tar_corrupt(at: u64, what: &str) -> String {
+    format!("not a readable tar at offset {at}: {what}")
+}
+
+/// Check a header block (checksum, size, extent inside the file) and say where its data sits.
+fn tar_extent(hdr: &[u8; 512], pos: u64, len: u64) -> std::result::Result<TarExtent, String> {
+    let stored =
+        tar_num(&hdr[148..156]).ok_or_else(|| tar_corrupt(pos, "bad header checksum field"))?;
+    let sum: u64 = hdr
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            if (148..156).contains(&i) {
+                32
+            } else {
+                u64::from(*b)
+            }
+        })
+        .sum();
+    if stored != sum {
+        return Err(tar_corrupt(pos, "header checksum mismatch"));
+    }
+    let size = tar_num(&hdr[124..136]).ok_or_else(|| tar_corrupt(pos, "bad size field"))?;
+    let data_at = pos + 512;
+    let padded = size
+        .checked_add(511)
+        .map(|s| s / 512 * 512)
+        .ok_or_else(|| tar_corrupt(pos, "size overflow"))?;
+    if data_at.checked_add(padded).is_none_or(|end| end > len) {
+        return Err(tar_corrupt(pos, "entry runs past the end of the file"));
+    }
+    Ok(TarExtent {
+        pos,
+        size,
+        data_at,
+        padded,
+    })
+}
+
+/// Read the data of an extended-header entry (a GNU long name or a pax record).
+fn read_tar_meta(f: &mut std::fs::File, x: &TarExtent) -> std::result::Result<Vec<u8>, String> {
+    if x.size > MAX_TAR_META {
+        return Err(tar_corrupt(x.pos, "extended header too large"));
+    }
+    let mut b = vec![0u8; x.size as usize];
+    f.seek(SeekFrom::Start(x.data_at)).map_err(io_error_text)?;
+    f.read_exact(&mut b).map_err(io_error_text)?;
+    Ok(b)
+}
+
+/// Handle one entry by its type flag: remember an extended name, or hand a file to `on`.
+fn read_tar_entry(
+    f: &mut std::fs::File,
+    shown: &str,
+    hdr: &[u8; 512],
+    x: &TarExtent,
+    next_name: &mut Option<String>,
+    on: &mut impl FnMut(TarItem),
+) -> std::result::Result<(), String> {
+    match hdr[156] {
+        b'L' => {
+            let b = read_tar_meta(f, x)?;
+            *next_name = Some(cstr(&b));
+        }
+        b'x' => {
+            let b = read_tar_meta(f, x)?;
+            if let Some(p) = pax_path(&b) {
+                *next_name = Some(p);
+            }
+        }
+        b'0' | 0 | b'7' => read_tar_file(f, shown, hdr, x, next_name, on)?,
+        _ => {
+            *next_name = None;
+        }
+    }
+    Ok(())
+}
+
+/// Hand a regular file entry to `on` if its name is a candidate: its bytes, or just the fact that it
+/// is too large.
+fn read_tar_file(
+    f: &mut std::fs::File,
+    shown: &str,
+    hdr: &[u8; 512],
+    x: &TarExtent,
+    next_name: &mut Option<String>,
+    on: &mut impl FnMut(TarItem),
+) -> std::result::Result<(), String> {
+    let name = next_name.take().unwrap_or_else(|| {
+        let n = cstr(&hdr[0..100]);
+        let prefix = if &hdr[257..262] == b"ustar" {
+            cstr(&hdr[345..500])
+        } else {
+            String::new()
+        };
+        if prefix.is_empty() {
+            n
+        } else {
+            format!("{prefix}/{n}")
+        }
+    });
+    let base = name.rsplit('/').next().unwrap_or(&name).to_string();
+    if candidate(&base) {
+        let shown = format!("{shown}!{name}");
+        if x.size > MAX_FILE {
+            on(TarItem::TooLarge { shown });
+        } else {
+            let mut b = Zeroizing::new(vec![0u8; x.size as usize]);
+            f.seek(SeekFrom::Start(x.data_at)).map_err(io_error_text)?;
+            f.read_exact(&mut b).map_err(io_error_text)?;
+            on(TarItem::Entry {
+                shown,
+                base,
+                bytes: b,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Read a plain tar's key-file entries (`*.json`, `*.tmp`, `*.recipient`) with the scan's reader
@@ -1344,26 +1413,56 @@ pub fn scan(input: &ScanInput<'_>) -> Report {
     for b in input.backups {
         s.backup(b);
     }
-    // The legacy master: compared in constant time, never printed.
-    if let (Some(dek), Some(sealer)) = (&input.legacy_dek, input.sealer) {
-        let which = sealer.which_dek(dek);
-        let id = Some(seal::dek_id(dek));
-        let at = match which {
-            DekUse::Current => Some("share_seal: the current DEK".to_string()),
-            DekUse::Previous(i) => Some(format!("share_seal: previous DEK {i}")),
-            DekUse::Unknown => None,
-        };
-        if let Some(path) = at {
-            s.findings.push(Finding {
-                class: Class::LegacyMasterDek,
-                path,
-                key_id: None,
-                epoch: None,
-                dek: id,
-                note: Class::LegacyMasterDek.note(),
-            });
-        }
+    if let Some(finding) = legacy_master_finding(input) {
+        s.findings.push(finding);
     }
+    let not_checked = not_checked_list(input);
+    s.findings
+        .sort_by(|a, b| (a.class, &a.path).cmp(&(b.class, &b.path)));
+    s.findings.dedup();
+    let mut report = Report {
+        schema: SCHEMA,
+        node: input.node,
+        data_dir: Scan::path_str(input.data_dir),
+        backups: input.backups.iter().map(|b| Scan::path_str(b)).collect(),
+        findings: s.findings,
+        unclassified: s.unclassified,
+        errors: s.errors,
+        changed: s.changed,
+        live: s.counts,
+        not_checked,
+        exit: 0,
+    };
+    report.exit = report.exit_code();
+    report
+}
+
+/// The finding for the legacy master's DEK, when it is still one of this node's DEKs. The master
+/// is compared in constant time and never printed.
+fn legacy_master_finding(input: &ScanInput<'_>) -> Option<Finding> {
+    let (Some(dek), Some(sealer)) = (&input.legacy_dek, input.sealer) else {
+        return None;
+    };
+    let which = sealer.which_dek(dek);
+    let id = Some(seal::dek_id(dek));
+    let at = match which {
+        DekUse::Current => Some("share_seal: the current DEK".to_string()),
+        DekUse::Previous(i) => Some(format!("share_seal: previous DEK {i}")),
+        DekUse::Unknown => None,
+    };
+    at.map(|path| Finding {
+        class: Class::LegacyMasterDek,
+        path,
+        key_id: None,
+        epoch: None,
+        dek: id,
+        note: Class::LegacyMasterDek.note(),
+    })
+}
+
+/// What the scan did not check: the fixed list, plus a line for each legacy-master and DEK check
+/// that could not run.
+fn not_checked_list(input: &ScanInput<'_>) -> Vec<String> {
     let mut not_checked: Vec<String> = NOT_CHECKED
         .iter()
         .map(std::string::ToString::to_string)
@@ -1385,24 +1484,7 @@ pub fn scan(input: &ScanInput<'_>) -> Report {
             "DEKs: no share_seal is configured, so sealed files are not told apart by DEK".into(),
         );
     }
-    s.findings
-        .sort_by(|a, b| (a.class, &a.path).cmp(&(b.class, &b.path)));
-    s.findings.dedup();
-    let mut report = Report {
-        schema: SCHEMA,
-        node: input.node,
-        data_dir: Scan::path_str(input.data_dir),
-        backups: input.backups.iter().map(|b| Scan::path_str(b)).collect(),
-        findings: s.findings,
-        unclassified: s.unclassified,
-        errors: s.errors,
-        changed: s.changed,
-        live: s.counts,
-        not_checked,
-        exit: 0,
-    };
-    report.exit = report.exit_code();
-    report
+    not_checked
 }
 
 #[cfg(test)]

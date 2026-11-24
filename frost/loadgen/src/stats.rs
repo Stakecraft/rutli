@@ -171,42 +171,18 @@ impl Recorder {
     }
 
     pub fn report(mut self, wall: Duration) -> ClientReport {
-        let mut errors: BTreeMap<String, u64> = BTreeMap::new();
-        let mut failovers: BTreeMap<String, u64> = BTreeMap::new();
-        let mut ok_micros: Vec<u64> = Vec::new();
-        let mut timeline: BTreeMap<u64, Second> = BTreeMap::new();
-        let mut bad_answers = 0;
-        let mut leaders: BTreeMap<String, (u64, Vec<u64>)> = BTreeMap::new();
+        let mut tally = Tally::default();
         for o in &self.outcomes {
-            if let Some(name) = &o.leader {
-                let entry = leaders.entry(name.clone()).or_default();
-                if o.code == "OK" && !o.bad_answer {
-                    entry.1.push(o.latency.as_micros() as u64);
-                } else {
-                    entry.0 += 1;
-                }
-            }
-            let sec = timeline.entry(o.at.as_secs()).or_insert_with(|| Second {
-                t: o.at.as_secs(),
-                ..Default::default()
-            });
-            if o.code == "OK" && !o.bad_answer {
-                ok_micros.push(o.latency.as_micros() as u64);
-                sec.ok += 1;
-                sec.max_ms = sec.max_ms.max(millis(o.latency.as_micros() as u64));
-            } else {
-                sec.errors += 1;
-                if o.code != "OK" {
-                    *errors.entry(o.code.to_string()).or_default() += 1;
-                }
-            }
-            if o.bad_answer {
-                bad_answers += 1;
-            }
-            for f in &o.failovers {
-                *failovers.entry(f.to_string()).or_default() += 1;
-            }
+            tally.add(o);
         }
+        let Tally {
+            mut errors,
+            failovers,
+            mut ok_micros,
+            timeline,
+            bad_answers,
+            leaders,
+        } = tally;
         if self.saturated > 0 {
             errors.insert("CLIENT_SATURATED".into(), self.saturated);
         }
@@ -228,24 +204,78 @@ impl Recorder {
                 0.0
             },
             timeline: timeline.into_values().collect(),
-            by_leader: leaders
-                .into_iter()
-                .map(|(name, (errors, mut micros))| {
-                    (
-                        name,
-                        LeaderReport {
-                            ok: micros.len() as u64,
-                            errors,
-                            latency: latency(&mut micros),
-                        },
-                    )
-                })
-                .collect(),
+            by_leader: leader_reports(leaders),
             connect: None,
             fd_peak: None,
             fd_limit: None,
         }
     }
+}
+
+/// What the outcomes of a run add up to, before the percentiles are taken.
+#[derive(Default)]
+struct Tally {
+    errors: BTreeMap<String, u64>,
+    failovers: BTreeMap<String, u64>,
+    ok_micros: Vec<u64>,
+    timeline: BTreeMap<u64, Second>,
+    bad_answers: u64,
+    /// Per cosigner that gave the final answer: its errors and the latencies of its successes.
+    leaders: BTreeMap<String, (u64, Vec<u64>)>,
+}
+
+impl Tally {
+    /// Count one outcome.
+    fn add(&mut self, o: &Outcome) {
+        if let Some(name) = &o.leader {
+            let entry = self.leaders.entry(name.clone()).or_default();
+            if o.code == "OK" && !o.bad_answer {
+                entry.1.push(o.latency.as_micros() as u64);
+            } else {
+                entry.0 += 1;
+            }
+        }
+        let sec = self
+            .timeline
+            .entry(o.at.as_secs())
+            .or_insert_with(|| Second {
+                t: o.at.as_secs(),
+                ..Default::default()
+            });
+        if o.code == "OK" && !o.bad_answer {
+            self.ok_micros.push(o.latency.as_micros() as u64);
+            sec.ok += 1;
+            sec.max_ms = sec.max_ms.max(millis(o.latency.as_micros() as u64));
+        } else {
+            sec.errors += 1;
+            if o.code != "OK" {
+                *self.errors.entry(o.code.to_string()).or_default() += 1;
+            }
+        }
+        if o.bad_answer {
+            self.bad_answers += 1;
+        }
+        for f in &o.failovers {
+            *self.failovers.entry(f.to_string()).or_default() += 1;
+        }
+    }
+}
+
+/// The per-cosigner report of the tallied leaders (errors, latencies of the successes).
+fn leader_reports(leaders: BTreeMap<String, (u64, Vec<u64>)>) -> BTreeMap<String, LeaderReport> {
+    leaders
+        .into_iter()
+        .map(|(name, (errors, mut micros))| {
+            (
+                name,
+                LeaderReport {
+                    ok: micros.len() as u64,
+                    errors,
+                    latency: latency(&mut micros),
+                },
+            )
+        })
+        .collect()
 }
 
 fn millis(micros: u64) -> f64 {

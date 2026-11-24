@@ -545,6 +545,13 @@ pub fn install(listen: &str) -> Result<()> {
 /// `RutliSignPolicyRefusals`). Labels that are not a closed set (`rutli_stale_share{key}`)
 /// cannot be primed.
 fn prime() {
+    prime_sign_and_ceremony_series();
+    prime_hosted_and_policy_series();
+    prime_session_and_peer_series();
+}
+
+/// Prime the sign, ceremony, epoch and anti-entropy series.
+fn prime_sign_and_ceremony_series() {
     for result in ["ok", "error"] {
         metrics::counter!(SIGN_REQUESTS, "result" => result).absolute(0);
         for kind in ["dkg", "refresh"] {
@@ -570,6 +577,10 @@ fn prime() {
     metrics::counter!(GRPC_ACCEPT_ERRORS).absolute(0);
     metrics::counter!(GRPC_HANDSHAKE_TIMEOUTS).absolute(0);
     metrics::counter!(ANTI_ENTROPY_CONFLICTS).absolute(0);
+}
+
+/// Prime the hosted-key, journal and refusal-reason series.
+fn prime_hosted_and_policy_series() {
     for reason in HOSTED_REFUSAL_REASONS {
         metrics::counter!(HOSTED_REPLICATION_REFUSALS, "reason" => *reason).absolute(0);
     }
@@ -600,6 +611,10 @@ fn prime() {
     for how in TOMBSTONE_HOWS {
         metrics::counter!(HOSTED_TOMBSTONES_WRITTEN, "how" => *how).absolute(0);
     }
+}
+
+/// Prime the lock, session, background-loop, hosted-op and peer-pin series.
+fn prime_session_and_peer_series() {
     for lock in LOCK_NAMES {
         metrics::counter!(LOCK_POISON_RECOVERIES, "lock" => *lock).absolute(0);
     }
