@@ -54,12 +54,20 @@ jobs:
       - name: Regenerate and compare
         run: |
           set -euo pipefail
+          # Exit 3 from the script is a failed download, not a difference in the stubs (it says so).
           scripts/gen-grpc-java.sh
-          if ! git diff --exit-code --stat -- driver/src/main/java; then
+          # git diff: 0 same, 1 different, anything else is git failing, not a result.
+          rc=0
+          git diff --exit-code --stat -- driver/src/main/java || rc=$?
+          if [ "$rc" -eq 1 ]; then
             echo "::error::driver/src/main/java is not what scripts/gen-grpc-java.sh generates from frost/cosigner/proto: run the script and commit the result"
             exit 1
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::git diff failed (exit ${rc}): the check could not compare"
+            exit 1
           fi
-          if [ -n "$(git status --porcelain -- driver/src/main/java)" ]; then
+          untracked="$(git status --porcelain -- driver/src/main/java)"
+          if [ -n "$untracked" ]; then
             git status --short -- driver/src/main/java
             echo "::error::the generator added or removed files under driver/src/main/java: commit them"
             exit 1

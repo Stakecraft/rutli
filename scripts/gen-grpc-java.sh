@@ -18,15 +18,16 @@ GRPC_VERSION="${GRPC_VERSION:-$(sbt_version grpcVersion)}"
 [ -n "$PROTOBUF_VERSION" ] && [ -n "$GRPC_VERSION" ] || { echo "cannot read protobufVersion / grpcVersion from build.sbt"; exit 1; }
 # Optional: PROTOC_SHA256 and PROTOC_GEN_GRPC_JAVA_SHA256 make the script refuse a binary whose sha256
 # differs (CI sets them for linux-x86_64).
+sha_ok() { # file expected-sha256: status 0 when they match
+  if command -v sha256sum >/dev/null; then
+    echo "$2  $1" | sha256sum -c - >/dev/null 2>&1
+  else
+    echo "$2  $1" | shasum -a 256 -c - >/dev/null 2>&1
+  fi
+}
 verify() { # file expected-sha256-or-empty
   [ -z "$2" ] && return 0
-  local ok=1
-  if command -v sha256sum >/dev/null; then
-    echo "$2  $1" | sha256sum -c - >/dev/null 2>&1 && ok=0
-  else
-    echo "$2  $1" | shasum -a 256 -c - >/dev/null 2>&1 && ok=0
-  fi
-  if [ "$ok" -ne 0 ]; then
+  if ! sha_ok "$1" "$2"; then
     echo "sha256 of $(basename "$1") differs from the expected $2 (after a version bump in build.sbt, update PROTOC_SHA256 and PROTOC_GEN_GRPC_JAVA_SHA256 in .github/workflows/generated-code.yml)"
     exit 1
   fi
@@ -48,33 +49,39 @@ trap 'rm -rf "$TMP"' EXIT
 # runs do not download at all. A cached file is checked against the expected sha256 like a fresh one.
 # A download that still fails (Maven Central rate-limits shared runner addresses with HTTP 429) exits
 # with 3 and says so: that is not a difference in the stubs.
-fetch() { # name url dest expected-sha256-or-empty
+# The cache file is named by tool, version, platform and expected sha256: a version bump in build.sbt
+# misses the cache and downloads, so a stale pin fails on the new download, not silently on an old
+# binary. A cached file that does not match is removed and downloaded again.
+fetch() { # name version url dest expected-sha256-or-empty
   local cached="" rc=0
-  if [ -n "${GEN_GRPC_CACHE_DIR:-}" ] && [ -n "$4" ]; then
-    cached="$GEN_GRPC_CACHE_DIR/$4"
+  if [ -n "${GEN_GRPC_CACHE_DIR:-}" ] && [ -n "$5" ]; then
+    cached="$GEN_GRPC_CACHE_DIR/$1-$2-$CLASSIFIER-$5"
     if [ -f "$cached" ]; then
-      cp "$cached" "$3"
-      verify "$3" "$4"
-      echo "$1: from the cache (sha256 ${4:0:12})"
-      return 0
+      if sha_ok "$cached" "$5"; then
+        cp "$cached" "$4"
+        echo "$1 $2: from the cache (sha256 ${5:0:12})"
+        return 0
+      fi
+      echo "$1 $2: cached copy does not match, downloading again"
+      rm -f "$cached"
     fi
   fi
-  curl -fsSL --proto '=https' --retry 5 --retry-delay 10 --retry-max-time 180 -o "$3" "$2" || rc=$?
+  curl -fsSL --proto '=https' --retry 5 --retry-delay 10 --retry-max-time 180 --max-time 120 -o "$4" "$3" || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "::error::could not download $1 from Maven Central (curl exit ${rc}; 22 is an HTTP error such as 429, rate limited): this is not a difference in the stubs, re-run the job"
     exit 3
   fi
-  verify "$3" "$4"
+  verify "$4" "$5"
   if [ -n "$cached" ]; then
-    mkdir -p "$GEN_GRPC_CACHE_DIR"
-    cp "$3" "$cached"
+    # Best effort: a cache that cannot be written only means the next run downloads again.
+    mkdir -p "$GEN_GRPC_CACHE_DIR" && cp "$4" "$cached" || echo "$1 $2: could not write the cache"
   fi
 }
 
 echo "Fetching protoc $PROTOBUF_VERSION and protoc-gen-grpc-java $GRPC_VERSION ($CLASSIFIER)..."
-fetch protoc "$CENTRAL/com/google/protobuf/protoc/$PROTOBUF_VERSION/protoc-$PROTOBUF_VERSION-$CLASSIFIER.exe" \
+fetch protoc "$PROTOBUF_VERSION" "$CENTRAL/com/google/protobuf/protoc/$PROTOBUF_VERSION/protoc-$PROTOBUF_VERSION-$CLASSIFIER.exe" \
   "$TMP/protoc" "${PROTOC_SHA256:-}"
-fetch protoc-gen-grpc-java "$CENTRAL/io/grpc/protoc-gen-grpc-java/$GRPC_VERSION/protoc-gen-grpc-java-$GRPC_VERSION-$CLASSIFIER.exe" \
+fetch protoc-gen-grpc-java "$GRPC_VERSION" "$CENTRAL/io/grpc/protoc-gen-grpc-java/$GRPC_VERSION/protoc-gen-grpc-java-$GRPC_VERSION-$CLASSIFIER.exe" \
   "$TMP/grpc" "${PROTOC_GEN_GRPC_JAVA_SHA256:-}"
 chmod +x "$TMP/protoc" "$TMP/grpc"
 
