@@ -127,32 +127,20 @@ fn concurrent_passes_do_not_fail_on_each_others_removals() {
     }
 }
 
-/// The environment variable that makes this test binary, re-run by
-/// `a_sentinel_that_cannot_be_written_leaves_every_marker`, play the child.
+/// The environment variable that makes this test binary, re-run by [`run_child`], play the
+/// child: `<test name>:<store directory>`.
 const CHILD: &str = "RUTLI_NONCE_FD_CHILD";
 
-/// If the sentinel cannot be written although markers could still be removed (here: no file
-/// descriptor left, which `unlink` does not need — as on a full disk, where creating fails and
-/// removing works), the pass fails before it removes anything: a store never loses its markers
-/// without saying "this key has signed here".
-///
-/// Runs in a child process: it uses up the process's file descriptors.
-#[test]
-fn a_sentinel_that_cannot_be_written_leaves_every_marker() {
-    if let Some(dir) = std::env::var_os(CHILD) {
-        child(Path::new(&dir));
-        return;
-    }
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("k.nonces");
-    drop(store_with_old_markers(&dir, &sessions(3)));
+/// Re-run this test binary for the test `name` alone, as a child with at most 64 file descriptors
+/// (so using them all up is quick), on the store in `dir`.
+fn run_child(name: &str, dir: &Path) {
     let exe = std::env::current_exe().unwrap();
     let out = std::process::Command::new("sh")
         .arg("-c")
-        // A small descriptor limit, so using them all up is quick.
-        .arg("ulimit -n 64 && exec \"$0\" --exact a_sentinel_that_cannot_be_written_leaves_every_marker --test-threads=1 --nocapture")
+        .arg("ulimit -n 64 && exec \"$0\" --exact \"$1\" --test-threads=1 --nocapture")
         .arg(&exe)
-        .env(CHILD, &dir)
+        .arg(name)
+        .env(CHILD, format!("{name}:{}", dir.display()))
         .output()
         .unwrap();
     assert!(
@@ -161,6 +149,55 @@ fn a_sentinel_that_cannot_be_written_leaves_every_marker() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// In the child for test `name`: the store directory to work on.
+fn child_dir(name: &str) -> Option<std::path::PathBuf> {
+    let v = std::env::var(CHILD).ok()?;
+    let (test, dir) = v.split_once(':')?;
+    (test == name).then(|| dir.into())
+}
+
+/// Use up every file descriptor but one, and check that a listing of `dir` takes exactly that one.
+/// Drop the result to give them back.
+fn all_descriptors_but_one(dir: &Path) -> Vec<File> {
+    let mut held = Vec::new();
+    while let Ok(f) = File::open("/dev/null") {
+        held.push(f);
+        assert!(held.len() < 1 << 20, "no descriptor limit");
+    }
+    held.pop();
+    let listing = fs::read_dir(dir).expect("one descriptor is free");
+    assert!(
+        File::open("/dev/null").is_err(),
+        "a listing must take the last descriptor"
+    );
+    drop(listing);
+    held
+}
+
+/// If the sentinel cannot be written although markers could still be removed (here: no file
+/// descriptor left once the pass has listed the directory — `unlink` needs none; as on a full
+/// disk, where creating fails and removing works), the pass fails before it removes anything: a
+/// store never loses its markers without saying "this key has signed here".
+///
+/// Runs in a child process: it uses up the process's file descriptors.
+#[test]
+fn a_sentinel_that_cannot_be_written_leaves_every_marker() {
+    const NAME: &str = "a_sentinel_that_cannot_be_written_leaves_every_marker";
+    if let Some(dir) = child_dir(NAME) {
+        let store = NonceStore::open(&dir).unwrap();
+        let held = all_descriptors_but_one(&dir);
+        // The pass's own listing takes the last descriptor; the sentinel finds none.
+        let verdict = store.prune_older_than(HORIZON, 10);
+        drop(held);
+        assert!(matches!(verdict, Err(CoreError::Io(_))), "got {verdict:?}");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("k.nonces");
+    drop(store_with_old_markers(&dir, &sessions(3)));
+    run_child(NAME, &dir);
     let store = NonceStore::open(&dir).unwrap();
     for s in sessions(3) {
         assert!(
@@ -169,27 +206,4 @@ fn a_sentinel_that_cannot_be_written_leaves_every_marker() {
         );
     }
     assert!(!dir.join(PRUNED_SENTINEL).exists());
-}
-
-fn child(dir: &Path) {
-    let store = NonceStore::open(dir).unwrap();
-    // Use up every descriptor, then free exactly one: the pass's directory listing takes it.
-    let mut held = Vec::new();
-    while let Ok(f) = File::open("/dev/null") {
-        held.push(f);
-        assert!(held.len() < 1 << 20, "no descriptor limit");
-    }
-    held.pop();
-    // The listing takes exactly that one, and nothing is left for the sentinel.
-    {
-        let listing = fs::read_dir(dir).expect("one descriptor is free");
-        assert!(
-            File::open("/dev/null").is_err(),
-            "the listing must take the last descriptor"
-        );
-        drop(listing);
-    }
-    let verdict = store.prune_older_than(HORIZON, 10);
-    drop(held);
-    assert!(matches!(verdict, Err(CoreError::Io(_))), "got {verdict:?}");
 }
