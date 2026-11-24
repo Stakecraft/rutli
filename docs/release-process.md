@@ -76,7 +76,7 @@ All of these hold, or the release waits:
 ## 8. Tag and publish
 
 A maintainer tags `vX.Y.Z` and follows [releasing.md](releasing.md): image digest pinned in the
-docs, release assets attached. The release notes carry the quality report. The baseline for the
+docs and the tag's commit recorded next to it ("Release records"), release assets attached. The release notes carry the quality report. The baseline for the
 quality ratchet moves to the new tag.
 
 ## Test schedule

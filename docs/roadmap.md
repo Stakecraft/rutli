@@ -185,8 +185,8 @@ Track A (soak and hardening) continues on `stakecraft-devnet-rutli-01`; exit cri
 |---|---|
 | 2026-10-09 | v0.4.0-rc.1 tagged |
 | 2026-10-28 | v0.4.0-rc.6: ceremony leader binding and durable fence marks, disjoint FROST and hosted key ids, TLS crate advisories closed; ceremony intents required by default with TLS |
-| 2026-11-14 | **v0.4.0 tagged** (planned as the audit code freeze; the audit now reviews v0.5.0): Flow 1, Flow 2a (after B8), Flow 2b, B2, B6, ECIES, C2 fixes, CA rotation |
-| 2026-11-20 | **v0.4.1 released** (PRs #152, #154, #160): the cosigner keeps serving under a low file-descriptor limit and reports an ended accept loop, stops on SIGTERM, and `export-key` refuses an existing output file. No wire, key-file or config change; the driver is unchanged |
+| 2026-11-14 | **v0.4.0 tagged** (commit `ebab88b`) (planned as the audit code freeze; the audit now reviews v0.5.0): Flow 1, Flow 2a (after B8), Flow 2b, B2, B6, ECIES, C2 fixes, CA rotation |
+| 2026-11-20 | **v0.4.1 released** (commit `af85dca`) (PRs #152, #154, #160): the cosigner keeps serving under a low file-descriptor limit and reports an ended accept loop, stops on SIGTERM, and `export-key` refuses an existing output file. No wire, key-file or config change; the driver is unchanged |
 | Later | Pre-rotate alternative for 2a (research), if B8 shows it is worth it |
 | 2026-11-19 (planned) | Splice TestNet validator run starts. The four clean weeks required for 1.0 are counted later, on the audited release |
 | Mid-December 2026 (planned) | **v0.5.0 = audit code freeze:** v0.4.0 plus hardening from the November pre-audit review, the fixes made since v0.4.0 and the shared-cluster guard |
