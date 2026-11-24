@@ -80,7 +80,7 @@ jobs:
           # nothing pulled: a second platform of one digest cannot be pulled next to the first).
           revs="$(docker buildx imagetools inspect "$repo@$digest" --format '{{ json .Image }}' \
             | jq -r 'if has("config") then [.] else [to_entries[] | select(.key | startswith("unknown") | not) | .value] end | map(.config.Labels["org.opencontainers.image.revision"] // "none") | unique | .[]')"
-          echo "release image $repo@$digest records: $(echo $revs)"
+          echo "release image $repo@$digest records: ${revs//$'\n'/ }"
           [ "$(printf '%s\n' "$revs" | wc -l)" -eq 1 ] || { echo "::error::$repo@$digest: its platforms record different commits"; exit 1; }
           expected="$revs"
           [[ "$expected" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::$repo@$digest records no commit"; exit 1; }
