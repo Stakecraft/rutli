@@ -670,7 +670,8 @@ class FrostBackend(
     * endpoint serves the call, and not at all when the call ends with the roster's "not found" or
     * with the retryable [[unconfirmed]]. Otherwise a lookup of a key that exists nowhere would
     * take the lead from every endpoint, and with it the sign rotation ([[signStart]]) for
-    * [[leaderRecovery]]. A failure it does not name costs the lead at once, as `demoteOn` says. */
+    * [[leaderRecovery]]. A failure it does not name costs the lead at once, as `demoteOn` says;
+    * one it names costs the lead later only if `demoteOn` holds for it too. */
   private def withCheckedFailover[A](
       what: String,
       retryOn: Status => Boolean,
@@ -743,7 +744,9 @@ class FrostBackend(
             case Left(e)  => Option(e.getStatus.getDescription).fold(code)(d => s"$code: $d")
             case Right(r) => s"$code: ${r.error.getMessage}"
           }
-          val deferred: Boolean = lacksKey(failure)
+          // Held back only where this call would have demoted: `lacksKey` delays a demotion, it
+          // never adds one that `demoteOn` does not make.
+          val deferred: Boolean = loseLead && lacksKey(failure)
           val counted: Seen = failure match {
             case Left(e) if isNodeDown(e.getStatus)      => seen.copy(unreachable = Some(endpoints(i) -> e))
             case f =>
@@ -2071,25 +2074,26 @@ class FrostBackend(
       Option(pinnedKeys.get(keyId)) match {
         case None if lostPin(keyId) => Future.failed(lostPinError(keyId))
         case None =>
-          // Not pinned: any cosigner's group key answers the question. Nothing here pins. A
-          // cosigner that answers NOT_FOUND loses the lead only when another one then answers with
-          // a key (`lacksKey`), and that one becomes the preferred leader.
+          // Not pinned: any cosigner's group key answers the question, and nothing checks the
+          // answer (the key is believed only at its first pin, by a majority). So this call decides
+          // nothing about the lead: NOT_FOUND asks the next cosigner and costs nobody the lead, and
+          // a cosigner that answers does not take it (NoPreference). Only a sick or unreachable
+          // cosigner loses the lead, as everywhere. Nothing here pins.
           val notes = currentNotes.get
           Future(blocking {
             val start = startIndex()
             withCheckedFailover[GroupKeyReply](
               "groupKey",
               notFoundOrSick,
-              notFoundOrSick,
+              isLeaderSick,
               notes,
               (_: String, _: GroupKeyReply) => None,
-              start,
+              NoPreference,
               start,
               (_: Int) => (),
               attemptTimeout,
               System.nanoTime() + requestTimeout.toNanos,
               Some(ownAnswer),
-              lacksFrostKey,
             )(_.groupKey(req))
           }).map(_ => ())
         case Some(p) =>

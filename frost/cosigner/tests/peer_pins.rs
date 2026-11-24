@@ -49,20 +49,30 @@ fn ca_named(cn: &str) -> Ca {
     Ca(params.self_signed(&key).unwrap(), key)
 }
 
-/// A leaf for `cn` (SAN `cn`, a fresh key) under `ca`, written to `dir/<file>.{pem,key}`.
-fn leaf(dir: &Path, ca: &Ca, cn: &str, file: &str) -> TlsConfig {
+/// A certificate for `cn` (SAN `cn`) under `ca`, with a fresh key.
+fn signed_leaf(ca: &Ca, cn: &str) -> (rcgen::Certificate, KeyPair) {
     let key = KeyPair::generate().unwrap();
     let mut params = CertificateParams::new(vec![cn.to_string()]).unwrap();
     params.distinguished_name.push(DnType::CommonName, cn);
     let cert = params.signed_by(&key, &ca.0, &ca.1).unwrap();
-    let (cert_path, key_path, ca_path) = (
+    (cert, key)
+}
+
+/// A leaf for `cn` (SAN `cn`, a fresh key) under `ca`, written to `dir/<file>.{pem,key}`.
+fn leaf(dir: &Path, ca: &Ca, cn: &str, file: &str) -> TlsConfig {
+    let (cert, key) = signed_leaf(ca, cn);
+    let paths = [
         dir.join(format!("{file}.pem")),
         dir.join(format!("{file}.key")),
         dir.join("ca.pem"),
-    );
-    std::fs::write(&cert_path, cert.pem()).unwrap();
-    std::fs::write(&key_path, key.serialize_pem()).unwrap();
-    std::fs::write(&ca_path, ca.0.pem()).unwrap();
+    ];
+    for (path, pem) in paths
+        .iter()
+        .zip([cert.pem(), key.serialize_pem(), ca.0.pem()])
+    {
+        std::fs::write(path, pem).unwrap();
+    }
+    let [cert_path, key_path, ca_path] = paths;
     TlsConfig {
         ca_cert: ca_path,
         cert: cert_path,
@@ -71,6 +81,11 @@ fn leaf(dir: &Path, ca: &Ca, cn: &str, file: &str) -> TlsConfig {
         allow_expired_ca: false,
         require_peer_pins: None,
     }
+}
+
+/// Several leaves under `ca` in one go: `(cn, file)` each, in order.
+fn leaves<const K: usize>(dir: &Path, ca: &Ca, specs: [(&str, &str); K]) -> [TlsConfig; K] {
+    specs.map(|(cn, file)| leaf(dir, ca, cn, file))
 }
 
 fn pin(cfg: &TlsConfig) -> [u8; 32] {
@@ -167,6 +182,22 @@ fn serve_with(
     )
 }
 
+/// A fresh network with node 2 (no pins) served at its address under the certificate `cfg`.
+fn serve_node2(
+    dir: &Path,
+    cfg: &TlsConfig,
+) -> (MemNet, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    let net = MemNet::new();
+    let (seen, server) = serve(
+        &net,
+        &authority(2),
+        &rutli_cosigner::tls::load(cfg).unwrap(),
+        node(dir, 2),
+        None,
+    );
+    (net, seen, server)
+}
+
 /// A client of peer `id` on `net`, dialled as the daemon dials: under `cosigner<id>`, with `pins`.
 fn dial(net: &MemNet, tls: &Tls, id: u16, pins: Option<Vec<[u8; 32]>>) -> GrpcPeer {
     let dial = tls.dial_as(&format!("cosigner{id}"), pins, id).unwrap();
@@ -246,14 +277,7 @@ async fn the_dial_still_refuses_another_ca_and_another_name_with_the_rustls_reas
     let t1 = rutli_cosigner::tls::load(&c1).unwrap();
     let foreign = leaf(tmp.path(), &other, "cosigner2", "foreign");
     let pinned = Some(vec![pin(&foreign)]);
-    let net = MemNet::new();
-    let (seen, server) = serve(
-        &net,
-        &authority(2),
-        &rutli_cosigner::tls::load(&foreign).unwrap(),
-        node(tmp.path(), 2),
-        None,
-    );
+    let (net, seen, server) = serve_node2(tmp.path(), &foreign);
     let e = dial(&net, &t1, 2, pinned.clone())
         .hosted_specs()
         .await
@@ -263,14 +287,7 @@ async fn the_dial_still_refuses_another_ca_and_another_name_with_the_rustls_reas
     server.abort();
     // The right CA, another node's name.
     let c3 = leaf(tmp.path(), &ca, "cosigner3", "c3");
-    let net = MemNet::new();
-    let (seen, server) = serve(
-        &net,
-        &authority(2),
-        &rutli_cosigner::tls::load(&c3).unwrap(),
-        node(tmp.path(), 2),
-        None,
-    );
+    let (net, seen, server) = serve_node2(tmp.path(), &c3);
     let e = dial(&net, &t1, 2, Some(vec![pin(&c3)]))
         .hosted_specs()
         .await
@@ -286,18 +303,17 @@ async fn outbound_an_impostor_with_a_ca_signed_certificate_for_the_name_gets_not
     // chain verify; the key is not node 2's.
     let tmp = tempfile::tempdir().unwrap();
     let ca = ca();
-    let c1 = leaf(tmp.path(), &ca, "cosigner1", "c1");
-    let real2 = leaf(tmp.path(), &ca, "cosigner2", "real2");
-    let fake2 = leaf(tmp.path(), &ca, "cosigner2", "fake2");
-    let t1 = rutli_cosigner::tls::load(&c1).unwrap();
-    let net = MemNet::new();
-    let (seen, server) = serve(
-        &net,
-        &authority(2),
-        &rutli_cosigner::tls::load(&fake2).unwrap(),
-        node(tmp.path(), 2),
-        None,
+    let [c1, real2, fake2] = leaves(
+        tmp.path(),
+        &ca,
+        [
+            ("cosigner1", "c1"),
+            ("cosigner2", "real2"),
+            ("cosigner2", "fake2"),
+        ],
     );
+    let t1 = rutli_cosigner::tls::load(&c1).unwrap();
+    let (net, seen, server) = serve_node2(tmp.path(), &fake2);
 
     let e = dial(&net, &t1, 2, Some(vec![pin(&real2)]))
         .hosted_specs()
@@ -323,10 +339,16 @@ async fn outbound_an_impostor_with_a_ca_signed_certificate_for_the_name_gets_not
 async fn inbound_a_caller_with_an_unpinned_key_is_refused_on_every_peer_rpc() {
     let tmp = tempfile::tempdir().unwrap();
     let ca = ca();
-    let c2 = leaf(tmp.path(), &ca, "cosigner2", "c2");
-    let real1 = leaf(tmp.path(), &ca, "cosigner1", "real1");
-    let old1 = leaf(tmp.path(), &ca, "cosigner1", "old1");
-    let c3 = leaf(tmp.path(), &ca, "cosigner3", "c3");
+    let [c2, real1, old1, c3] = leaves(
+        tmp.path(),
+        &ca,
+        [
+            ("cosigner2", "c2"),
+            ("cosigner1", "real1"),
+            ("cosigner1", "old1"),
+            ("cosigner3", "c3"),
+        ],
+    );
     let net = MemNet::new();
     let pins = peer_pins(&[(1, vec![pin(&real1)]), (2, vec![pin(&c2)])]);
     let (_, server) = serve(
@@ -390,10 +412,16 @@ async fn inbound_pins_hold_without_a_peer_allowlist() {
     // key is refused, a certificate with no roster CN is refused, and the pinned key passes.
     let tmp = tempfile::tempdir().unwrap();
     let ca = ca();
-    let c2 = leaf(tmp.path(), &ca, "cosigner2", "c2");
-    let real1 = leaf(tmp.path(), &ca, "cosigner1", "real1");
-    let fake1 = leaf(tmp.path(), &ca, "cosigner1", "fake1");
-    let driver = leaf(tmp.path(), &ca, "driver", "driver");
+    let [c2, real1, fake1, driver] = leaves(
+        tmp.path(),
+        &ca,
+        [
+            ("cosigner2", "c2"),
+            ("cosigner1", "real1"),
+            ("cosigner1", "fake1"),
+            ("driver", "driver"),
+        ],
+    );
     let net = MemNet::new();
     let pins = peer_pins(&[
         (1, vec![pin(&real1)]),
@@ -596,22 +624,21 @@ async fn a_second_dial_is_checked_again_and_cannot_ride_an_earlier_session() {
 async fn two_pins_carry_a_key_roll_and_dropping_the_old_one_revokes_it() {
     let tmp = tempfile::tempdir().unwrap();
     let ca = ca();
-    let c1 = leaf(tmp.path(), &ca, "cosigner1", "c1");
-    let old2 = leaf(tmp.path(), &ca, "cosigner2", "old2");
-    let new2 = leaf(tmp.path(), &ca, "cosigner2", "new2");
+    let [c1, old2, new2] = leaves(
+        tmp.path(),
+        &ca,
+        [
+            ("cosigner1", "c1"),
+            ("cosigner2", "old2"),
+            ("cosigner2", "new2"),
+        ],
+    );
     let t1 = rutli_cosigner::tls::load(&c1).unwrap();
     let both = vec![pin(&old2), pin(&new2)];
 
     // Node 2 still on its old key, then on its new key: node 1 pins both and reaches either.
     for (cfg, at) in [(&old2, "old"), (&new2, "new")] {
-        let net = MemNet::new();
-        let (_, server) = serve(
-            &net,
-            &authority(2),
-            &rutli_cosigner::tls::load(cfg).unwrap(),
-            node(tmp.path(), 2),
-            None,
-        );
+        let (net, _, server) = serve_node2(tmp.path(), cfg);
         dial(&net, &t1, 2, Some(both.clone()))
             .hosted_specs()
             .await

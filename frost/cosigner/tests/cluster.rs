@@ -26,12 +26,73 @@ fn cluster(tmp: &tempfile::TempDir) -> (Vec<Arc<Node>>, Peers) {
         let id = Identifier::try_from(i).unwrap();
         nodes.push(Arc::new(Node::new(id, N, T, ks)));
     }
+    let peers = local_peers(&nodes);
+    (nodes, peers)
+}
+
+/// Every node as an in-process peer, with the local mesh wired between the nodes.
+fn local_peers(nodes: &[Arc<Node>]) -> Peers {
     let peers: Peers = nodes
         .iter()
         .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
         .collect();
-    rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
-    (nodes, peers)
+    rutli_cosigner::peer::wire_local_mesh(nodes).unwrap();
+    peers
+}
+
+/// Node `i`'s keystore under `tmp`, sealed with the key derived from `master` for that node.
+fn sealed_keystore(tmp: &tempfile::TempDir, master: &[u8], i: u16) -> KeyStore {
+    let sealer = Arc::new(rutli_cosigner::seal::Sealer::from_master_secret(master, i));
+    KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(sealer)).unwrap()
+}
+
+/// Nodes (no peers wired yet) whose keystores are sealed under `master`.
+fn sealed_nodes(tmp: &tempfile::TempDir, master: &[u8]) -> Vec<Arc<Node>> {
+    (1..=N)
+        .map(|i| {
+            let id = Identifier::try_from(i).unwrap();
+            Arc::new(Node::new(id, N, T, sealed_keystore(tmp, master, i)))
+        })
+        .collect()
+}
+
+/// Where node `i` keeps the share of `KEY_ID` under `tmp`.
+fn share_path(tmp: &tempfile::TempDir, i: u16) -> std::path::PathBuf {
+    tmp.path()
+        .join(format!("node-{i}"))
+        .join(format!("{KEY_ID}.json"))
+}
+
+/// Copies the regular files of `from` into `to` (created if missing).
+fn copy_files(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        if e.file_type().unwrap().is_file() {
+            std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+        }
+    }
+}
+
+/// Strict RFC 8032 verification of `sig` over `message` under `group_key`; panics if it is invalid.
+fn assert_signature_verifies(group_key: &[u8; 32], message: &[u8], sig: &[u8; 64]) {
+    ed25519_dalek::VerifyingKey::from_bytes(group_key)
+        .unwrap()
+        .verify_strict(message, &ed25519_dalek::Signature::from_bytes(sig))
+        .unwrap();
+}
+
+/// `leader` signs the Canton digest of `payload` with `peers`; the signature must verify under
+/// `group_key` (via `assert_signature_verifies`).
+async fn sign_canton_digest_and_verify(
+    leader: &Arc<Node>,
+    peers: &Peers,
+    group_key: &[u8; 32],
+    payload: &[u8],
+) {
+    let message = canton_digest(payload);
+    let sig = sign(leader, peers, KEY_ID, &message).await.unwrap();
+    assert_signature_verifies(group_key, &message, &sig);
 }
 
 fn canton_digest(msg: &[u8]) -> Vec<u8> {
@@ -72,7 +133,7 @@ async fn refresh_rotates_shares_keeping_group_key_and_still_signs() {
     let (nodes, peers) = cluster(&tmp);
     let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
 
-    let share_path = tmp.path().join("node-1").join(format!("{KEY_ID}.json"));
+    let share_path = share_path(&tmp, 1);
     let before = std::fs::read(&share_path).unwrap();
 
     // Proactive refresh — same group key out.
@@ -90,11 +151,7 @@ async fn refresh_rotates_shares_keeping_group_key_and_still_signs() {
     assert_ne!(before, after, "refresh must rewrite the share on disk");
 
     // Refreshed cluster still signs, verifiable under the unchanged group key.
-    let message = canton_digest(b"after refresh");
-    let sig = sign(&nodes[0], &peers, KEY_ID, &message).await.unwrap();
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
-    vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig))
-        .unwrap();
+    sign_canton_digest_and_verify(&nodes[0], &peers, &group_key, b"after refresh").await;
 
     // Refresh again — chains cleanly.
     assert_eq!(run_refresh(&peers, KEY_ID).await.unwrap(), group_key);
@@ -135,36 +192,20 @@ async fn a_lost_node_recovers_from_a_share_backup_and_the_cluster_signs() {
     // Back up node-1's key dir (as `rutli-cosigner backup` does — a file copy of the sealed shares).
     let keys1 = tmp.path().join("node-1");
     let backup = tmp.path().join("backup-node-1");
-    std::fs::create_dir_all(&backup).unwrap();
-    for e in std::fs::read_dir(&keys1).unwrap() {
-        let e = e.unwrap();
-        if e.file_type().unwrap().is_file() {
-            std::fs::copy(e.path(), backup.join(e.file_name())).unwrap();
-        }
-    }
+    copy_files(&keys1, &backup);
 
     // Catastrophe: node-1's disk is wiped.
     std::fs::remove_dir_all(&keys1).unwrap();
 
     // Restore from backup, then rebuild the cluster.
-    std::fs::create_dir_all(&keys1).unwrap();
-    for e in std::fs::read_dir(&backup).unwrap() {
-        let e = e.unwrap();
-        if e.file_type().unwrap().is_file() {
-            std::fs::copy(e.path(), keys1.join(e.file_name())).unwrap();
-        }
-    }
+    copy_files(&backup, &keys1);
     let (nodes, peers) = cluster(&tmp);
 
     // Same group key, and the recovered node participates in a valid signature.
     for n in &nodes {
         assert_eq!(n.group_key(KEY_ID).unwrap(), group_key);
     }
-    let message = canton_digest(b"after restore");
-    let sig = sign(&nodes[0], &peers, KEY_ID, &message).await.unwrap();
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
-    vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig))
-        .unwrap();
+    sign_canton_digest_and_verify(&nodes[0], &peers, &group_key, b"after restore").await;
 }
 
 #[tokio::test]
@@ -210,12 +251,7 @@ async fn signing_survives_one_downed_cosigner() {
 
     // Only the first two nodes are available (2-of-3). Leader is node 0.
     let available: Peers = peers.iter().take(2).cloned().collect();
-    let message = canton_digest(b"OwnerToKeyMapping");
-    let sig = sign(&nodes[0], &available, KEY_ID, &message).await.unwrap();
-
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
-    vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig))
-        .unwrap();
+    sign_canton_digest_and_verify(&nodes[0], &available, &group_key, b"OwnerToKeyMapping").await;
 }
 
 /// Audit M4: a plaintext share under sealing is refused (the daemon will not start with one), and
@@ -228,7 +264,7 @@ async fn plaintext_shares_are_refused_under_sealing_until_migrated_explicitly() 
     // Provision plaintext shares (no sealer).
     let (_nodes, peers) = cluster(&tmp);
     let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
-    let share_path = tmp.path().join("node-1").join(format!("{KEY_ID}.json"));
+    let share_path = share_path(&tmp, 1);
     assert!(!Sealer::is_sealed(&std::fs::read(&share_path).unwrap()));
 
     // Re-open with sealing: the plaintext file is listed and refused.
@@ -253,27 +289,12 @@ async fn sealed_shares_are_encrypted_at_rest_and_reload_with_the_right_key() {
     let tmp = tempfile::tempdir().unwrap();
 
     // Cluster with sealing enabled on every node (same master secret, per-node derived keys).
-    let mut nodes = Vec::new();
-    for i in 1..=N {
-        let sealer = Arc::new(Sealer::from_master_secret(b"cluster master secret", i));
-        let ks =
-            KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(sealer)).unwrap();
-        nodes.push(Arc::new(Node::new(
-            Identifier::try_from(i).unwrap(),
-            N,
-            T,
-            ks,
-        )));
-    }
-    let peers: Peers = nodes
-        .iter()
-        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
-        .collect();
-    rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
+    let nodes = sealed_nodes(&tmp, b"cluster master secret");
+    let peers = local_peers(&nodes);
     let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
 
     // On-disk file must be a sealed envelope, not plaintext frost JSON.
-    let share_path = tmp.path().join("node-1").join(format!("{KEY_ID}.json"));
+    let share_path = share_path(&tmp, 1);
     let bytes = std::fs::read(&share_path).unwrap();
     assert!(Sealer::is_sealed(&bytes), "share file must be sealed");
     assert!(
@@ -282,28 +303,9 @@ async fn sealed_shares_are_encrypted_at_rest_and_reload_with_the_right_key() {
     );
 
     // Reload with the RIGHT key: works, and the cluster still signs.
-    let mut reloaded = Vec::new();
-    for i in 1..=N {
-        let sealer = Arc::new(Sealer::from_master_secret(b"cluster master secret", i));
-        let ks =
-            KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(sealer)).unwrap();
-        reloaded.push(Arc::new(Node::new(
-            Identifier::try_from(i).unwrap(),
-            N,
-            T,
-            ks,
-        )));
-    }
-    let peers2: Peers = reloaded
-        .iter()
-        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
-        .collect();
-    rutli_cosigner::peer::wire_local_mesh(&reloaded).unwrap();
-    let message = canton_digest(b"sealed shares");
-    let sig = sign(&reloaded[0], &peers2, KEY_ID, &message).await.unwrap();
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
-    vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig))
-        .unwrap();
+    let reloaded = sealed_nodes(&tmp, b"cluster master secret");
+    let peers2 = local_peers(&reloaded);
+    sign_canton_digest_and_verify(&reloaded[0], &peers2, &group_key, b"sealed shares").await;
 
     // Reload with the WRONG key: refuses.
     let wrong = Arc::new(Sealer::from_master_secret(b"not the master secret", 1));
@@ -332,23 +334,8 @@ async fn shares_sealed_under_the_legacy_master_sign_after_switching_to_split_bun
     const MASTER: &[u8] = b"soak master secret, 32+ chars long";
 
     let tmp = tempfile::tempdir().unwrap();
-    let mut nodes = Vec::new();
-    for i in 1..=N {
-        let sealer = Arc::new(Sealer::from_master_secret(MASTER, i));
-        let ks =
-            KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(sealer)).unwrap();
-        nodes.push(Arc::new(Node::new(
-            Identifier::try_from(i).unwrap(),
-            N,
-            T,
-            ks,
-        )));
-    }
-    let peers: Peers = nodes
-        .iter()
-        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
-        .collect();
-    rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
+    let nodes = sealed_nodes(&tmp, MASTER);
+    let peers = local_peers(&nodes);
     let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
     let before: Vec<Vec<u8>> = (1..=N)
         .map(|i| {
@@ -421,30 +408,12 @@ async fn shares_persist_across_node_reload() {
     drop(peers);
 
     // Rebuild the cluster from the same data dirs — shares must load from disk, no new DKG.
-    let mut reloaded = Vec::new();
-    for i in 1..=N {
-        let ks = KeyStore::open(tmp.path().join(format!("node-{i}"))).unwrap();
-        reloaded.push(Arc::new(Node::new(
-            Identifier::try_from(i).unwrap(),
-            N,
-            T,
-            ks,
-        )));
-    }
-    let peers2: Peers = reloaded
-        .iter()
-        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
-        .collect();
-    rutli_cosigner::peer::wire_local_mesh(&reloaded).unwrap();
+    let (reloaded, peers2) = cluster(&tmp);
 
     for n in &reloaded {
         assert_eq!(n.group_key(KEY_ID).unwrap(), group_key);
     }
-    let message = canton_digest(b"after restart");
-    let sig = sign(&reloaded[0], &peers2, KEY_ID, &message).await.unwrap();
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
-    vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig))
-        .unwrap();
+    sign_canton_digest_and_verify(&reloaded[0], &peers2, &group_key, b"after restart").await;
 }
 
 // ── ceremony serialization (regression: concurrent DKG/refresh must not split-brain shares) ──
@@ -469,7 +438,7 @@ async fn dkg_refuses_when_the_key_already_exists() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = cluster(&tmp);
     let group_key = run_dkg(&peers, KEY_ID).await.unwrap(); // provision the key
-    let share_file = tmp.path().join("node-1").join(format!("{KEY_ID}.json"));
+    let share_file = share_path(&tmp, 1);
     let before = std::fs::read(&share_file).unwrap();
 
     // A fresh DKG against a provisioned key is refused — re-DKG would destroy the (non-rotatable) key.
@@ -488,10 +457,7 @@ async fn dkg_refuses_when_the_key_already_exists() {
     let msg = canton_digest(b"after refused re-dkg");
     let sig = sign(&nodes[0], &peers, KEY_ID, &msg).await.unwrap();
     let gk = nodes[0].group_key(KEY_ID).unwrap();
-    ed25519_dalek::VerifyingKey::from_bytes(&gk)
-        .unwrap()
-        .verify_strict(&msg, &ed25519_dalek::Signature::from_bytes(&sig))
-        .unwrap();
+    assert_signature_verifies(&gk, &msg, &sig);
 }
 
 #[tokio::test]
@@ -640,12 +606,7 @@ async fn a_superseded_refresh_cannot_persist_after_orphan_preempt() {
     for n in &nodes {
         assert_eq!(n.group_key(KEY_ID).unwrap(), group_key);
     }
-    let msg = canton_digest(b"after preempt");
-    let sig = sign(&nodes[0], &peers, KEY_ID, &msg).await.unwrap();
-    ed25519_dalek::VerifyingKey::from_bytes(&group_key)
-        .unwrap()
-        .verify_strict(&msg, &ed25519_dalek::Signature::from_bytes(&sig))
-        .unwrap();
+    sign_canton_digest_and_verify(&nodes[0], &peers, &group_key, b"after preempt").await;
 }
 
 /// Until 0.4.0-rc.3 a DKG/refresh fence refused every new sign on the key; a fence never followed by
@@ -670,12 +631,7 @@ async fn signing_continues_on_every_node_under_a_cluster_wide_refresh_fence() {
         n.abort_sign_as(KEY_ID, &session, &rutli_cosigner::node::SessionOwner::Local)
             .unwrap();
     }
-    let msg = canton_digest(b"under a refresh fence");
-    let sig = sign(&nodes[0], &peers, KEY_ID, &msg).await.unwrap();
-    ed25519_dalek::VerifyingKey::from_bytes(&group_key)
-        .unwrap()
-        .verify_strict(&msg, &ed25519_dalek::Signature::from_bytes(&sig))
-        .unwrap();
+    sign_canton_digest_and_verify(&nodes[0], &peers, &group_key, b"under a refresh fence").await;
 
     // The fence still serializes ceremonies: another refresh is refused until it is released.
     assert!(matches!(
@@ -744,10 +700,7 @@ async fn a_round2_started_after_a_refresh_evicted_the_cosigner_fails_cleanly_and
 
     // Retried as a new sign: it signs on the refreshed sharing, under the unchanged group key.
     let sig = sign(&nodes[0], &peers, KEY_ID, &msg).await.unwrap();
-    ed25519_dalek::VerifyingKey::from_bytes(&group_key)
-        .unwrap()
-        .verify_strict(&msg, &ed25519_dalek::Signature::from_bytes(&sig))
-        .unwrap();
+    assert_signature_verifies(&group_key, &msg, &sig);
 }
 
 // ── sign abort on failure (P1.3): a give-up frees in-flight nonces now, not at the pending TTL ──
@@ -881,10 +834,7 @@ async fn a_failed_sign_round2_aborts_the_in_flight_session_on_every_quorum_membe
     let sig = sign(&nodes[0], &nodes_peers(&nodes), KEY_ID, &message)
         .await
         .unwrap();
-    ed25519_dalek::VerifyingKey::from_bytes(&group_key)
-        .unwrap()
-        .verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig))
-        .unwrap();
+    assert_signature_verifies(&group_key, &message, &sig);
 }
 
 #[tokio::test]
@@ -976,22 +926,16 @@ const CLUSTER: &str = "testcluster00000";
 
 /// A cluster with hosted keys enabled on every node (sealed keystores, shared master secret).
 fn hosted_cluster(tmp: &tempfile::TempDir) -> (Vec<Arc<Node>>, Peers) {
-    use rutli_cosigner::seal::Sealer;
-    let mut nodes = Vec::new();
-    for i in 1..=N {
-        let sealer = Arc::new(Sealer::from_master_secret(HOSTED_MASTER, i));
-        let ks =
-            KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(sealer)).unwrap();
-        let node = Node::new(Identifier::try_from(i).unwrap(), N, T, ks)
-            .with_hosted_keys(HOSTED_MASTER, CLUSTER.to_string())
-            .unwrap();
-        nodes.push(Arc::new(node));
-    }
-    let peers: Peers = nodes
-        .iter()
-        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+    let nodes: Vec<Arc<Node>> = (1..=N)
+        .map(|i| {
+            let ks = sealed_keystore(tmp, HOSTED_MASTER, i);
+            let node = Node::new(Identifier::try_from(i).unwrap(), N, T, ks)
+                .with_hosted_keys(HOSTED_MASTER, CLUSTER.to_string())
+                .unwrap();
+            Arc::new(node)
+        })
         .collect();
-    rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
+    let peers = local_peers(&nodes);
     (nodes, peers)
 }
 
@@ -1145,6 +1089,13 @@ fn as_node(nodes: &[Arc<Node>], i: usize) -> Peers {
         .collect()
 }
 
+/// Runs node `i`'s anti-entropy sweep over the cluster and returns how many replicas it repaired.
+async fn sweep_of(nodes: &[Arc<Node>], i: usize) -> usize {
+    anti_entropy_sweep(&nodes[i], &as_node(nodes, i))
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn anti_entropy_heals_a_node_that_missed_a_write_by_pulling_never_by_a_push() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1162,39 +1113,19 @@ async fn anti_entropy_heals_a_node_that_missed_a_write_by_pulling_never_by_a_pus
     assert!(!nodes[2].hosted_exists("rutli-sym-3"));
 
     // The holders' sweeps push nothing to the node that lacks the key...
-    assert_eq!(
-        anti_entropy_sweep(&nodes[0], &as_node(&nodes, 0))
-            .await
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        anti_entropy_sweep(&nodes[1], &as_node(&nodes, 1))
-            .await
-            .unwrap(),
-        0
-    );
+    assert_eq!(sweep_of(&nodes, 0).await, 0);
+    assert_eq!(sweep_of(&nodes, 1).await, 0);
     assert!(
         !nodes[2].hosted_exists("rutli-sym-3"),
         "the sweep no longer pushes"
     );
 
     // ...its own sweep pulls it, since two peers hold the same copy: that heals a 2-of-3 write.
-    assert_eq!(
-        anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2))
-            .await
-            .unwrap(),
-        1
-    );
+    assert_eq!(sweep_of(&nodes, 2).await, 1);
     assert!(nodes[2].hosted_exists("rutli-sym-3"));
 
     // Converged: a second sweep has nothing to do.
-    assert_eq!(
-        anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2))
-            .await
-            .unwrap(),
-        0
-    );
+    assert_eq!(sweep_of(&nodes, 2).await, 0);
 }
 
 #[tokio::test]
@@ -1238,12 +1169,7 @@ async fn hosted_keys_and_frost_shares_do_not_interfere() {
     .unwrap();
 
     // Threshold signing still works...
-    let msg = canton_digest(b"topology tx");
-    let sig = sign(&nodes[0], &peers, KEY_ID, &msg).await.unwrap();
-    ed25519_dalek::VerifyingKey::from_bytes(&group_key)
-        .unwrap()
-        .verify_strict(&msg, &ed25519_dalek::Signature::from_bytes(&sig))
-        .unwrap();
+    sign_canton_digest_and_verify(&nodes[0], &peers, &group_key, b"topology tx").await;
 
     // ...and the hosted inventory lists ONLY the hosted key. A FROST share must never be treated
     // as replicable: copying one would give two nodes the same share and break the threshold.
@@ -1776,12 +1702,7 @@ async fn a_hosted_key_can_be_generated_with_one_cosigner_unreachable() {
 
     // ...and the node that was down is healed once it is back, without operator action: its own
     // sweep pulls the key, which both live nodes hold.
-    assert_eq!(
-        anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2))
-            .await
-            .unwrap(),
-        1
-    );
+    assert_eq!(sweep_of(&nodes, 2).await, 1);
     assert_eq!(
         nodes[2].hosted_decrypt("rutli-enc-degraded", &ct).unwrap(),
         b"written while degraded"
@@ -1838,20 +1759,13 @@ async fn anti_entropy_publishes_the_replica_shortfall() {
 
     // Before healing: node 3 lacks the key, so its sweep both repairs it and reports the count.
     assert_eq!(
-        anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2))
-            .await
-            .unwrap(),
+        sweep_of(&nodes, 2).await,
         1,
         "node 3 pulls the missing replica"
     );
 
     // After healing every node holds it, and a second sweep is a no-op.
-    assert_eq!(
-        anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2))
-            .await
-            .unwrap(),
-        0
-    );
+    assert_eq!(sweep_of(&nodes, 2).await, 0);
     assert_eq!(anti_entropy_sweep(&nodes[0], &peers).await.unwrap(), 0);
     for n in &nodes {
         assert!(n.hosted_exists("rutli-enc-count"));

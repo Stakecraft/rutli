@@ -74,6 +74,13 @@ fn put(path: &Path, bytes: &[u8]) {
     std::fs::write(path, bytes).unwrap();
 }
 
+/// [`put`] for each (path relative to `root`, bytes) in order.
+fn put_all(root: &Path, files: &[(&str, Vec<u8>)]) {
+    for (rel, bytes) in files {
+        put(&root.join(rel), bytes);
+    }
+}
+
 fn run(
     dd: &Path,
     sealer: Option<&Sealer>,
@@ -158,15 +165,20 @@ fn a_clean_store_finds_nothing_and_still_lists_what_was_not_checked() {
     let tmp = tempfile::tempdir().unwrap();
     let dd = tmp.path();
     let s = sealer_of(&NodeSealBundle::random(1));
-    put(
-        &dd.join("keys/frost-a.json"),
-        &v2(&s, RecordKind::FrostShare, "frost-a", 3),
+    put_all(
+        dd,
+        &[
+            (
+                "keys/frost-a.json",
+                v2(&s, RecordKind::FrostShare, "frost-a", 3),
+            ),
+            (
+                "keys/rutli-h.json",
+                v2(&s, RecordKind::HostedKey, "rutli-h", 0),
+            ),
+            ("keys/frost-b.json", v1(&s, 1)),
+        ],
     );
-    put(
-        &dd.join("keys/rutli-h.json"),
-        &v2(&s, RecordKind::HostedKey, "rutli-h", 0),
-    );
-    put(&dd.join("keys/frost-b.json"), &v1(&s, 1));
     std::fs::create_dir_all(dd.join("keys/.ceremonies")).unwrap();
     std::fs::create_dir_all(dd.join("keys/.cleared")).unwrap();
     std::fs::create_dir_all(dd.join("keys/frost-a.nonces")).unwrap();
@@ -213,58 +225,55 @@ fn every_class_on_the_volume_and_in_a_backup() {
     let (s_old, s) = (sealer_of(&old), sealer_of(&now));
 
     // Live store.
-    put(
-        &dd.join("keys/frost-a.json"),
-        &v2(&s, RecordKind::FrostShare, "frost-a", 3),
+    let current = |kind: RecordKind, key_id: &str, epoch: u64| v2(&s, kind, key_id, epoch);
+    put_all(
+        &dd,
+        &[
+            ("keys/frost-a.json", current(RecordKind::FrostShare, "frost-a", 3)),
+            ("keys/frost-b.json", v1(&s, 1)),
+            ("keys/frost-plain.json", plaintext_share(1)),
+            (
+                "keys/frost-olddek.json",
+                v2(&s_old, RecordKind::FrostShare, "frost-olddek", 2),
+            ),
+            ("keys/rutli-h.json", current(RecordKind::HostedKey, "rutli-h", 0)),
+            ("keys/rutli-t.json", current(RecordKind::Tombstone, "rutli-t", 0)),
+            (
+                "keys/frost-a.json.tmp",
+                current(RecordKind::FrostShare, "frost-a", 3),
+            ),
+            ("keys/.create-frost-c-1.tmp", b"partial".to_vec()),
+            // Staged: cer1 has no record (orphan), cer2 is in progress.
+            (
+                "keys/.staged/frost-a.cer1.json",
+                current(RecordKind::FrostShare, "frost-a", 4),
+            ),
+            (
+                "keys/.staged/frost-a.cer2.json",
+                current(RecordKind::FrostShare, "frost-a", 4),
+            ),
+            (
+                "keys/.ceremonies/cer2.json",
+                serde_json::json!({ "ceremony_id": "cer2", "state": "staged", "key_id": "frost-a" })
+                    .to_string()
+                    .into_bytes(),
+            ),
+            // Split-ceremony material, leftovers, lost+found.
+            (
+                "ceremony/frost-z.recipient",
+                current(RecordKind::Recipient, "frost-z", 0),
+            ),
+            (
+                "backup-1/frost-a.json",
+                current(RecordKind::FrostShare, "frost-a", 2),
+            ),
+            (
+                "retired-2026-07/frost-gone.json",
+                current(RecordKind::FrostShare, "frost-gone", 5),
+            ),
+            ("lost+found/#1234", b"orphaned inode".to_vec()),
+        ],
     );
-    put(&dd.join("keys/frost-b.json"), &v1(&s, 1));
-    put(&dd.join("keys/frost-plain.json"), &plaintext_share(1));
-    put(
-        &dd.join("keys/frost-olddek.json"),
-        &v2(&s_old, RecordKind::FrostShare, "frost-olddek", 2),
-    );
-    put(
-        &dd.join("keys/rutli-h.json"),
-        &v2(&s, RecordKind::HostedKey, "rutli-h", 0),
-    );
-    put(
-        &dd.join("keys/rutli-t.json"),
-        &v2(&s, RecordKind::Tombstone, "rutli-t", 0),
-    );
-    put(
-        &dd.join("keys/frost-a.json.tmp"),
-        &v2(&s, RecordKind::FrostShare, "frost-a", 3),
-    );
-    put(&dd.join("keys/.create-frost-c-1.tmp"), b"partial");
-    // Staged: cer1 has no record (orphan), cer2 is in progress.
-    put(
-        &dd.join("keys/.staged/frost-a.cer1.json"),
-        &v2(&s, RecordKind::FrostShare, "frost-a", 4),
-    );
-    put(
-        &dd.join("keys/.staged/frost-a.cer2.json"),
-        &v2(&s, RecordKind::FrostShare, "frost-a", 4),
-    );
-    put(
-        &dd.join("keys/.ceremonies/cer2.json"),
-        serde_json::json!({ "ceremony_id": "cer2", "state": "staged", "key_id": "frost-a" })
-            .to_string()
-            .as_bytes(),
-    );
-    // Split-ceremony material, leftovers, lost+found.
-    put(
-        &dd.join("ceremony/frost-z.recipient"),
-        &v2(&s, RecordKind::Recipient, "frost-z", 0),
-    );
-    put(
-        &dd.join("backup-1/frost-a.json"),
-        &v2(&s, RecordKind::FrostShare, "frost-a", 2),
-    );
-    put(
-        &dd.join("retired-2026-07/frost-gone.json"),
-        &v2(&s, RecordKind::FrostShare, "frost-gone", 5),
-    );
-    put(&dd.join("lost+found/#1234"), b"orphaned inode");
 
     // A backup directory.
     let bk = tmp.path().join("bk");
@@ -569,21 +578,26 @@ fn the_output_carries_only_the_allowed_fields_and_no_key_material() {
     let master = "legacy-master-for-the-output-test-0123456789";
     let bundle = NodeSealBundle::from_legacy_master(master.as_bytes(), 1);
     let s = sealer_of(&bundle);
-    put(
-        &dd.join("keys/frost-a.json"),
-        &v2(&s, RecordKind::FrostShare, "frost-a", 2),
+    put_all(
+        &dd,
+        &[
+            (
+                "keys/frost-a.json",
+                v2(&s, RecordKind::FrostShare, "frost-a", 2),
+            ),
+            ("keys/frost-plain.json", plaintext_share(1)),
+            ("keys/frost-b.json", v1(&s, 1)),
+            (
+                "backup-1/frost-a.json",
+                v2(&s, RecordKind::FrostShare, "frost-a", 1),
+            ),
+            (
+                "backup-1/rutli-h.json",
+                v2(&s, RecordKind::HostedKey, "rutli-h", 0),
+            ),
+            ("keys/stray", b"x".to_vec()),
+        ],
     );
-    put(&dd.join("keys/frost-plain.json"), &plaintext_share(1));
-    put(&dd.join("keys/frost-b.json"), &v1(&s, 1));
-    put(
-        &dd.join("backup-1/frost-a.json"),
-        &v2(&s, RecordKind::FrostShare, "frost-a", 1),
-    );
-    put(
-        &dd.join("backup-1/rutli-h.json"),
-        &v2(&s, RecordKind::HostedKey, "rutli-h", 0),
-    );
-    put(&dd.join("keys/stray"), b"x");
 
     let r = run(
         &dd,
@@ -690,15 +704,20 @@ fn an_unreadable_ceremony_record_is_reported_not_guessed() {
     let tmp = tempfile::tempdir().unwrap();
     let dd = tmp.path().join("data");
     let s = sealer_of(&NodeSealBundle::random(1));
-    put(
-        &dd.join("keys/frost-a.json"),
-        &v2(&s, RecordKind::FrostShare, "frost-a", 1),
+    put_all(
+        &dd,
+        &[
+            (
+                "keys/frost-a.json",
+                v2(&s, RecordKind::FrostShare, "frost-a", 1),
+            ),
+            (
+                "keys/.staged/frost-a.cer9.json",
+                v2(&s, RecordKind::FrostShare, "frost-a", 2),
+            ),
+            ("keys/.ceremonies/cer9.json", b"{ not json".to_vec()),
+        ],
     );
-    put(
-        &dd.join("keys/.staged/frost-a.cer9.json"),
-        &v2(&s, RecordKind::FrostShare, "frost-a", 2),
-    );
-    put(&dd.join("keys/.ceremonies/cer9.json"), b"{ not json");
     let r = run(&dd, Some(&s), &[], None);
     assert!(
         r.unclassified

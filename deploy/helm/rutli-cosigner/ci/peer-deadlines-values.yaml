@@ -1,0 +1,11 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+# CI render: the chart's defaults plus placeholder TLS key pins (as peer-pins-values.yaml), and both
+# peerDeadlines keys set to in-bounds values, so the peer_deadlines branch of the config is rendered.
+peerPins:
+  "1": ["1111111111111111111111111111111111111111111111111111111111111111"]
+  "2": ["2222222222222222222222222222222222222222222222222222222222222222"]
+  "3": ["3333333333333333333333333333333333333333333333333333333333333333"]
+peerDeadlines:
+  signRound1Ms: 3000
+  signRound2Ms: 6000

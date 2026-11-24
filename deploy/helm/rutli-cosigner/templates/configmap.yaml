@@ -52,6 +52,13 @@ data:
 {{- if and (eq $profile "production") (eq (include "rutli-cosigner.topology" .) "legacy") }}
   {{- fail "profile production needs topology perNode: the legacy topology seals every node with one shared secret. Set profile: lab until the install runs docs/runbook-per-node-seal.md (docs/production-profile.md)" }}
 {{- end }}
+{{- $peerDeadlines := "" }}
+{{- if and (not (kindIs "invalid" .Values.peerDeadlines)) (not (kindIs "map" .Values.peerDeadlines)) }}
+  {{- fail (printf "peerDeadlines must be a map (signRound1Ms, signRound2Ms), got %s" (kindOf .Values.peerDeadlines)) }}
+{{- end }}
+{{- if .Values.peerDeadlines }}
+  {{- $peerDeadlines = include "rutli-cosigner.peerDeadlines" . }}
+{{- end }}
 {{- $hosted := .Values.hostedKeys }}
 {{- if $hosted.enabled }}
   {{- $q := int $hosted.writeQuorum }}
@@ -129,6 +136,9 @@ data:
       {{- if $.Values.keyfile }}
       "keyfile": {{ $.Values.keyfile | toJson }},
       {{- end }}
+      {{- if $peerDeadlines }}
+      "peer_deadlines": {{ $peerDeadlines }},
+      {{- end }}
       "peer_allowlist": {{ $peerAllow | toJson }}
     }
 {{- end }}
@@ -188,6 +198,9 @@ data:
       {{- end }}
       {{- if $.Values.keyfile }}
       "keyfile": {{ $.Values.keyfile | toJson }},
+      {{- end }}
+      {{- if $peerDeadlines }}
+      "peer_deadlines": {{ $peerDeadlines }},
       {{- end }}
       "peer_allowlist": {{ $peerAllow | toJson }}
     }
