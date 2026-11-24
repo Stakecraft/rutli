@@ -7,13 +7,14 @@
 # workflow (.github/workflows/release-assets.yml) and its dry run (image-build-check.yml) run the same
 # commands, so a step that would fail on a tag fails on a pull request first.
 #
-#   scripts/release-assets.sh install-tools          cosign and syft, from their releases, checked by sha256
+#   scripts/release-assets.sh install-tools [cosign|syft]   the tools (both by default), from their releases, checked by sha256
 #   scripts/release-assets.sh version-check [TAG]    build.sbt and frost/Cargo.toml agree (and with TAG)
 #   scripts/release-assets.sh build-jar OUT          sbt driver/assembly -> OUT/rutli-driver-<version>.jar
 #   scripts/release-assets.sh build-dealer OUT       cargo build --release -> OUT/rutli-dealer-<version>-<os>-<arch>
 #   scripts/release-assets.sh licenses OUT           LICENSE and THIRD-PARTY-LICENSES-rust.txt next to the binary
 #   scripts/release-assets.sh sbom OUT               SPDX SBOMs: rutli-driver-<version>.spdx.json, rutli-dealer-<version>.spdx.json
 #   scripts/release-assets.sh gather SRC OUT         copy each build artifact (SRC/asset-<kind>/) into OUT, one expected file from each
+#   scripts/release-assets.sh gather-sbom SRC OUT    copy the two SBOMs (SRC/asset-sbom/) into OUT
 #   scripts/release-assets.sh check-set OUT STAGE    OUT holds exactly the expected files: STAGE built|ready|signed
 #   scripts/release-assets.sh sums OUT               SHA256SUMS of every file in OUT (not the bundles)
 #   scripts/release-assets.sh sign OUT               a cosign bundle OUT/<file>.sigstore.json for every file
@@ -40,7 +41,7 @@ sbt_version() {
   sed -n 's/^ThisBuild \/ version *:= *"\([^"]*\)".*/\1/p' "$REPO/build.sbt" | head -n 1
 }
 cargo_version() {
-  awk '/^\[workspace\.package\]/ {on = 1; next} /^\[/ {on = 0} on && /^version *=/ {gsub(/[" ]/, "", $0); sub(/^version=/, "", $0); print; exit}' "$REPO/frost/Cargo.toml"
+  awk '/^\[workspace\.package\]/ {on = 1; next} /^\[/ {on = 0} on && /^version *=/ {split($0, a, "\""); print a[2]; exit}' "$REPO/frost/Cargo.toml"
 }
 version() {
   local v
@@ -56,22 +57,30 @@ need_out() {
 
 cmd_install_tools() {
   [ "$(uname -s)-$(uname -m)" = "Linux-x86_64" ] || die "install-tools supports linux-x86_64 only (the release runner)"
-  local tmp bin
+  local which="${1:-both}" tmp bin
+  case "$which" in
+    both | cosign | syft) ;;
+    *) die "install-tools: cosign, syft or nothing" ;;
+  esac
   tmp="$(mktemp -d)"
   bin="$HOME/.local/bin"
   mkdir -p "$bin"
-  curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/cosign" \
-    "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
-  echo "${COSIGN_SHA256_AMD64}  ${tmp}/cosign" | sha256sum -c -
-  install -m 0755 "$tmp/cosign" "$bin/cosign"
-  curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/syft.tar.gz" \
-    "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
-  echo "${SYFT_SHA256_AMD64}  ${tmp}/syft.tar.gz" | sha256sum -c -
-  tar -xzf "$tmp/syft.tar.gz" -C "$tmp" syft
-  install -m 0755 "$tmp/syft" "$bin/syft"
+  if [ "$which" != syft ]; then
+    curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/cosign" \
+      "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+    echo "${COSIGN_SHA256_AMD64}  ${tmp}/cosign" | sha256sum -c -
+    install -m 0755 "$tmp/cosign" "$bin/cosign"
+    PATH="$bin:$PATH" cosign version
+  fi
+  if [ "$which" != cosign ]; then
+    curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/syft.tar.gz" \
+      "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+    echo "${SYFT_SHA256_AMD64}  ${tmp}/syft.tar.gz" | sha256sum -c -
+    tar -xzf "$tmp/syft.tar.gz" -C "$tmp" syft
+    install -m 0755 "$tmp/syft" "$bin/syft"
+    PATH="$bin:$PATH" syft version
+  fi
   if [ -n "${GITHUB_PATH:-}" ]; then echo "$bin" >>"$GITHUB_PATH"; fi
-  PATH="$bin:$PATH" cosign version
-  PATH="$bin:$PATH" syft version
 }
 
 cmd_version_check() {
@@ -184,13 +193,13 @@ cmd_check_set() {
 cmd_gather() {
   [ -d "${1:-}" ] || die "usage: $0 gather SRC OUT"
   need_out "${2:-}"
-  local v kind want n
+  local v kind want n a kinds=(jar)
   v="$(version)"
-  for kind in jar dealer-x86_64 dealer-aarch64; do
+  for a in ${RELEASE_DEALER_ARCHS:-x86_64 aarch64}; do kinds+=("dealer-${a}"); done
+  for kind in "${kinds[@]}"; do
     case "$kind" in
       jar) want="rutli-driver-${v}.jar" ;;
-      dealer-x86_64) want="rutli-dealer-${v}-linux-x86_64" ;;
-      dealer-aarch64) want="rutli-dealer-${v}-linux-aarch64" ;;
+      dealer-*) want="rutli-dealer-${v}-linux-${kind#dealer-}" ;;
     esac
     [ -d "$1/asset-${kind}" ] || die "no build artifact asset-${kind} in $1"
     n="$(find "$1/asset-${kind}" -mindepth 1 | wc -l | tr -d ' ')"
@@ -198,7 +207,24 @@ cmd_gather() {
       || die "asset-${kind} must hold exactly the file ${want}"
     cp "$1/asset-${kind}/${want}" "$2/${want}"
   done
-  echo "OK: three build artifacts, one expected file each"
+  echo "OK: ${#kinds[@]} build artifacts, one expected file each"
+}
+
+# The SBOM job (no signing identity) makes the two SBOMs from the built files; the signing job takes
+# them from their own artifact, exactly these two files.
+cmd_gather_sbom() {
+  [ -d "${1:-}" ] || die "usage: $0 gather-sbom SRC OUT"
+  need_out "${2:-}"
+  local v f n
+  v="$(version)"
+  [ -d "$1/asset-sbom" ] || die "no build artifact asset-sbom in $1"
+  n="$(find "$1/asset-sbom" -mindepth 1 | wc -l | tr -d ' ')"
+  [ "$n" = 2 ] || die "asset-sbom must hold exactly the two SBOMs"
+  for f in "rutli-driver-${v}.spdx.json" "rutli-dealer-${v}.spdx.json"; do
+    [ -f "$1/asset-sbom/$f" ] && [ ! -L "$1/asset-sbom/$f" ] || die "asset-sbom lacks the file $f"
+    cp "$1/asset-sbom/$f" "$2/$f"
+  done
+  echo "OK: the two SBOMs"
 }
 
 cmd_sums() {
@@ -255,7 +281,7 @@ cmd_verify() {
 
 main() {
   local c="${1:-}"
-  [ -n "$c" ] || die "usage: $0 install-tools|version-check|build-jar|build-dealer|licenses|sbom|gather|check-set|sums|sign|verify [args]"
+  [ -n "$c" ] || die "usage: $0 install-tools|version-check|build-jar|build-dealer|licenses|sbom|gather|gather-sbom|check-set|sums|sign|verify [args]"
   shift
   case "$c" in
     install-tools) cmd_install_tools ;;
@@ -265,6 +291,7 @@ main() {
     licenses) cmd_licenses "$@" ;;
     sbom) cmd_sbom "$@" ;;
     gather) cmd_gather "$@" ;;
+    gather-sbom) cmd_gather_sbom "$@" ;;
     check-set) cmd_check_set "$@" ;;
     sums) cmd_sums "$@" ;;
     sign) cmd_sign "$@" ;;

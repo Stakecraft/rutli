@@ -105,16 +105,18 @@ without its license file next to it is not a complete release: the MIT and BSD l
 bundled crates require their notices to travel with the binary.
 
 What the release workflow may do beyond `publish-image.yml`: the `build` jobs have `contents: read`;
+the `sbom` job (`contents: read`) is the only one that runs a parser tool (syft) on the built files;
 the `sign` job has `id-token: write` (keyless signing) and `attestations: write` (the provenance
-attestation) and checks that the build artifacts are exactly the expected files before it hashes
-or signs anything; the `publish` job has `contents: write` (attach the signed set to the release,
+attestation), reads each build artifact from its own directory and checks that they are exactly the
+expected files before it hashes or signs anything; the `publish` job has `contents: write` (attach the signed set to the release,
 create a missing release as a draft) and no signing identity. `publish-image.yml` keeps its
 permissions.
 
 ### Verify the release assets
 
 Download the files you use and their `.sigstore.json` bundles from the release. You need cosign 3 or
-newer and, for the second check, the GitHub CLI (`gh`, 2.103 or newer).
+newer (a bundle made by cosign 3 does not verify with cosign 2) and, for the second check, the GitHub
+CLI (`gh`, 2.103 or newer, logged in with `gh auth login`: it queries GitHub's attestation store).
 
 ```bash
 TAG=v0.5.0
@@ -160,8 +162,8 @@ checks the runner of the signing job.
 
 The dealer binaries are built on `ubuntu-24.04`, so they need glibc 2.39 or newer (Ubuntu 24.04,
 Debian 13, RHEL 10). On an older system, build them from the tag (`cargo build --release --locked -p
-rutli-cosigner --bin rutli-dealer` in `frost/`) or run the cosigner image. On macOS replace the last
-command with `shasum -a 256 -c --ignore-missing SHA256SUMS`.
+rutli-cosigner --bin rutli-dealer` in `frost/`) or run the cosigner image. On macOS the stock `shasum` has no `--ignore-missing`: compare
+`shasum -a 256 "$FILE"` with the line for that file in `SHA256SUMS`, or install GNU coreutils.
 
 ## Tag-day order
 

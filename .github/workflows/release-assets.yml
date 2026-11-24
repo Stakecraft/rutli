@@ -6,14 +6,16 @@ name: Release assets
 # each with an SPDX SBOM, a SHA256SUMS file, a keyless cosign signature (a Sigstore bundle per file)
 # and a GitHub build provenance attestation; everything is attached to the release for the tag.
 #   guard   refuses any ref that is not a v* tag (and carries the `release` environment)
+#   precheck stops a run for a release that already carries SHA256SUMS (before anything is signed)
 #   build   the jar (sbt driver/assembly) and the dealer for linux-x86_64 and linux-aarch64
+#   sbom    the two SBOMs, from the built files, in a job without a signing identity or write access
 #   sign    the only job with a signing identity (id-token, attestations: write): checks that the
 #           build artifacts are exactly the expected files, then SBOMs, SHA256SUMS, signatures,
 #           provenance and the user's verification commands. No write access to the repository.
 #   publish the only job that may write to the release (contents: write): attaches the signed set;
 #           no signing identity
 # The container image has its own workflow (publish-image.yml), unchanged. How a user verifies these
-# files: docs/releasing.md, "Verify the release assets". image-build-check.yml runs the same
+# files: docs/releasing.md, "Verify the release assets". release-assets-check.yml runs the same
 # scripts/release-assets.sh commands on pull requests with a throwaway key, so a broken step shows
 # before a tag.
 on:
@@ -52,9 +54,37 @@ jobs:
           echo "::error::This workflow publishes only from a v* tag ref (got ${REF}). Run it on a release tag."
           exit 1
 
+  # A release that already carries SHA256SUMS is not touched unless the run was started with
+  # replace_published: the builds are not reproducible, and a second run would leave two sets of
+  # signatures and attestations that both verify. Checked here, before anything is built or signed.
+  precheck:
+    name: The release is not already published
+    needs: guard
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      REPLACE_PUBLISHED: ${{ inputs.replace_published }}
+    steps:
+      - name: A release with SHA256SUMS needs replace_published
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
+          if ! out="$(gh release view "$TAG" --json assets --jq '[.assets[].name] | index("SHA256SUMS") != null' 2>&1)"; then
+            # Only "no such release" is fine; any other error (rate limit, 5xx) stops the run.
+            [[ "$out" == *"release not found"* ]] || { echo "::error::cannot read the release ${TAG}: ${out}"; exit 1; }
+            echo "no release for ${TAG} yet: a draft is created at the end"
+          elif [ "$out" = true ] && [ "$REPLACE_PUBLISHED" != true ]; then
+            echo "::error::the release ${TAG} already carries SHA256SUMS; start the run with replace_published to replace the files"
+            exit 1
+          fi
+
   build:
     name: Build ${{ matrix.name }}
-    needs: guard
+    needs: [guard, precheck]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -125,9 +155,47 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  sign:
-    name: SBOM, signatures, provenance
+  # Only this job reads the built files with a parser tool (syft). It has no signing identity and no
+  # write access, so a flaw in that tool cannot be turned into a signature or a release upload.
+  sbom:
+    name: SBOMs
     needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: asset-*
+          path: built
+
+      - name: Install syft (pinned, checked by sha256)
+        run: scripts/release-assets.sh install-tools syft
+
+      - name: SBOMs of the built files
+        run: |
+          set -euo pipefail
+          scripts/release-assets.sh version-check "$TAG"
+          scripts/release-assets.sh gather built out
+          scripts/release-assets.sh check-set out built
+          scripts/release-assets.sh sbom out
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: asset-sbom
+          path: out/*.spdx.json
+          retention-days: 7
+          if-no-files-found: error
+
+  sign:
+    name: Signatures and provenance
+    needs: [build, sbom]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -135,7 +203,7 @@ jobs:
       attestations: write  # store the build provenance attestation with the repository
     env:
       TAG: ${{ github.ref_name }}
-      RELEASE_CERT_IDENTITY: https://github.com/Stakecraft/rutli/.github/workflows/release-assets.yml@${{ github.ref }}
+      RELEASE_CERT_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release-assets.yml@${{ github.ref }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -158,14 +226,14 @@ jobs:
           scripts/release-assets.sh gather built out
           scripts/release-assets.sh check-set out built
 
-      - name: Install cosign and syft (pinned, checked by sha256)
-        run: scripts/release-assets.sh install-tools
+      - name: Install cosign (pinned, checked by sha256)
+        run: scripts/release-assets.sh install-tools cosign
 
       - name: Licenses, SBOMs, checksums
         run: |
           set -euo pipefail
           scripts/release-assets.sh licenses out
-          scripts/release-assets.sh sbom out
+          scripts/release-assets.sh gather-sbom built out
           scripts/release-assets.sh sums out
           scripts/release-assets.sh check-set out ready
 
@@ -195,8 +263,8 @@ jobs:
           set -euo pipefail
           scripts/release-assets.sh verify out
           for f in out/rutli-driver-*.jar out/rutli-dealer-*-linux-x86_64 out/rutli-dealer-*-linux-aarch64; do
-            gh attestation verify "$f" --repo Stakecraft/rutli \
-              --signer-workflow Stakecraft/rutli/.github/workflows/release-assets.yml \
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-assets.yml" \
               --source-ref "$GITHUB_REF" --deny-self-hosted-runners
           done
 
@@ -219,30 +287,43 @@ jobs:
       GH_REPO: ${{ github.repository }}
       REPLACE_PUBLISHED: ${{ inputs.replace_published }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-set
           path: out
 
+      # Nothing but the signed files goes to the release, whatever the signing job handed over.
+      - name: The files to attach are exactly the signed files
+        run: |
+          set -euo pipefail
+          scripts/release-assets.sh version-check "$TAG"
+          scripts/release-assets.sh check-set out signed
+
       # A release that does not exist yet is created as a draft (with the assets); the maintainer
-      # writes the notes and publishes it. An existing release only gets the files. The builds are
-      # not reproducible: a second run would leave two sets of checksums and attestations that both
-      # verify, so a release that already has SHA256SUMS is not touched unless the run was started with
-      # replace_published; then this workflow's files that are not in the new set are removed.
+      # writes the notes and publishes it. An existing release only gets the files. The "already
+      # published" refusal is repeated here (it ran first in `precheck`); with replace_published this
+      # workflow's files that are not in the new set are removed.
       - name: Attach to the release
         run: |
           set -euo pipefail
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            have="$(gh release view "$TAG" --json assets --jq '[.assets[].name] | index("SHA256SUMS") != null')"
-            if [ "$have" = true ] && [ "$REPLACE_PUBLISHED" != true ]; then
-              echo "::error::the release ${TAG} already carries SHA256SUMS; start the run with replace_published to replace the files"
-              exit 1
-            fi
-          else
+          # The release-lookup errors that are not "not found" stop the run, so a transient API error
+          # cannot look like a missing release.
+          if ! out="$(gh release view "$TAG" --json assets --jq '[.assets[].name] | index("SHA256SUMS") != null' 2>&1)"; then
+            [[ "$out" == *"release not found"* ]] || { echo "::error::cannot read the release ${TAG}: ${out}"; exit 1; }
             gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes "Draft created by the release assets workflow; notes to follow."
+          elif [ "$out" = true ] && [ "$REPLACE_PUBLISHED" != true ]; then
+            echo "::error::the release ${TAG} already carries SHA256SUMS; start the run with replace_published to replace the files"
+            exit 1
           fi
-          gh release upload "$TAG" out/* --clobber
+          # SHA256SUMS and its bundle last: a run that stops half-way has not published the list that
+          # makes a partial release look complete (and a plain retry is not locked out by it).
+          mapfile -t first < <(cd out && find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -printf '%P\n' | LC_ALL=C sort)
+          for f in "${first[@]}"; do gh release upload "$TAG" "out/$f" --clobber; done
+          gh release upload "$TAG" out/SHA256SUMS out/SHA256SUMS.sigstore.json --clobber
           # Only files of this workflow's own kind are removed; anything else on the release (notes,
           # reports, a binary for another platform) stays.
           ours='^(rutli-driver-[0-9A-Za-z.-]+\.(jar|spdx\.json)|rutli-dealer-[0-9A-Za-z.-]+(-linux-(x86_64|aarch64)|\.spdx\.json)|SHA256SUMS|LICENSE|THIRD-PARTY-LICENSES-rust\.txt)(\.sigstore\.json)?$'
