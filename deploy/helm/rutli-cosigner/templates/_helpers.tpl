@@ -151,3 +151,37 @@ value that is not 64 hex, more than two values, or one value under two nodes.
 {{- end }}
 {{- $out | toJson }}
 {{- end }}
+
+{{/*
+The `peer_deadlines` config object from .Values.peerDeadlines (call only when it is non-empty).
+Fails the render on an unknown key or a value outside the bounds the cosigner enforces at startup.
+*/}}
+{{- define "rutli-cosigner.peerDeadlines" -}}
+{{- $pd := .Values.peerDeadlines }}
+{{- if not (kindIs "map" $pd) }}
+{{- fail (printf "peerDeadlines must be a map (signRound1Ms, signRound2Ms), got %s" (kindOf $pd)) }}
+{{- end }}
+{{- range $k, $_ := $pd }}
+{{- if not (has $k (list "signRound1Ms" "signRound2Ms")) }}
+{{- fail (printf "peerDeadlines.%s is not a known key (signRound1Ms, signRound2Ms)" $k) }}
+{{- end }}
+{{- end }}
+{{- $specs := list
+  (dict "key" "signRound1Ms" "json" "sign_round1_ms" "min" 500 "max" 5000)
+  (dict "key" "signRound2Ms" "json" "sign_round2_ms" "min" 1000 "max" 9000) }}
+{{- $parts := list }}
+{{- range $s := $specs }}
+{{- if hasKey $pd $s.key }}
+{{- $raw := index $pd $s.key }}
+{{- if not (has (kindOf $raw) (list "int" "int64" "float64")) }}
+{{- fail (printf "peerDeadlines.%s must be an integer between %d and %d, got %#v" $s.key $s.min $s.max $raw) }}
+{{- end }}
+{{- $v := int64 $raw }}
+{{- if or (ne (float64 $v) (float64 $raw)) (lt $v (int64 $s.min)) (gt $v (int64 $s.max)) }}
+{{- fail (printf "peerDeadlines.%s must be an integer between %d and %d, got %#v" $s.key $s.min $s.max $raw) }}
+{{- end }}
+{{- $parts = append $parts (printf "\"%s\": %d" $s.json $v) }}
+{{- end }}
+{{- end }}
+{{- printf "{ %s }" (join ", " $parts) }}
+{{- end }}
