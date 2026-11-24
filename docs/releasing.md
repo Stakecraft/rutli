@@ -134,7 +134,11 @@ gh attestation verify "$FILE" --repo Stakecraft/rutli \
   --signer-workflow Stakecraft/rutli/.github/workflows/release-assets.yml \
   --source-ref "refs/tags/$TAG" --deny-self-hosted-runners
 
-# The checksums of all files (verify SHA256SUMS itself with the first command)
+# The checksums: first the signature of SHA256SUMS itself, then the files you have
+cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity "$ID" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS
 ```
 
@@ -143,14 +147,16 @@ dealer binaries before it uploads anything, so a file that does not verify is no
 SBOMs are signed like every other file; to read one, `jq '.packages[].name' rutli-dealer-<version>.spdx.json`.
 The container image is verified as described in [SECURITY.md](../SECURITY.md#verify-the-image).
 
-What the checks prove: the signature and the attestation say that `release-assets.yml` of this
-repository, run on that tag on a hosted runner, released these exact bytes. They do not prove that the
+What the checks prove: the signature says that `release-assets.yml` of this repository, run on that
+tag, signed these exact bytes; the attestation says the same and that the signing job ran on a
+GitHub-hosted runner (the signature alone does not say which runner). They do not prove that the
 bytes derive from the tagged source (a compromised build dependency would still be signed); the
 builds are not reproducible, so there is nothing to rebuild and compare. The tag is part of the
 signing identity: `v*` tags are created by the maintainers only, and a tag that is moved and approved
-again is a new run with a new signature set. Verify `SHA256SUMS` itself with the first command before
-you rely on `sha256sum`: `--ignore-missing` checks only the files you downloaded, not that the release
-is complete.
+again is a new run with a new signature set. `--ignore-missing` checks only the files you downloaded, not
+that the release is complete, and it says OK for a directory that holds only `LICENSE`: check that
+the line of the file you care about is among the OKs. The bundles are cosign signatures, not
+attestation bundles: `gh attestation verify` needs GitHub's attestation store online.
 
 The files are always one set. The builds are not reproducible, so a repeated run (`workflow_dispatch`)
 would sign a second set; it refuses to touch a release that already carries `SHA256SUMS` unless it is

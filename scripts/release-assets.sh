@@ -4,7 +4,7 @@
 #
 # The release assets that are not the container image: the driver jar and the dealer binary, with an
 # SBOM for each, a SHA256SUMS file, and a cosign signature (a bundle) for every file. The release
-# workflow (.github/workflows/release-assets.yml) and its dry run (image-build-check.yml) run the same
+# workflow (.github/workflows/release-assets.yml) and its dry run (release-assets-check.yml) run the same
 # commands, so a step that would fail on a tag fails on a pull request first.
 #
 #   scripts/release-assets.sh install-tools [cosign|syft]   the tools (both by default), from their releases, checked by sha256
@@ -141,6 +141,14 @@ cmd_sbom() {
   lockdir="$(mktemp -d)"
   cp "$REPO/frost/Cargo.lock" "$lockdir/Cargo.lock"
   syft scan "dir:${lockdir}" -o "spdx-json=$1/rutli-dealer-${v}.spdx.json" -q
+  check_sboms "$1"
+}
+
+# Both SBOMs are SPDX documents with a plausible number of packages. Run where they are made and again
+# where they are signed, so a wrong file from the SBOM job is not signed.
+check_sboms() { # OUT
+  local v
+  v="$(version)"
   local f
   for f in "$1/rutli-driver-${v}.spdx.json" "$1/rutli-dealer-${v}.spdx.json"; do
     jq -e '.spdxVersion != null and ((.packages // []) | length) > 0' "$f" >/dev/null \
@@ -227,6 +235,7 @@ cmd_gather_sbom() {
     [ -f "$1/asset-sbom/$f" ] && [ ! -L "$1/asset-sbom/$f" ] || die "asset-sbom lacks the file $f"
     cp "$1/asset-sbom/$f" "$2/$f"
   done
+  check_sboms "$2"
   echo "OK: the two SBOMs"
 }
 
@@ -287,7 +296,7 @@ main() {
   [ -n "$c" ] || die "usage: $0 install-tools|version-check|build-jar|build-dealer|licenses|sbom|gather|gather-sbom|check-set|sums|sign|verify [args]"
   shift
   case "$c" in
-    install-tools) cmd_install_tools ;;
+    install-tools) cmd_install_tools "$@" ;;
     version-check) cmd_version_check "$@" ;;
     build-jar) cmd_build_jar "$@" ;;
     build-dealer) cmd_build_dealer "$@" ;;
