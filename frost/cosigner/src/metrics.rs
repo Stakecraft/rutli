@@ -223,9 +223,12 @@ pub const PEER_CALLS: &[&str] = &[
     "local_share",
 ];
 /// Upper bounds (seconds) of `rutli_peer_call_duration_seconds`: 0.33, 0.67, 1.67 are a third of
-/// the 1 s abort, 2 s round-1 and 5 s round-2 deadlines; 1, 2, 3, 5 the deadlines themselves.
+/// the 1 s abort, 2 s round-1 and 5 s round-2 deadlines; 1, 2, 3, 5 the deadlines themselves, and
+/// 1.05, 2.1, 3.15, 5.25 sit just above them, so a call that timed out reads as about its deadline
+/// instead of as the next bucket's top.
 pub const PEER_CALL_DURATION_BUCKETS: &[f64] = &[
-    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.33, 0.5, 0.67, 1.0, 1.67, 2.0, 3.0, 5.0, 10.0,
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.33, 0.5, 0.67, 1.0, 1.05, 1.67, 2.0, 2.1, 3.0, 3.15,
+    5.0, 5.25, 10.0,
 ];
 /// Gauge, labels `peer` (roster number) and `state` (up|down|trial): 1 for the state this node's
 /// breaker holds for that peer ([`crate::liveness`]), 0 for the others. `down` lasting minutes is a

@@ -1292,6 +1292,7 @@ mod tests {
             cluster_id_change_allowed: false,
             signing_policy: Default::default(),
             keyfile: Default::default(),
+            peer_deadlines: None,
         }
     }
 
