@@ -79,10 +79,25 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_grpc_handshake_timeouts_total` | counter | — | Connections cut for not finishing the TLS handshake within 5 s of accept (without TLS: for sending nothing). Clients that open TCP and then send nothing count here; a probe that connects and closes does not |
 | `rutli_lock_poison_recoveries_total` | counter | `lock` | Locks recovered after a panicking request poisoned them (audit L3). The node kept serving; the panic is a bug (`RutliLockPoisonRecovered`) |
 | `rutli_peer_call_duration_seconds` | histogram | `call`=sign_round1\|sign_round2\|abort\|control\|local_share | How long this node's peer calls took, at the caller, whatever their outcome (a call past its deadline records the deadline). `local_share` is this leader's own round 2. Buckets (s): 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.33, 0.5, 0.67, 1, 1.67, 2, 3, 5, 10 — 0.33, 0.67 and 1.67 are a third of the abort, round-1 and round-2 deadlines, so "p99.9 below that edge" reads as a 3× margin (`docs/architecture.md`, "Peer liveness") |
+| `rutli_sign_round1_duration_seconds` | histogram | `result` | One sign round 1 on this node as a member (for a remote leader or its own): the key-store gate, caps, epoch check, intent verification and commitments. Not the wait for a blocking-pool thread before it. Buckets (s): 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.67, 1, 1.67, 2.5, 5, 10 |
+| `rutli_sign_round2_duration_seconds` | histogram | `result` | One sign round 2 on this node as a member: policy and binding checks, journal append, nonce marker, share. Buckets as round 1 |
+| `rutli_sign_journal_append_duration_seconds` | histogram | `result` | One sign journal append, the wait for the key's journal lock included; `error` is a rate-limit refusal or a failed append. Buckets (s): 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5 |
+| `rutli_sign_journal_fsync_duration_seconds` | histogram | — | The `sync_data` of one journal append alone. Buckets as the journal append |
+| `rutli_nonce_marker_duration_seconds` | histogram | `result` | One nonce marker write (create, fsync of the file and of the directory); `error` includes a session already burned. Buckets as the journal append |
+| `rutli_intent_verify_duration_seconds` | histogram | `result` | Verification of a signing intent, on the leader (`Signer.Sign`) and on each member (round 1); `error` is a refused intent. Buckets (s): 0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.1, 0.25, 1 |
+| `rutli_signs_in_flight` | gauge | — | Signatures this node leads right now, raised as each starts and lowered as each ends |
+| `rutli_runtime_workers` | gauge | — | Worker threads of the async runtime |
+| `rutli_runtime_alive_tasks` | gauge | — | Tasks alive on the async runtime |
+| `rutli_runtime_global_queue_depth` | gauge | — | Tasks waiting in the async runtime's global queue |
+| `rutli_runtime_busy_milliseconds_total` | counter | — | Milliseconds the runtime's workers spent busy, all together, since start. Busy ratio: `rate(rutli_runtime_busy_milliseconds_total[5m]) / 1000 / rutli_runtime_workers`. The `rutli_runtime_*` metrics are sampled every 15 s by the key-store watchdog thread, which keeps running when the runtime is saturated |
 | `rutli_peer_state` | gauge | `peer` (roster number), `state`=up\|down\|trial | 1 for the liveness state this node holds for that peer, 0 for the others; set for every peer when the node starts. Down peers are tried last in every signature. One node seeing a peer down is a link; every node seeing it down is the peer (`RutliPeerDown`) |
 | `rutli_peer_breaker_transitions_total` | counter | `peer`, `to`=down\|trial\|up, `reason`=unreachable\|stalled\|refusing\|window\|probe\|call | Liveness transitions: to `down` (why), to `trial` (a window passed), to `up` (after a probe or a successful call). Primed at 0 per peer. Zero in steady state and under load; many in a short time is a flapping link (`RutliPeerFlapping`) |
 | `rutli_sign_fast_refusals_total` | counter | `reason`=no-quorum\|overloaded | Sign calls this node refused as leader without a signature, `UNAVAILABLE` with a `rutli-error` trailer: fewer than t cosigners reachable from it, or overloaded (too many signatures in flight, or its own round missed its deadline). Primed at 0. No-quorum on two or more nodes at once is a cluster that cannot sign (`RutliNoQuorum`, critical) |
 | `rutli_background_loop_restarts_total` | counter | `loop` (`anti_entropy`, `ceremony_resolver`, `epoch_check`, `nonce_pruner`) | Background loops restarted 30 s after a panic in a pass (`anti_entropy` then also waits its own interval before the next sweep). The loop runs again; the panic is a bug (`RutliBackgroundLoopRestarted`) |
+
+Not covered by the sign-phase metrics: the blocking-pool queue depth and the per-worker poll
+times of the async runtime (unstable tokio APIs), and a per-peer split of the leader's calls (see
+`rutli_peer_call_duration_seconds` by call class).
 
 Leader-side metrics (`sign_*`, `ceremony_*`) appear on whichever node served the driver's request —
 with driver failover that can be any of them, so always aggregate across instances (`sum(...)`).
@@ -313,6 +328,13 @@ sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
     check that every node's backup sidecar logged `BACKUP_TRIGGER` and `BACKUP_OK` after the commit.
     A refusal right after a manual run is expected
     (docs/ceremonies.md, "Refresh interval").
+11. **A cosigner's working set above 80 % of its memory limit** (alert
+    `RutliCosignerMemoryNearLimit`, Kubernetes, from cAdvisor and kube-state-metrics) — at the limit
+    the kernel kills the cosigner in the middle of signing. Memory follows the sign sessions in
+    flight (`rutli_pending_sign_sessions`, about 75 KB each at peak) and stays near its peak
+    afterwards, so one burst can leave a node close to the limit. If sessions are stuck
+    (`RutliPendingSessionsGrowing`), find the peer or driver holding them. Otherwise raise
+    `resources.limits.memory` as [performance.md](performance.md), "Memory", describes.
 
    **The other shape: `NOT_SERVING: keystore … unresponsive`** — the probe did not fail, it never
    returned: a dead NFS/CSI mount, or a volume frozen by a snapshot hook (`fsfreeze`). A probe that

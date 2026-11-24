@@ -227,6 +227,66 @@ pub const PEER_CALLS: &[&str] = &[
 pub const PEER_CALL_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.33, 0.5, 0.67, 1.0, 1.67, 2.0, 3.0, 5.0, 10.0,
 ];
+/// Histogram, label `result` (ok|error): one sign round 1 on this node as a member, for a remote
+/// leader or its own (`Node::sign_round1_as`): the keystore gate, caps, epoch check, intent
+/// verification and the commitments. Not the wait for a blocking-pool thread before it.
+pub const SIGN_ROUND1_DURATION: &str = "rutli_sign_round1_duration_seconds";
+/// Histogram, label `result`: one sign round 2 on this node as a member (`Node::sign_round2_as`):
+/// the policy and binding checks, the journal append, the nonce marker and the share.
+pub const SIGN_ROUND2_DURATION: &str = "rutli_sign_round2_duration_seconds";
+/// Histogram, label `result`: `SignJournal::append_charged`, the wait for the key's journal lock
+/// included. `error` is a rate-limit refusal or a failed append.
+pub const SIGN_JOURNAL_APPEND_DURATION: &str = "rutli_sign_journal_append_duration_seconds";
+/// Histogram, no labels: the `sync_data` of one journal append alone.
+pub const SIGN_JOURNAL_FSYNC_DURATION: &str = "rutli_sign_journal_fsync_duration_seconds";
+/// Histogram, label `result`: one nonce marker (`NonceStore::consume`: create, fsync the file and
+/// the directory). `error` includes a session already burned.
+pub const NONCE_MARKER_DURATION: &str = "rutli_nonce_marker_duration_seconds";
+/// Histogram, label `result`: `IntentVerifier::verify` of a signing intent, on the leader (Sign)
+/// and on each member (round 1). `error` is a refused intent.
+pub const INTENT_VERIFY_DURATION: &str = "rutli_intent_verify_duration_seconds";
+/// Upper bounds (seconds) of the two member round histograms: sub-millisecond for a round that
+/// only computes, the 0.67 and 1.67 thirds of the 2 s and 5 s round deadlines (as in
+/// [`PEER_CALL_DURATION_BUCKETS`]), then past both deadlines.
+pub const SIGN_ROUND_DURATION_BUCKETS: &[f64] = &[
+    0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.67, 1.0, 1.67, 2.5, 5.0,
+    10.0,
+];
+/// Upper bounds (seconds) of the journal append, journal fsync and nonce marker histograms: from a
+/// local SSD's flush (~0.1 ms) to a stalled network volume.
+pub const STORE_DURATION_BUCKETS: &[f64] = &[
+    0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+];
+/// Upper bounds (seconds) of the intent verification histogram: one certificate and one signature
+/// check, normally well under a millisecond.
+pub const INTENT_VERIFY_DURATION_BUCKETS: &[f64] = &[
+    0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.1, 0.25, 1.0,
+];
+/// Gauge: signatures this node leads right now (`crate::liveness::SignLoad::leading`), raised as
+/// each starts and lowered as each ends; those two are its only writers.
+pub const SIGNS_IN_FLIGHT: &str = "rutli_signs_in_flight";
+/// Gauge: worker threads of the async runtime. Sampled by the key-store watchdog thread, which keeps
+/// going when the runtime is saturated.
+pub const RUNTIME_WORKERS: &str = "rutli_runtime_workers";
+/// Gauge: tasks alive on the async runtime.
+pub const RUNTIME_ALIVE_TASKS: &str = "rutli_runtime_alive_tasks";
+/// Gauge: tasks waiting in the async runtime's global queue.
+pub const RUNTIME_GLOBAL_QUEUE_DEPTH: &str = "rutli_runtime_global_queue_depth";
+/// Counter: milliseconds the async runtime's workers spent busy, all workers together.
+/// `rate(..) / 1000 / rutli_runtime_workers` is the busy ratio.
+pub const RUNTIME_BUSY_MILLISECONDS: &str = "rutli_runtime_busy_milliseconds_total";
+/// Every histogram the daemon records and its bucket bounds: each is rendered as a Prometheus
+/// histogram, never as a summary ([`SIGN_DURATION_BUCKETS`] says why).
+pub const HISTOGRAM_BUCKETS: &[(&str, &[f64])] = &[
+    (SIGN_DURATION, SIGN_DURATION_BUCKETS),
+    (PEER_CALL_DURATION, PEER_CALL_DURATION_BUCKETS),
+    (SIGN_ROUND1_DURATION, SIGN_ROUND_DURATION_BUCKETS),
+    (SIGN_ROUND2_DURATION, SIGN_ROUND_DURATION_BUCKETS),
+    (SIGN_JOURNAL_APPEND_DURATION, STORE_DURATION_BUCKETS),
+    (SIGN_JOURNAL_FSYNC_DURATION, STORE_DURATION_BUCKETS),
+    (NONCE_MARKER_DURATION, STORE_DURATION_BUCKETS),
+    (INTENT_VERIFY_DURATION, INTENT_VERIFY_DURATION_BUCKETS),
+];
 /// Gauge, labels `peer` (roster number) and `state` (up|down|trial): 1 for the state this node's
 /// breaker holds for that peer ([`crate::liveness`]), 0 for the others. `down` lasting minutes is a
 /// peer this leader cannot use (`RutliPeerDown`).
@@ -410,16 +470,54 @@ pub const SIGN_DURATION_BUCKETS: &[f64] = &[
 
 /// The exporter configuration shared by [`install`] and the exposition-format test below, so the
 /// test pins exactly what the daemon serves.
-fn builder() -> std::result::Result<PrometheusBuilder, BuildError> {
-    PrometheusBuilder::new()
-        .set_buckets_for_metric(
-            Matcher::Full(SIGN_DURATION.to_owned()),
-            SIGN_DURATION_BUCKETS,
-        )?
-        .set_buckets_for_metric(
-            Matcher::Full(PEER_CALL_DURATION.to_owned()),
-            PEER_CALL_DURATION_BUCKETS,
-        )
+pub(crate) fn builder() -> std::result::Result<PrometheusBuilder, BuildError> {
+    HISTOGRAM_BUCKETS
+        .iter()
+        .try_fold(PrometheusBuilder::new(), |b, (name, buckets)| {
+            b.set_buckets_for_metric(Matcher::Full((*name).to_owned()), buckets)
+        })
+}
+
+/// The `result` label of an outcome.
+fn result_label(ok: bool) -> &'static str {
+    if ok {
+        "ok"
+    } else {
+        "error"
+    }
+}
+
+/// Run `op` and record how long it took in the histogram `name`, labelled by its `result`. The
+/// sample is recorded after `op` returned, so it holds no lock `op` took.
+pub fn timed<T, E>(
+    name: &'static str,
+    op: impl FnOnce() -> std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    let started = std::time::Instant::now();
+    let result = op();
+    metrics::histogram!(name, "result" => result_label(result.is_ok()))
+        .record(started.elapsed().as_secs_f64());
+    result
+}
+
+/// The nonce store's observer ([`rutli_frost_core::nonce_store::NonceStore::with_observer`]):
+/// frost/core times each marker, the daemon records it.
+pub fn nonce_marker_observed(took: std::time::Duration, ok: bool) {
+    metrics::histogram!(NONCE_MARKER_DURATION, "result" => result_label(ok))
+        .record(took.as_secs_f64());
+}
+
+/// Sample the async runtime's stable metrics into the `rutli_runtime_*` gauges. Reads atomics only,
+/// so it may run on a thread outside the runtime.
+pub fn refresh_runtime_gauges(runtime: &tokio::runtime::RuntimeMetrics) {
+    let workers = runtime.num_workers();
+    let busy_ms: u128 = (0..workers)
+        .map(|w| runtime.worker_total_busy_duration(w).as_millis())
+        .sum();
+    metrics::gauge!(RUNTIME_WORKERS).set(workers as f64);
+    metrics::gauge!(RUNTIME_ALIVE_TASKS).set(runtime.num_alive_tasks() as f64);
+    metrics::gauge!(RUNTIME_GLOBAL_QUEUE_DEPTH).set(runtime.global_queue_depth() as f64);
+    metrics::counter!(RUNTIME_BUSY_MILLISECONDS).absolute(busy_ms as u64);
 }
 
 /// Install the process-global Prometheus recorder and serve `/metrics` on `listen`.
@@ -519,6 +617,7 @@ fn prime() {
     metrics::gauge!(KEY_REPLICAS).set(f64::NAN);
     metrics::counter!(SIGN_ABORTS).absolute(0);
     metrics::gauge!(PENDING_SIGN_SESSIONS).set(0.0);
+    metrics::gauge!(SIGNS_IN_FLIGHT).set(0.0);
     metrics::gauge!(KEYSTORE_UNREADABLE).set(0.0);
     for direction in PEER_PIN_DIRECTIONS {
         metrics::counter!(PEER_PIN_REFUSALS, "direction" => *direction).absolute(0);
@@ -749,6 +848,48 @@ pub fn describe() {
     describe_counter!(
         SIGN_FAST_REFUSALS,
         "Sign calls refused as leader without a signature (no-quorum, overloaded)"
+    );
+    describe_histogram!(
+        SIGN_ROUND1_DURATION,
+        Unit::Seconds,
+        "Sign round 1 on this node as a member, by result"
+    );
+    describe_histogram!(
+        SIGN_ROUND2_DURATION,
+        Unit::Seconds,
+        "Sign round 2 on this node as a member, by result"
+    );
+    describe_histogram!(
+        SIGN_JOURNAL_APPEND_DURATION,
+        Unit::Seconds,
+        "Sign journal append, the wait for the key's journal lock included, by result"
+    );
+    describe_histogram!(
+        SIGN_JOURNAL_FSYNC_DURATION,
+        Unit::Seconds,
+        "The fsync of one sign journal append"
+    );
+    describe_histogram!(
+        NONCE_MARKER_DURATION,
+        Unit::Seconds,
+        "Nonce marker write (file and directory fsync), by result"
+    );
+    describe_histogram!(
+        INTENT_VERIFY_DURATION,
+        Unit::Seconds,
+        "Signing intent verification, by result"
+    );
+    describe_gauge!(SIGNS_IN_FLIGHT, "Signatures this node leads right now");
+    describe_gauge!(RUNTIME_WORKERS, "Worker threads of the async runtime");
+    describe_gauge!(RUNTIME_ALIVE_TASKS, "Tasks alive on the async runtime");
+    describe_gauge!(
+        RUNTIME_GLOBAL_QUEUE_DEPTH,
+        "Tasks waiting in the async runtime's global queue"
+    );
+    describe_counter!(
+        RUNTIME_BUSY_MILLISECONDS,
+        Unit::Milliseconds,
+        "Milliseconds the async runtime's workers spent busy, all workers together"
     );
     describe_gauge!(
         KEYSTORE_UNREADABLE,
@@ -1078,6 +1219,106 @@ mod tests {
             "fast_refusal",
             Box::new(|lit, what| assert!(FAST_REFUSAL_REASONS.contains(&lit), "{what}: {lit:?}")),
         );
+    }
+
+    /// Every histogram in [`HISTOGRAM_BUCKETS`] renders as a histogram with its own bucket edges
+    /// (strictly increasing, with a finite edge above the largest a phase should take), and has a
+    /// help text; so do the new gauges.
+    #[test]
+    fn sign_phase_metrics_render_with_buckets_and_help() {
+        let recorder = builder().expect("valid buckets").build_recorder();
+        let handle = recorder.handle();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .build()
+            .expect("a runtime");
+        metrics::with_local_recorder(&recorder, || {
+            describe();
+            prime();
+            for (name, _) in HISTOGRAM_BUCKETS {
+                if *name == SIGN_JOURNAL_FSYNC_DURATION {
+                    // Recorded without labels in production.
+                    metrics::histogram!(*name).record(0.0002);
+                } else {
+                    metrics::histogram!(*name, "result" => "ok").record(0.0002);
+                }
+            }
+            refresh_runtime_gauges(&runtime.metrics());
+        });
+        let out = handle.render();
+        let names: Vec<&str> = HISTOGRAM_BUCKETS.iter().map(|(n, _)| *n).collect();
+        for name in [
+            SIGN_ROUND1_DURATION,
+            SIGN_ROUND2_DURATION,
+            SIGN_JOURNAL_APPEND_DURATION,
+            SIGN_JOURNAL_FSYNC_DURATION,
+            NONCE_MARKER_DURATION,
+            INTENT_VERIFY_DURATION,
+        ] {
+            assert!(names.contains(&name), "{name} has no buckets");
+        }
+        for (name, buckets) in HISTOGRAM_BUCKETS {
+            assert!(buckets.windows(2).all(|w| w[0] < w[1]), "{name}");
+            assert!(buckets.iter().any(|&b| b >= 1.0), "{name}");
+            assert!(
+                out.contains(&format!("# TYPE {name} histogram")),
+                "{name}:\n{out}"
+            );
+            assert!(out.contains(&format!("# HELP {name} ")), "{name}:\n{out}");
+            for le in *buckets {
+                let line = if *name == SIGN_JOURNAL_FSYNC_DURATION {
+                    format!(r#"{name}_bucket{{le="{le}"}} "#)
+                } else {
+                    format!(r#"{name}_bucket{{result="ok",le="{le}"}} "#)
+                };
+                assert!(out.contains(&line), "missing {line:?}:\n{out}");
+            }
+        }
+        assert!(!out.contains("quantile="), "{out}");
+        for gauge in [
+            SIGNS_IN_FLIGHT,
+            RUNTIME_WORKERS,
+            RUNTIME_ALIVE_TASKS,
+            RUNTIME_GLOBAL_QUEUE_DEPTH,
+        ] {
+            assert!(out.contains(&format!("# HELP {gauge} ")), "{gauge}:\n{out}");
+            assert!(
+                out.contains(&format!("# TYPE {gauge} gauge")),
+                "{gauge}:\n{out}"
+            );
+        }
+        assert!(
+            out.contains(&format!("# HELP {RUNTIME_BUSY_MILLISECONDS} ")),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!("# TYPE {RUNTIME_BUSY_MILLISECONDS} counter")),
+            "{out}"
+        );
+        assert!(out.lines().any(|l| l == "rutli_signs_in_flight 0"), "{out}");
+        assert!(out.lines().any(|l| l == "rutli_runtime_workers 2"), "{out}");
+    }
+
+    /// `rutli_signs_in_flight` follows the signatures a node leads, from its own count.
+    #[test]
+    fn signs_in_flight_follows_the_lead_count() {
+        let recorder = builder().expect("valid buckets").build_recorder();
+        let handle = recorder.handle();
+        let load = std::sync::Arc::new(crate::liveness::SignLoad::default());
+        let gauge = |want: usize| {
+            let line = format!("{SIGNS_IN_FLIGHT} {want}");
+            let out = handle.render();
+            assert!(out.lines().any(|l| l == line), "missing {line:?}:\n{out}");
+        };
+        metrics::with_local_recorder(&recorder, || {
+            let first = load.lead();
+            let second = load.lead();
+            gauge(2);
+            drop(first);
+            gauge(1);
+            drop(second);
+            gauge(0);
+        });
     }
 
     /// `rutli_peer_call_duration_seconds` renders as a histogram with the agreed edges, its `call`

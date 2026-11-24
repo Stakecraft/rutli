@@ -565,6 +565,23 @@ spec:
           file descriptors: compare rutli_fd_limit with rutli_grpc_connections and the node''s open descriptors,
           and look for ''accepting a gRPC connection failed'' in its log. Raise the container''s nofile
           limit if rutli_fd_limit is low.'
+    - alert: RutliCosignerMemoryNearLimit
+      expr: "max by (namespace, pod) (container_memory_working_set_bytes{container=\"cosigner\"})\n  /\
+        \ on (namespace, pod)\nmax by (namespace, pod) (kube_pod_container_resource_limits{container=\"\
+        cosigner\", resource=\"memory\"})\n  > 0.8\n"
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.pod }} is above 80% of its memory limit"
+        description: 'The cosigner container of {{ $labels.namespace }}/{{ $labels.pod }} has used more
+          than 80% of its memory limit for 5 minutes (working set, which includes the memory-backed /tmp).
+          At the limit the kernel kills the process: a restart in the middle of signing. Memory grows
+          with the sign sessions in flight (about 75 KB each at peak; rutli_pending_sign_sessions) and
+          holds near its peak afterwards. Check whether a burst or a stuck peer is holding sessions open
+          (RutliPendingSessionsGrowing), then raise resources.limits.memory: the chart''s default is 1.5
+          times the highest working set the cluster suite measured, plus the /tmp size (docs/performance.md,
+          "Memory").'
     - alert: RutliGrpcConnectionsNearLimit
       expr: rutli_grpc_connections / rutli_grpc_connection_limit > 0.9
       for: 5m

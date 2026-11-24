@@ -177,10 +177,14 @@ Two deliberate absences:
   cannot confirm it from two peers answers `UNAVAILABLE` (trailer `rutli-error: hosted-unconfirmed`),
   never `NOT_FOUND`, so the driver moves on to a node that holds it. Endpoint failover stays restricted
   to a node that is down or broken (`UNAVAILABLE` / `DEADLINE_EXCEEDED`, and `INTERNAL` / `UNKNOWN`
-  for reads and decryptions), as for signing — with one exception, for EC keys only: a
-  cosigner that predates `ec-p256-ecies` cannot read-repair one, so its "not found" is not
-  authoritative and the driver asks the next cosigner (rollout order, below). Even then it never
-  falls back to the delegate.
+  for reads and decryptions), as for signing — with one exception: a cosigner's `NOT_FOUND` (or
+  `exists: false`) for a hosted key is confirmed with the other cosigners before the driver tells
+  Canton, finally, that the key does not exist. A cosigner that predates `ec-p256-ecies` cannot
+  read-repair an EC key (rollout order, below); one with a missing or unreadable replica whose view
+  of its peers is wrong can answer `NOT_FOUND` for a key of any type. The rule is the one further down in
+  this section ("I do not have it"): final once all but one cosigner said so, retryable while one that
+  may hold the key could not be reached. Even then the driver never falls back to the delegate, and
+  a rate limit (`RESOURCE_EXHAUSTED`) is never routed around.
 - **No hardcoded spec list.** The driver asks the cluster via `Capabilities` at startup, so adding a
   key type later (section 6) needs no driver release.
 
@@ -220,8 +224,9 @@ skips what it cannot parse, `KeyInfo` says `exists: false`) — the shape that e
      hosted key, an answer that says "I do not have it" (UNIMPLEMENTED or NOT_FOUND from
      `EcdhDerive`, NOT_FOUND from `PublicKey`, `exists: false` from `KeyInfo`) sends the request to
      the next cosigner, and that node is not made the preferred leader. The audit entry carries
-     `ec-failover=<from>→<to> reason=…`. RSA, AES and FROST keys keep the old rule: `NOT_FOUND` is
-     authoritative. The driver re-asks `Capabilities` after 60 s while any node was silent, so a
+     `ec-failover=<from>→<to> reason=…` for an ECIES decrypt. For an RSA or AES key, and for a
+     key whose type the driver has not seen yet, the same answer sends the request to the next
+     cosigner too, noted as `failover=<from>→<to> reason=NOT_FOUND`. The driver re-asks `Capabilities` after 60 s while any node was silent, so a
      returning old node also stops new EC keys being routed to the cluster.
    - The same goes for a cosigner that holds the key id but **wrong EC material** (a stale or
      corrupt replica): its `EcdhDerive` succeeds with a well-formed but wrong shared secret, and the
