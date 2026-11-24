@@ -158,6 +158,37 @@ jobs:
             "$(blob "$att")" >/dev/null || { echo "::error::the attestation manifest lacks an SPDX SBOM or a SLSA provenance"; exit 1; }
           echo "OK: image ${img}, attestation manifest ${att} with SBOM and provenance"
 
+      # Report only: the vulnerabilities of the image this commit builds, by severity, in the job
+      # summary (docs/image-vulnerabilities.md). trivy is the pinned build of the quality tooling,
+      # which has a Linux x86_64 binary only, so the arm64 build is not scanned.
+      - name: Scan the image (report only)
+        if: matrix.platform == 'linux/amd64'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          scripts/quality/install-tools.sh "${RUNNER_TEMP}/tools" trivy
+          # The build's OCI archive, then the layout the previous step unpacked from it; a report
+          # that cannot be made says so in the summary and does not fail the build.
+          scan() {
+            "${RUNNER_TEMP}/tools/bin/trivy" image --quiet --skip-version-check --scanners vuln \
+              --input "$1" --format json --output "${RUNNER_TEMP}/trivy.json" \
+              --cache-dir "${RUNNER_TEMP}/trivy-cache"
+          }
+          if ! scan "${RUNNER_TEMP}/image.tar" && ! scan "${RUNNER_TEMP}/oci"; then
+            echo "### Image vulnerabilities: trivy could not read the image archive (report only, see the step log)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "### Image vulnerabilities (trivy, distinct advisory ids)"
+            echo "| Severity | Found | Without a fix |"
+            echo "|---|---:|---:|"
+            for s in CRITICAL HIGH MEDIUM LOW; do
+              jq -r --arg s "$s" '[.Results[]? | .Vulnerabilities[]? | select(.Severity == $s)]
+                | group_by(.VulnerabilityID)
+                | "| \($s) | \(length) | \([.[] | select(all(.[]; (.FixedVersion // "") == ""))] | length) |"' "${RUNNER_TEMP}/trivy.json"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # The release path without a tag: the same metadata, login, build-by-digest and index steps as
   # publish-image.yml, against a registry that runs inside this job (no real registry, no secret, the
   # login uses dummy credentials). One platform: a service container cannot be shared with the arm64
