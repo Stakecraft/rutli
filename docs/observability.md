@@ -85,7 +85,7 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_sign_journal_fsync_duration_seconds` | histogram | — | The `sync_data` of one journal append alone. Buckets as the journal append |
 | `rutli_nonce_marker_duration_seconds` | histogram | `result` | One nonce marker write (create, fsync of the file and of the directory); `error` includes a session already burned. Buckets as the journal append |
 | `rutli_intent_verify_duration_seconds` | histogram | `result` | Verification of a signing intent, on the leader (`Signer.Sign`) and on each member (round 1); `error` is a refused intent. Buckets (s): 0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.1, 0.25, 1 |
-| `rutli_signs_in_flight` | gauge | — | Signatures this node leads right now (the count it reports to other leaders), raised as each starts and lowered as each ends |
+| `rutli_signs_in_flight` | gauge | — | Signatures this node leads right now, raised as each starts and lowered as each ends |
 | `rutli_runtime_workers` | gauge | — | Worker threads of the async runtime |
 | `rutli_runtime_alive_tasks` | gauge | — | Tasks alive on the async runtime |
 | `rutli_runtime_global_queue_depth` | gauge | — | Tasks waiting in the async runtime's global queue |

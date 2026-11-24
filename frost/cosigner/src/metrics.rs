@@ -262,8 +262,8 @@ pub const STORE_DURATION_BUCKETS: &[f64] = &[
 pub const INTENT_VERIFY_DURATION_BUCKETS: &[f64] = &[
     0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.1, 0.25, 1.0,
 ];
-/// Gauge: signatures this node leads right now (`crate::liveness::SignLoad::leading`), set as each
-/// starts and ends and re-read by the key-store watchdog every pass.
+/// Gauge: signatures this node leads right now (`crate::liveness::SignLoad::leading`), raised as
+/// each starts and lowered as each ends; those two are its only writers.
 pub const SIGNS_IN_FLIGHT: &str = "rutli_signs_in_flight";
 /// Gauge: worker threads of the async runtime. Sampled by the key-store watchdog thread, which keeps
 /// going when the runtime is saturated.

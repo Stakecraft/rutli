@@ -6296,7 +6296,8 @@ mod sign_policy_race_tests {
     /// One signature on in-process nodes records every sign phase it went through with
     /// `result="ok"`: each member's round 1 and round 2, its intent verification, journal append and
     /// fsync, and nonce marker. A refused round records `result="error"`, and the phases it never
-    /// reached record nothing.
+    /// reached record nothing; so does an unknown session at round 2 (a round-2 error, nothing in
+    /// append or marker).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn sign_phases_record_their_durations() {
         use crate::metrics::{
@@ -6322,7 +6323,8 @@ mod sign_policy_race_tests {
                 n.sign_round2_with(KEY, "timed", &msg, &cs, Some(digest))
                     .unwrap();
             }
-            // Refused: a forged intent at round 1, a burned session at round 2.
+            // Refused: a forged intent at round 1, an unknown session at round 2 (the first round 2
+            // removed it, so the nonce marker is never reached).
             assert!(r.nodes[0].sign_round1(KEY, "forged", &forged).is_err());
             assert!(r.nodes[0]
                 .sign_round2_with(KEY, "timed", &msg, &cs, Some(digest))
@@ -6351,6 +6353,44 @@ mod sign_policy_race_tests {
             "missing {fsyncs:?}:\n{out}"
         );
         assert_eq!(r.released(), (1, 1));
+    }
+
+    /// A session whose nonce marker is already burned fails at round 2 and the marker phase records
+    /// `result="error"` once, next to one round-2 error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_burned_nonce_marker_records_an_error_at_round_2() {
+        use crate::metrics::{builder, NONCE_MARKER_DURATION, SIGN_ROUND2_DURATION};
+        let r = rig().await;
+        let msg = rutli_frost_core::dealer::canton_test_message(b"burned marker");
+        let (ctx, digest) = r.signed_ctx(&msg, 1);
+        let recorder = builder().expect("valid buckets").build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let members = &r.nodes[..2];
+            let mut cs = BTreeMap::new();
+            for n in members {
+                cs.insert(n.identifier, n.sign_round1(KEY, "burned", &ctx).unwrap());
+            }
+            // The marker is burned behind the node's back, between the rounds.
+            NonceStore::open(r.nodes[0].keystore.nonce_dir(KEY))
+                .unwrap()
+                .consume("burned")
+                .unwrap();
+            assert!(r.nodes[0]
+                .sign_round2_with(KEY, "burned", &msg, &cs, Some(digest))
+                .is_err());
+        });
+        let out = handle.render();
+        let count = |name: &str, result: &str| -> u64 {
+            let prefix = format!(r#"{name}_count{{result="{result}"}} "#);
+            out.lines()
+                .find_map(|l| l.strip_prefix(&prefix))
+                .map_or(0, |v| v.parse().unwrap())
+        };
+        assert_eq!(count(NONCE_MARKER_DURATION, "error"), 1, "{out}");
+        assert_eq!(count(NONCE_MARKER_DURATION, "ok"), 0, "{out}");
+        assert_eq!(count(SIGN_ROUND2_DURATION, "error"), 1, "{out}");
+        assert_eq!(count(SIGN_ROUND2_DURATION, "ok"), 0, "{out}");
     }
 }
 

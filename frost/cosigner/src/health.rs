@@ -477,9 +477,9 @@ pub async fn probe(health: &Arc<KeystoreHealth>) -> std::result::Result<(), Stri
 /// node with a stalled volume turn work away, so it must keep moving when that stall has wedged the
 /// async runtime. Each tick waits for its own probe long enough to publish "unresponsive" itself.
 ///
-/// Each tick first samples the load gauges ([`sample_load_gauges`]): the signatures this node leads
-/// and, when started from inside the async runtime, that runtime's own metrics. From this thread
-/// they stay current while the runtime is saturated, which is when they are read.
+/// Each tick first samples the load gauges ([`sample_load_gauges`]): when started from inside the
+/// async runtime, that runtime's own metrics. From this thread they stay current while the runtime
+/// is saturated, which is when they are read. (`rutli_signs_in_flight` is not sampled here.)
 ///
 /// The `rutli_runtime_*` gauges are sampled only if this is called from inside the Tokio runtime
 /// (it captures that handle's metrics at spawn); called from anywhere else, they are absent.

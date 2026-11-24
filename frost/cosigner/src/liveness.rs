@@ -194,11 +194,13 @@ impl SignLoad {
     /// concurrent updates cannot publish a stale value.
     pub fn lead(self: &Arc<Self>) -> LeadGuard {
         let count = self.leading.fetch_add(1, Ordering::AcqRel) + 1;
-        metrics::gauge!(crate::metrics::SIGNS_IN_FLIGHT).increment(1.0);
-        LeadGuard {
+        // The guard exists before the gauge is touched, so a panic there still releases the count.
+        let guard = LeadGuard {
             load: self.clone(),
             count,
-        }
+        };
+        metrics::gauge!(crate::metrics::SIGNS_IN_FLIGHT).increment(1.0);
+        guard
     }
 
     /// Signatures led here right now.
