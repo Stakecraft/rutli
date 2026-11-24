@@ -241,12 +241,13 @@ class FrostStaleVsUnreachableSpec extends AnyWordSpec with Matchers {
           result.isSuccess shouldBe true
         case OwnAnswerFinal =>
           call.isOwnFinal(thrown) shouldBe true
-          // Final for Canton: not one of the statuses the driver reports as retryable.
+          // The roster's verdict is the cosigners' own answer. For Canton that is final, except
+          // ABORTED, the cosigners' "not now", which the driver reports as retryable whoever said it.
           val retried = thrown match {
-            case e: StatusRuntimeException => RutliDriver.transient(e.getStatus)
+            case e: StatusRuntimeException => RutliDriver.transient(e)
             case _                         => false
           }
-          retried shouldBe false
+          retried shouldBe hasStatus(thrown, Status.Code.ABORTED)
           notes.render should not include "unconfirmed="
           everyCosignerAskedOnce()
         case Retryable =>

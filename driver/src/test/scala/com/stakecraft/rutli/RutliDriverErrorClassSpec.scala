@@ -6,7 +6,7 @@ package com.stakecraft.rutli
 import com.digitalasset.canton.crypto.kms.driver.api.v1._
 import com.stakecraft.rutli.audit.AuditSink
 import com.stakecraft.rutli.backend.KmsBackend
-import io.grpc.Status
+import io.grpc.{Metadata, Status}
 import io.opentelemetry.context.Context
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
@@ -18,8 +18,9 @@ import scala.concurrent.{Await, ExecutionContext, Future}
 
 /** The error class Canton sees. Canton retries a retryable KMS error without limit and never
   * retries a final one, so the driver's mapping at the SPI boundary decides between an outage that
-  * heals by itself and one that does not: only a cosigner or the network being down, or a deadline,
-  * is retryable; everything a node decided, and every failure the driver cannot name, is final.
+  * heals by itself and one that does not: a cosigner or the network being down, a deadline, and the
+  * cosigners' "not now" (ABORTED) are retryable; everything else a node decided, and every failure
+  * the driver cannot name, is final.
   */
 class RutliDriverErrorClassSpec extends AnyWordSpec with Matchers {
 
@@ -78,14 +79,59 @@ class RutliDriverErrorClassSpec extends AnyWordSpec with Matchers {
 
   "RutliDriver" should {
 
-    "report only UNAVAILABLE and DEADLINE_EXCEEDED from the cluster as retryable, every other status as final" in {
-      val retryable = Set(Status.Code.UNAVAILABLE, Status.Code.DEADLINE_EXCEEDED)
+    "report UNAVAILABLE, DEADLINE_EXCEEDED and ABORTED from the cluster as retryable, every other status as final" in {
+      val retryable = Set(Status.Code.UNAVAILABLE, Status.Code.DEADLINE_EXCEEDED, Status.Code.ABORTED)
       for (code <- Status.Code.values().toSeq if code != Status.Code.OK) withClue(s"$code: ") {
         val status = Status.fromCode(code).withDescription("from a cosigner")
         val ex = atCanton(() => Future.failed(status.asRuntimeException()))
         ex.retryable shouldBe retryable(code)
         ex.getCause shouldBe a[io.grpc.StatusRuntimeException]
       }
+    }
+
+    "report the cosigners' \"not now\" as retryable: a ceremony holding the key, a session that is gone" in {
+      // The ceremony messages are the cosigner's own (frost/cosigner/src/error.rs).
+      val notNow = Seq(
+        "a dkg ceremony (id dkg-0123456789abcdef0123456789abcdef) is already in progress for key frost-ns",
+        "a refresh ceremony (id refresh-0123456789abcdef0123456789abcdef) is already in progress for key frost-ns",
+        "unknown session: sign-1",
+        "ceremony dkg-01 for key frost-ns was superseded by a newer ceremony — refusing to persist",
+      )
+      for (message <- notNow) withClue(s"$message: ") {
+        atCanton(() => Future.failed(Status.ABORTED.withDescription(message).asRuntimeException())).retryable shouldBe true
+      }
+    }
+
+    "report ABORTED for conflicting hosted-key material as final, by the cosigner's reason trailer" in {
+      def aborted(reason: Option[String]): KmsDriverException = {
+        val trailers = new Metadata
+        reason.foreach(r => trailers.put(Metadata.Key.of("rutli-error", Metadata.ASCII_STRING_MARSHALLER), r))
+        atCanton(() => Future.failed(Status.ABORTED.withDescription("hosted key rutli-enc-1").asRuntimeException(trailers)))
+      }
+      aborted(Some("hosted-conflict")).retryable shouldBe false
+      // Any other reason, or none, is the plain "try again".
+      aborted(Some("sessions-full")).retryable shouldBe true
+      aborted(None).retryable shouldBe true
+    }
+
+    "report a member's \"ceremony already in progress\" as retryable when a leader passes it on as INTERNAL" in {
+      // What a client gets when the contention is detected on a member and the leader loses the
+      // member's code: INTERNAL with the member's status rendered into the message.
+      val wrapped = "rpc status: status: Aborted, message: \"a dkg ceremony (id dkg-0123456789abcdef0123456789abcdef) " +
+        "is already in progress for key frost-ns\""
+      atCanton(() => Future.failed(Status.INTERNAL.withDescription(wrapped).asRuntimeException())).retryable shouldBe true
+
+      // Nothing wider: any other INTERNAL is a node's failure, also one that only mentions progress.
+      for (
+        other <- Seq(
+          "io: Permission denied (os error 13)",
+          "dkg part 2 failed: a share is already in progress of being written",
+          "rpc status: status: Aborted, message: \"unknown session: sign-1\"",
+        )
+      ) withClue(s"$other: ") {
+        atCanton(() => Future.failed(Status.INTERNAL.withDescription(other).asRuntimeException())).retryable shouldBe false
+      }
+      atCanton(() => Future.failed(Status.INTERNAL.asRuntimeException())).retryable shouldBe false
     }
 
     "pass the backend's own verdict through unchanged, retryable or final" in {

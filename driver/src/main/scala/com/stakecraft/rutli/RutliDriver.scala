@@ -156,8 +156,10 @@ final class RutliDriver(
        catch { case NonFatal(e) => Future.failed(e) }).recoverWith {
         case e: KmsDriverException => Future.failed(e)
         // The cluster could not be reached in time (every cosigner tried was down, or the call's
-        // budget ran out): transient, so Canton retries the call (Kms.withRetries, with backoff).
-        case e: io.grpc.StatusRuntimeException if RutliDriver.transient(e.getStatus) =>
+        // budget ran out), or it answered that it cannot serve the call at this moment (a ceremony
+        // holds the key, the session is gone): transient, so Canton retries the call
+        // (Kms.withRetries, with backoff).
+        case e: io.grpc.StatusRuntimeException if RutliDriver.transient(e) =>
           Future.failed(KmsDriverException(e, retryable = true))
         case NonFatal(e) => Future.failed(KmsDriverException(e, retryable = false))
       }
@@ -208,16 +210,46 @@ final class RutliDriver(
 object RutliDriver {
 
   /** gRPC statuses that reach Canton as RETRYABLE. Canton retries a retryable KMS error forever
-    * (`Kms.withRetries`, `KmsConfig.retries.failures`: backoff to 10 s, no limit), so only a
-    * condition that clears by itself belongs here: a cosigner or the network down, a deadline.
-    * Everything a node decided — a policy refusal (PERMISSION_DENIED, RESOURCE_EXHAUSTED), a bad
-    * request, an unknown key, a failed precondition, an internal error — stays non-retryable, as
-    * do the driver's own verdicts (a bad signature, a pin mismatch, cosigners disagreeing), which
-    * the backend raises as non-retryable [[KmsDriverException]]s. */
-  def transient(status: io.grpc.Status): Boolean = status.getCode match {
-    case io.grpc.Status.Code.UNAVAILABLE | io.grpc.Status.Code.DEADLINE_EXCEEDED => true
-    case _                                                                       => false
-  }
+    * (`Kms.withRetries`, `KmsConfig.retries.failures`: backoff to 10 s, no limit) and never retries
+    * a final one, so only a condition that clears by itself belongs here:
+    *   - UNAVAILABLE and DEADLINE_EXCEEDED: a cosigner or the network down, a deadline;
+    *   - ABORTED: the cosigners' "not now, try again" — a ceremony holds the key
+    *     (`CeremonyInProgress`: another DKG or a refresh; it ends or its guard expires), the session
+    *     is gone (`UnknownSession`: a new call opens a new one), this ceremony lost to a newer one
+    *     (`CeremonySuperseded`: the retry finds the key the other one made, and the backend decides
+    *     whether it is this driver's). Not when its `rutli-error` trailer says `hosted-conflict`:
+    *     cosigners hold different material under one hosted key id, which no retry resolves;
+    *   - INTERNAL that carries a member's "ceremony … is already in progress": the same condition,
+    *     detected on a member and passed on by a leader that loses the member's code (a leader
+    *     that keeps the code answers ABORTED). Matched by the cosigner's message for it, nothing
+    *     wider: any other INTERNAL is a node's failure and stays final.
+    * Everything else a node decided — a policy refusal (PERMISSION_DENIED, RESOURCE_EXHAUSTED), a
+    * bad request, an unknown key, a failed precondition, any other internal error — stays
+    * non-retryable, as do the driver's own verdicts (a bad signature, a pin mismatch, cosigners
+    * disagreeing), which the backend raises as non-retryable [[KmsDriverException]]s. */
+  def transient(e: io.grpc.StatusRuntimeException): Boolean = transient(e.getStatus, Option(e.getTrailers))
+
+  /** [[transient]] for a status without trailers (an ABORTED is then taken as "try again"). */
+  def transient(status: io.grpc.Status): Boolean = transient(status, None)
+
+  private def transient(status: io.grpc.Status, trailers: Option[io.grpc.Metadata]): Boolean =
+    status.getCode match {
+      case io.grpc.Status.Code.UNAVAILABLE | io.grpc.Status.Code.DEADLINE_EXCEEDED => true
+      case io.grpc.Status.Code.ABORTED =>
+        !trailers.flatMap(t => Option(t.get(ErrorTrailer))).contains(HostedConflict)
+      case io.grpc.Status.Code.INTERNAL =>
+        Option(status.getDescription).exists(d => CeremonyInProgress.findFirstIn(d).isDefined)
+      case _ => false
+    }
+
+  /** The trailer in which a cosigner names the reason of a refusal (`error.rs`, `ERROR_TRAILER`),
+    * and its value for conflicting hosted-key material. */
+  private val ErrorTrailer: io.grpc.Metadata.Key[String] =
+    io.grpc.Metadata.Key.of("rutli-error", io.grpc.Metadata.ASCII_STRING_MARSHALLER)
+  private val HostedConflict = "hosted-conflict"
+
+  /** The cosigner's `CeremonyInProgress` message (`error.rs`), wherever it sits in a description. */
+  private val CeremonyInProgress = """ceremony \(id [^)]*\) is already in progress""".r
 
   /** Lower-case hex SHA-256 of `data` — the `msg=` field of a sign's audit entry. */
   def sha256Hex(data: Array[Byte]): String =
