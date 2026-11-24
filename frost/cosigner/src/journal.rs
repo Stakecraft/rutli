@@ -1284,6 +1284,9 @@ mod tests {
         assert_eq!(k.charges.len(), 2, "only entries 4 and 5 are in the window");
         assert_eq!(k.charges[0].0, T - hour);
         assert_eq!(k.charges[1].0, T - 10 * min);
+        // Each of them is one share of its own charge; the entries outside the window left none.
+        assert_eq!(k.shares.len(), 2);
+        assert!(k.shares.values().all(|n| *n == 1), "{:?}", k.shares);
     }
 
     #[test]
@@ -1452,10 +1455,12 @@ mod tests {
         // Write and search, but not read: the parent can be written into but not opened to sync.
         let _restore = RestoreMode(root.clone());
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).unwrap();
-        let denied = std::fs::File::open(&root)
-            .err()
-            .is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied);
-        if !denied {
+        let enforced = match std::fs::File::open(&root) {
+            Ok(_) => false,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => true,
+            Err(e) => panic!("unexpected error opening the parent: {e}"),
+        };
+        if !enforced {
             // Running as root (or with CAP_DAC_OVERRIDE) the mode is ignored and this test would
             // prove nothing. Locally that is a skip; in CI it must be loud, so that a job that
             // starts running as root cannot silently drop the coverage.
