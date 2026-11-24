@@ -78,7 +78,9 @@ pub fn raise_nofile() -> Option<FdLimit> {
     };
     // macOS refuses a soft limit above its per-process maximum (OPEN_MAX, 10240) even when the
     // hard limit is higher; fall back to that before giving up.
-    let soft = [target, 10_240]
+    /// The per-process maximum macOS accepts for the soft limit (`OPEN_MAX`).
+    const MACOS_OPEN_MAX: u64 = 10_240;
+    let soft = [target, MACOS_OPEN_MAX]
         .into_iter()
         .filter(|&s| s > soft_before && s <= target)
         .find(|&s| set(s))

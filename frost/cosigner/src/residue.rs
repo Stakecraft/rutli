@@ -56,6 +56,25 @@ const MAX_TAR_META: u64 = 64 << 10;
 /// Most directory entries walked in one scan, and the deepest directory.
 const MAX_WALK_ENTRIES: usize = 1_000_000;
 const MAX_DEPTH: usize = 32;
+/// Size of a tar block: a header is one block and entry data is padded to whole blocks.
+const TAR_BLOCK_BYTES: usize = 512;
+/// [`TAR_BLOCK_BYTES`] as a file offset or length.
+const TAR_BLOCK_BYTES_U64: u64 = TAR_BLOCK_BYTES as u64;
+/// High bit of the first byte of a tar numeric field: the value is base-256, not octal text.
+const TAR_BASE256_FLAG: u8 = 0x80;
+/// The value bits of the first byte of a base-256 tar numeric field.
+const TAR_BASE256_FIRST_BYTE_MASK: u8 = 0x7f;
+/// Radix of a base-256 tar numeric field.
+const TAR_BASE256_RADIX: u64 = 256;
+/// Radix of the text form of a tar numeric field.
+const TAR_OCTAL_RADIX: u32 = 8;
+/// Offset in a tar header where the checksum field starts.
+const TAR_CHECKSUM_FIELD_START: usize = 148;
+/// Offset in a tar header just past the checksum field.
+const TAR_CHECKSUM_FIELD_END: usize = 156;
+/// The value each byte of the checksum field counts as when the header checksum is computed
+/// (an ASCII space).
+const TAR_CHECKSUM_FIELD_FILL: u64 = 32;
 
 /// `keys/.proven/`: public markers that an epoch was proven against the cluster (key, epoch, group
 /// key, digests). Not key material.
@@ -1123,7 +1142,7 @@ enum TarItem {
 
 /// Whether an open file starts like a tar (ustar or GNU magic at offset 257).
 fn tar_magic(f: &mut std::fs::File) -> std::result::Result<bool, String> {
-    let mut hdr = [0u8; 512];
+    let mut hdr = [0u8; TAR_BLOCK_BYTES];
     let mut got = 0;
     while let Some(rest) = hdr.get_mut(got..).filter(|r| !r.is_empty()) {
         match f.read(rest) {
@@ -1132,16 +1151,22 @@ fn tar_magic(f: &mut std::fs::File) -> std::result::Result<bool, String> {
             Err(e) => return Err(e.to_string()),
         }
     }
-    Ok(got == 512 && &hdr[257..262] == b"ustar")
+    Ok(got == TAR_BLOCK_BYTES && &hdr[257..262] == b"ustar")
 }
 
 /// A tar numeric field: octal text, or base-256 when the high bit of the first byte is set.
 fn tar_num(field: &[u8]) -> Option<u64> {
-    if field.first().is_some_and(|b| b & 0x80 != 0) {
+    if field.first().is_some_and(|b| b & TAR_BASE256_FLAG != 0) {
         let mut v: u64 = 0;
         for (i, b) in field.iter().enumerate() {
-            let b = if i == 0 { b & 0x7f } else { *b };
-            v = v.checked_mul(256)?.checked_add(u64::from(b))?;
+            let b = if i == 0 {
+                b & TAR_BASE256_FIRST_BYTE_MASK
+            } else {
+                *b
+            };
+            v = v
+                .checked_mul(TAR_BASE256_RADIX)?
+                .checked_add(u64::from(b))?;
         }
         return Some(v);
     }
@@ -1151,7 +1176,7 @@ fn tar_num(field: &[u8]) -> Option<u64> {
     if s.is_empty() {
         return Some(0);
     }
-    u64::from_str_radix(s, 8).ok()
+    u64::from_str_radix(s, TAR_OCTAL_RADIX).ok()
 }
 
 fn cstr(field: &[u8]) -> String {
@@ -1190,10 +1215,10 @@ fn read_tar(
     let mut entries = 0usize;
     let corrupt = |at: u64, what: &str| format!("not a readable tar at offset {at}: {what}");
     loop {
-        if pos + 512 > len {
+        if pos + TAR_BLOCK_BYTES_U64 > len {
             return Err(corrupt(pos, "truncated (no end-of-archive marker)"));
         }
-        let mut hdr = [0u8; 512];
+        let mut hdr = [0u8; TAR_BLOCK_BYTES];
         f.seek(SeekFrom::Start(pos)).map_err(io)?;
         f.read_exact(&mut hdr).map_err(io)?;
         if hdr.iter().all(|b| *b == 0) {
@@ -1211,8 +1236,8 @@ fn read_tar(
             .iter()
             .enumerate()
             .map(|(i, b)| {
-                if (148..156).contains(&i) {
-                    32
+                if (TAR_CHECKSUM_FIELD_START..TAR_CHECKSUM_FIELD_END).contains(&i) {
+                    TAR_CHECKSUM_FIELD_FILL
                 } else {
                     u64::from(*b)
                 }
@@ -1222,10 +1247,10 @@ fn read_tar(
             return Err(corrupt(pos, "header checksum mismatch"));
         }
         let size = tar_num(&hdr[124..136]).ok_or_else(|| corrupt(pos, "bad size field"))?;
-        let data_at = pos + 512;
+        let data_at = pos + TAR_BLOCK_BYTES_U64;
         let padded = size
-            .checked_add(511)
-            .map(|s| s / 512 * 512)
+            .checked_add(TAR_BLOCK_BYTES_U64 - 1)
+            .map(|s| s / TAR_BLOCK_BYTES_U64 * TAR_BLOCK_BYTES_U64)
             .ok_or_else(|| corrupt(pos, "size overflow"))?;
         if data_at.checked_add(padded).is_none_or(|end| end > len) {
             return Err(corrupt(pos, "entry runs past the end of the file"));

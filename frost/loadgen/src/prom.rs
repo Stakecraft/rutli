@@ -14,6 +14,19 @@ use std::time::Duration;
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+/// The median, as a quantile.
+const QUANTILE_P50: f64 = 0.50;
+/// The 95th percentile, as a quantile.
+const QUANTILE_P95: f64 = 0.95;
+/// The 99th percentile, as a quantile.
+const QUANTILE_P99: f64 = 0.99;
+/// How many times shorter than its deadline a call is expected to finish (the "3x margin", #249).
+const DEADLINE_MARGIN_FACTOR: f64 = 3.0;
+/// The scale that rounds a value in milliseconds to three decimals.
+const MS_ROUNDING_SCALE: f64 = 1000.0;
+/// The scale that rounds a share of calls to six decimals.
+const SHARE_ROUNDING_SCALE: f64 = 1e6;
+
 /// The histogram whose percentiles a run reports.
 pub const SIGN_DURATION: &str = "rutli_sign_duration_seconds";
 /// Per-call durations at the calling leader, by `call` (the peer-liveness deadlines, #249).
@@ -338,9 +351,9 @@ impl Histograms {
         Some(HistogramReport {
             count: self.sign_count,
             mean_ms: round3(self.sign_sum / self.sign_count * MS_PER_SEC),
-            p50_ms: q(0.50),
-            p95_ms: q(0.95),
-            p99_ms: q(0.99),
+            p50_ms: q(QUANTILE_P50),
+            p95_ms: q(QUANTILE_P95),
+            p99_ms: q(QUANTILE_P99),
         })
     }
 
@@ -385,23 +398,26 @@ fn peer_call_report(call: &str, buckets: &BTreeMap<String, f64>) -> Option<PeerC
     let within_third = deadline.and_then(|d| {
         cumulative
             .iter()
-            .find(|(bound, _)| (bound - d / 3.0).abs() < THIRD_EDGE_TOLERANCE_SECS)
+            .find(|(bound, _)| {
+                (bound - d / DEADLINE_MARGIN_FACTOR).abs() < THIRD_EDGE_TOLERANCE_SECS
+            })
             .map(|&(_, n)| n / total)
     });
     let q = |q: f64| round3(quantile(q, &cumulative) * MS_PER_SEC);
     Some(PeerCallReport {
         count: total,
-        p50_ms: q(0.50),
-        p99_ms: q(0.99),
+        p50_ms: q(QUANTILE_P50),
+        p99_ms: q(QUANTILE_P99),
         p999_ms: q(MARGIN_SHARE),
         deadline_ms: deadline.map(|d| round3(d * MS_PER_SEC)),
-        within_third: within_third.map(|w| (w * 1e6).round() / 1e6),
+        within_third: within_third
+            .map(|w| (w * SHARE_ROUNDING_SCALE).round() / SHARE_ROUNDING_SCALE),
         margin_3x: within_third.map(|w| w >= MARGIN_SHARE),
     })
 }
 
 fn round3(v: f64) -> f64 {
-    (v * 1000.0).round() / 1000.0
+    (v * MS_ROUNDING_SCALE).round() / MS_ROUNDING_SCALE
 }
 
 /// `histogram_quantile(q, …)` over cumulative buckets sorted by upper bound: linear interpolation
