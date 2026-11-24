@@ -499,10 +499,10 @@ pub fn spawn_monitor(node: Arc<Node>, interval: Duration) -> std::thread::JoinHa
         .expect("spawn the key-store watchdog thread")
 }
 
-/// `rutli_signs_in_flight` from the node's own count, and the `rutli_runtime_*` gauges from
-/// `runtime` (none outside a runtime).
-pub fn sample_load_gauges(node: &Node, runtime: Option<&tokio::runtime::RuntimeMetrics>) {
-    metrics::gauge!(crate::metrics::SIGNS_IN_FLIGHT).set(node.sign_load().leading() as f64);
+/// The `rutli_runtime_*` gauges from `runtime` (none outside a runtime). `rutli_signs_in_flight`
+/// is not set here: it has one writer, the increments and decrements of [`crate::liveness::SignLoad`],
+/// so an absolute write from this thread cannot race them.
+pub fn sample_load_gauges(_node: &Node, runtime: Option<&tokio::runtime::RuntimeMetrics>) {
     if let Some(runtime) = runtime {
         crate::metrics::refresh_runtime_gauges(runtime);
     }
