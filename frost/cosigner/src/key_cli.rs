@@ -17,6 +17,9 @@ use rutli_canton_key::{KeySpec, PublicKey};
 
 use crate::{DaemonError, Result};
 
+/// Length in bytes of a raw Ed25519 public key.
+const ED25519_KEY_BYTES: usize = 32;
+
 /// Which kind of cluster key an id names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyKind {
@@ -107,7 +110,7 @@ pub fn parse_public_input(input: &[u8]) -> Result<PublicInput> {
         }
         if !text.is_empty() && text.bytes().all(|b| b.is_ascii_hexdigit()) {
             let bytes = hex::decode(text).map_err(|e| refuse(format!("hex: {e}")))?;
-            let (der, format) = match <[u8; 32]>::try_from(bytes.as_slice()) {
+            let (der, format) = match <[u8; ED25519_KEY_BYTES]>::try_from(bytes.as_slice()) {
                 Ok(raw) => (
                     [ED25519_SPKI_HEAD.as_slice(), &raw].concat(),
                     "raw Ed25519 public key (hex)",

@@ -33,6 +33,9 @@
 
 use crate::ceremony_record::{CeremonyRecord, RecordState};
 
+/// Milliseconds in a second.
+const MILLIS_PER_SECOND: u64 = 1000;
+
 /// A refresh of a key this node took part in that counts against the interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CountedRefresh {
@@ -135,7 +138,7 @@ pub fn verdict(
     }
     let next_ms = last
         .at_ms
-        .saturating_add(interval_secs.saturating_mul(1000));
+        .saturating_add(interval_secs.saturating_mul(MILLIS_PER_SECOND));
     if now_ms >= next_ms {
         return Verdict::Allowed;
     }
