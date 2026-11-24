@@ -207,7 +207,7 @@ waits for:
 | Call | Deadline |
 |---|---|
 | Sign round 1 | 2 s (configurable: `peer_deadlines.sign_round1_ms`, 500 to 5000 ms) |
-| Sign round 2 | 5 s (configurable: `peer_deadlines.sign_round2_ms`, 1000 to 12000 ms) |
+| Sign round 2 | 5 s (configurable: `peer_deadlines.sign_round2_ms`, 1000 to 9000 ms, under the 10 s per-call backstop) |
 | Sign abort | 1 s |
 | `NodeInfo`, `KeyEpoch`, `CeremonyStatus` | 3 s |
 | Liveness probe (`NodeInfo`) | 2 s |
@@ -220,7 +220,7 @@ every node, after every node runs a release that knows the section; round 1 plus
 under the 20 s sign budget. The abort and control deadlines stay constants.
 
 When the Sign call carries a deadline (the driver's 5 s attempt does), the rounds fit inside it:
-round 1 gets min(2 s, time left − 1 s), round 2 min(5 s, time left − 1 s), and no new subset
+round 1 gets min(its deadline, time left − 1 s), round 2 likewise (2 s and 5 s unless configured), and no new subset
 starts with less than 1 s left (the last attempt keeps no reserve). A deadline under 1 s is refused
 at once with `DEADLINE_EXCEEDED`, before any round. Without one, a signature has 20 s. The client's
 deadline only ever shortens the leader's work. A member that misses its deadline is excluded from

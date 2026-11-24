@@ -68,8 +68,7 @@ live config. It works under any `profile`.
 The intent rows are not listed separately for a node without TLS: the `tls` row covers them.
 
 `peer_deadlines.sign_round1_ms` (default 2000) and `peer_deadlines.sign_round2_ms` (default 5000) are not
-checked by the profile: any value within the bounds (500 to 5000 and 1000 to 12000 ms, the two under the
-20 s sign budget together) is accepted under `production`, and the defaults are recommended. Raise them only
+checked by the profile: any value within the bounds (500 to 5000 and 1000 to 9000 ms) is accepted under `production`, and the defaults are recommended. Raise them only
 when the peer-call latency histogram shows less than a 3x margin
 ([architecture.md](architecture.md), "Peer liveness").
 

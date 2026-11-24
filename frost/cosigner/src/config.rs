@@ -119,7 +119,9 @@ pub const SIGN_ROUND1_MS_MAX: u64 = 5000;
 /// Lowest `peer_deadlines.sign_round2_ms`.
 pub const SIGN_ROUND2_MS_MIN: u64 = 1000;
 /// Highest `peer_deadlines.sign_round2_ms`.
-pub const SIGN_ROUND2_MS_MAX: u64 = 12000;
+/// Below the 10 s per-call backstop of a peer connection (`peer::PEER_RPC_TIMEOUT`), so the round
+/// deadline, not the backstop, is what ends a slow round 2.
+pub const SIGN_ROUND2_MS_MAX: u64 = 9000;
 
 /// `peer_deadlines`: the two sign-round deadlines that are configuration rather than constants
 /// (docs/architecture.md, "Peer liveness"). The abort and control deadlines stay constants.
@@ -133,7 +135,8 @@ pub struct PeerDeadlinesConfig {
     /// client's remaining deadline minus 1 s). Default 2000; 500 to 5000.
     pub sign_round1_ms: Option<u64>,
     /// What the leader waits for a member's sign round 2, in milliseconds (also capped by the
-    /// client's remaining deadline minus 1 s). Default 5000; 1000 to 12000. Round 1 plus round 2
+    /// client's remaining deadline minus 1 s). Default 5000; 1000 to 9000 (under the 10 s per-call
+    /// backstop). Round 1 plus round 2
     /// must stay under the 20 s sign budget.
     pub sign_round2_ms: Option<u64>,
 }
@@ -2341,6 +2344,11 @@ mod strict_parse_tests {
                 "write_qourum",
             ),
             (
+                "deadlines.json",
+                r#","peer_deadlines":{"sign_round3_ms":1}"#,
+                "sign_round3_ms",
+            ),
+            (
                 "seal.json",
                 r#","share_seal":{"secret_env":"S","secret":"x"}"#,
                 "secret",
@@ -2696,7 +2704,7 @@ mod strict_parse_tests {
         let cfg = deadlines(Some(500), None);
         cfg.validate().unwrap();
         assert_eq!(cfg.liveness().round2, std::time::Duration::from_secs(5));
-        deadlines(Some(5000), Some(12000)).validate().unwrap();
+        deadlines(Some(5000), Some(9000)).validate().unwrap();
         deadlines(None, Some(1000)).validate().unwrap();
     }
 
@@ -2719,13 +2727,13 @@ mod strict_parse_tests {
     #[test]
     fn peer_deadlines_summing_to_the_sign_budget_are_rejected() {
         let budget = crate::orchestrator::SIGN_BUDGET.as_millis() as u64;
-        assert!(check_round_sum(8000, 12000, budget).is_err());
+        assert!(check_round_sum(12000, 9000, budget).is_err());
         assert!(check_round_sum(5000, 15001, budget).is_err());
-        let err = check_round_sum(8000, 12000, budget)
+        let err = check_round_sum(12000, 9000, budget)
             .unwrap_err()
             .to_string();
         assert!(err.contains("peer_deadlines.sign_round1_ms"), "{err}");
-        check_round_sum(5000, 12000, budget).unwrap();
+        check_round_sum(5000, 9000, budget).unwrap();
         // The extremes the bounds allow are under the budget.
         deadlines(Some(SIGN_ROUND1_MS_MAX), Some(SIGN_ROUND2_MS_MAX))
             .validate()

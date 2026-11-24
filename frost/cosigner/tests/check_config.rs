@@ -112,7 +112,7 @@ fn check_config_rejects_peer_deadlines_outside_their_bounds() {
     let tmp = tempfile::tempdir().unwrap();
 
     let mut ok = enforced();
-    ok["peer_deadlines"] = serde_json::json!({"sign_round1_ms": 5000, "sign_round2_ms": 12000});
+    ok["peer_deadlines"] = serde_json::json!({"sign_round1_ms": 5000, "sign_round2_ms": 9000});
     let (code, out) = run(tmp.path(), &ok, &["check-config"]);
     assert_eq!(code, 0, "{out}");
 
