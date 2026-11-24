@@ -56,6 +56,8 @@ import contextlib
 import json
 import math
 import os
+import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -280,13 +282,14 @@ class Suite(base.Runner):
         image = a.dealer_image or self.cluster.kubectl(
             "get", "pod", "rutli-perf-loadgen", "-o", "jsonpath={.spec.containers[0].image}").stdout.strip()
         prefix = f"perf-mig{int(time.time())}-"
+        dealer = f"rutli-perf-dealer-{secrets.token_hex(4)}"  # this run's own: never another run's
         result_path = os.path.join(a.work, f"migration-{prefix.rstrip('-')}.json")
         stage = {}
 
         def body():
             env = dict(os.environ, E2E_ENV="k8s", E2E_STAGES="ceremony", E2E_PREFIX=prefix,
                        RUTLI_NAMESPACE=self.cluster.ns, E2E_CERTS=os.path.join(a.work, "certs"),
-                       E2E_DEALER_IMAGE=image, E2E_RESULT=result_path)
+                       E2E_DEALER_IMAGE=image, E2E_DEALER_POD=dealer, E2E_RESULT=result_path)
             # Set either way: an inherited E2E_ALLOW_UNISOLATED_DEALER must not decide it.
             env["E2E_ALLOW_UNISOLATED_DEALER"] = "1" if a.allow_unisolated_dealer else "0"
             started = time.time()
@@ -317,11 +320,11 @@ class Suite(base.Runner):
                 # Whatever happened to the script (a timeout kills it before its own cleanup), the
                 # dealer pod and what its memory holds go now, not at its 30-minute deadline.
                 try:
-                    self.cluster.kubectl("delete", "pod", "rutli-perf-dealer", "--wait=true", "--timeout=120s",
+                    self.cluster.kubectl("delete", "pod", dealer, "--wait=true", "--timeout=120s",
                                          "--ignore-not-found", timeout=180, check=False)
                     # Its deny-all NetworkPolicy goes only once the API confirms the pod is gone (an
                     # error of `get` keeps the policy).
-                    left = self.cluster.kubectl("get", "pod", "rutli-perf-dealer", "--ignore-not-found", "-o",
+                    left = self.cluster.kubectl("get", "pod", dealer, "--ignore-not-found", "-o",
                                                 "name", timeout=60, check=False)
                     gone = left.returncode == 0 and not left.stdout.strip()
                 except subprocess.TimeoutExpired:
@@ -330,7 +333,7 @@ class Suite(base.Runner):
                 if gone:
                     # A hung API here must not hide the ceremony's result: the policy then stays.
                     with contextlib.suppress(subprocess.TimeoutExpired):
-                        deleted = self.cluster.kubectl("delete", "networkpolicy", "rutli-perf-dealer",
+                        deleted = self.cluster.kubectl("delete", "networkpolicy", dealer,
                                                        "--ignore-not-found", timeout=60, check=False).returncode == 0
                     if not deleted:
                         log("  WARNING: the dealer's NetworkPolicy could not be deleted. Delete it by hand.")
@@ -342,7 +345,7 @@ class Suite(base.Runner):
                 if line.startswith("==> "):
                     log(f"  {line[4:]}")
             if out.returncode != 0:
-                tail = (out.stderr.strip() or out.stdout.strip())[-1500:]
+                tail = redact((out.stderr.strip() or out.stdout.strip())[-1500:])
                 return [{"failed": f"the split ceremony on the cluster failed (exit {out.returncode}): {tail}"}]
             with open(result_path) as f:
                 stage.update(json.load(f))
@@ -1150,7 +1153,21 @@ class Diagnosis:
         return out
 
 
+def redact(text):
+    """Text on its way into cluster.json and the log: long hex or base64 runs (key bytes, shares,
+    sealed secrets) masked, should a failing ceremony ever print them."""
+    text = re.sub(r"[0-9A-Fa-f]{32,}", "[hex]", text)
+    return re.sub(r"[A-Za-z0-9+/]{40,}={0,2}", "[base64]", text)
+
+
+def terminated(signum, _frame):
+    """SIGTERM as an exception, so that a stopped run still runs its `finally` blocks (the
+    migration stops its ceremony and removes the dealer pod)."""
+    raise SystemExit(128 + signum)
+
+
 def main():
+    signal.signal(signal.SIGTERM, terminated)
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--namespace", default="rutli-perf")
     p.add_argument("--profile", required=True, help="the load profile (scripts/perf/profiles/)")
@@ -1217,6 +1234,8 @@ def main():
     args.migration_skip = None
     if "migration" in suites and not args.work:
         args.migration_skip = "needs --work (the installation's certificates)"
+    elif "migration" in suites and "upgrade" in suites and suites.index("upgrade") < suites.index("migration"):
+        p.error("migration must run before upgrade: its dealer is a dealer of the cosigners' release")
     elif "migration" in suites and "upgrade" in suites and not args.dealer_image:
         args.migration_skip = ("the cosigners start on the previous release: --dealer-image must be a dealer of that "
                                "release (frost/Dockerfile.dealer)")

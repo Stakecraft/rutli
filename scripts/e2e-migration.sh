@@ -108,6 +108,11 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 on_exit() {
   local rc=$?
   env_cleanup "$rc"
+  # A run that passed but could not remove what it left in the pods has not passed.
+  if [ "$rc" -eq 0 ] && [ "${CLEANUP_FAILED:-}" != "" ]; then
+    echo "FAIL: the cleanup could not remove:$CLEANUP_FAILED" >&2
+    rc=1
+  fi
   [ "$rc" -eq 0 ] && echo "==> migration e2e OK"
   return "$rc"
 }
@@ -136,11 +141,18 @@ value() { sed -n "s/^$2=//p" "$SYNC/$1.env" | head -n 1; } # env-file  key
 verify_key() { # extra args; prints the report as JSON, whatever the exit code
   env_client operator verify-key --key-id "$KEY_ID" --expect-fingerprint "$NS_FP" "$@" --json || true
 }
+# A command's output on its way to a log: the export password and long hex or base64 runs (key
+# bytes, shares, sealed secrets) masked, should a regression ever print them.
+redact() {
+  PW="${EXPORT_PW:-}" awk '{ pw = ENVIRON["PW"]; if (pw != "") while ((i = index($0, pw)) > 0)
+    $0 = substr($0, 1, i - 1) "[password]" substr($0, i + length(pw)); print }' \
+    | sed -E 's/[0-9A-Fa-f]{32,}/[hex]/g; s#[A-Za-z0-9+/]{40,}={0,2}#[base64]#g'
+}
 refused() { # what  expected-message  command…
   local what=$1 expect=$2
   shift 2
   if "$@" >"$WORK/refused.out" 2>&1; then fail "$what: accepted"; fi
-  grep -q -- "$expect" "$WORK/refused.out" || fail "$what: refused for the wrong reason: $(cat "$WORK/refused.out")"
+  grep -q -- "$expect" "$WORK/refused.out" || fail "$what: refused for the wrong reason: $(tail -n 20 "$WORK/refused.out" | redact)"
   echo "$what -> refused"
 }
 # Lessons f: on macOS GNU coreutils can shadow /bin/rm, which has -P. Files on the operator's machine.
@@ -264,7 +276,8 @@ step_3_split_ceremony() {
   out="$(env_client refresher refresh --key-id "$KEY_ID")"
   grep -q "$GROUP" <<<"$out" || fail "refresh changed the group key: $out"
   rep="$(verify_key --sign-test)"
-  jq -e --arg d "$DIGEST" '.ok and .pkp_digest != $d and .refresh_count == 1 and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null \
+  jq -e --arg d "$DIGEST" '.ok and .pkp_digest != $d and .refresh_count == 1 and (.sign_test | length == 3)
+    and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null \
     || fail "verify-key after refresh: $rep"
   echo "Gate C: group key unchanged, new digest $(jq -r .pkp_digest <<<"$rep"), refresh count 1"
 
@@ -413,7 +426,8 @@ step_8_destroy_ceremony() {
     [ "$(openssl dgst -sha256 -hex "$f" | awk '{print $NF}')" != "$EXPORT_SHA" ] || fail "a copy of the export file survives: $f"
   done < <(find "$WORK" -type f -size -64k)
   rep="$(verify_key --sign-test)"
-  jq -e '.ok and .refresh_count == 1 and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null || fail "verify-key after the destruction: $rep"
+  jq -e '.ok and .refresh_count == 1 and (.sign_test | length == 3) and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null \
+    || fail "verify-key after the destruction: $rep"
   echo "destroyed; verify-key --sign-test OK on the refreshed shares"
 }
 
