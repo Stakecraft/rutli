@@ -21,7 +21,15 @@ RUN cargo build --release --locked -p rutli-cosigner --bin rutli-cosigner
 
 # debian:stable-slim (trixie when pinned)
 FROM debian:stable-slim@sha256:fbfb4059d2127120aa05b6e6064523d2102552f0cf0026ddf0701c12f1f8f3e0
-RUN useradd -r -u 10001 rutli && mkdir /data && chown rutli /data
+# The base is pinned by digest, and a digest is a day's snapshot: Debian's security updates that came
+# after it (libc, zlib) are applied here. Only what the base already has is upgraded (nothing new is
+# installed); the downloaded packages and lists are removed again. Findings that Debian has no fix
+# for stay: see docs/image-vulnerabilities.md.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get -y --no-install-recommends upgrade \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -u 10001 rutli && mkdir /data && chown rutli /data
 COPY --from=build /src/target/release/rutli-cosigner /usr/local/bin/rutli-cosigner
 # Licenses of the Rust crates compiled into the binary (scripts/third-party-licenses.sh).
 COPY THIRD-PARTY-LICENSES.txt /usr/share/doc/rutli-cosigner/THIRD-PARTY-LICENSES.txt
