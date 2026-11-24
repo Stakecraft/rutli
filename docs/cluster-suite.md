@@ -277,8 +277,8 @@ as the Compose end-to-end test, not a second copy:
      directory in memory, a new pod every run;
    - the NetworkPolicy holds only where the network plugin enforces policies, and other policies
      in the namespace add to it. Before anything is copied in, the pod tries to reach cosigner 1,
-     the API service, the cluster DNS service, its own node and an address outside the cluster
-     (`E2E_DEALER_PROBE_EXTERNAL`, `none` to leave it out); only a timeout on every one counts as
+     the API service, its nameserver, its own node and an address outside the cluster, and to
+     resolve a name through its resolver; only a timeout or no answer on every one counts as
      isolated, and anything reachable fails the suite. The kind
      job passes `--allow-unisolated-dealer`: kind's default plugin enforces no policies, and its
      key is the public test vector. The result records `dealer_isolated`;
@@ -287,8 +287,10 @@ as the Compose end-to-end test, not a second copy:
    - after the ceremony (or a timeout, or a SIGTERM to the suite) the suite deletes the dealer pod
      and waits until it is gone; the pod also has a 30-minute deadline of its own. A dealer left by
      a run killed outright carries the label `rutli-perf/dealer` and is deleted by hand;
-   - a run that passed but could not remove its files from the pods' `/tmp` fails; after a failed
-     run, a node that had installed its share keeps it, under the run's own key id;
+   - a run that passed but could not remove its files from the pods' `/tmp` (or the dealer's
+     NetworkPolicy) fails, and the suite tries the pods' `/tmp` once more whatever happened; after
+     a failed run, a node that had installed its share keeps it, under the run's own key id;
+   - one suite run per namespace: two runs share the cosigners and their `/tmp`;
    - the export password reaches the dealer through stdin, never in a command line;
    - files reach it and leave it through the machine that runs the suite;
    - it must refuse a wrong password, no password and a wrong fingerprint, then split with

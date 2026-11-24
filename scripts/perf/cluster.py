@@ -290,8 +290,11 @@ class Suite(base.Runner):
             env = dict(os.environ, E2E_ENV="k8s", E2E_STAGES="ceremony", E2E_PREFIX=prefix,
                        RUTLI_NAMESPACE=self.cluster.ns, E2E_CERTS=os.path.join(a.work, "certs"),
                        E2E_DEALER_IMAGE=image, E2E_DEALER_POD=dealer, E2E_RESULT=result_path)
-            # Set either way: an inherited E2E_ALLOW_UNISOLATED_DEALER must not decide it.
+            # Set either way: an inherited E2E_ALLOW_UNISOLATED_DEALER must not decide it, nor an
+            # inherited KEEP keep the export on disk, nor another probe address weaken the check.
             env["E2E_ALLOW_UNISOLATED_DEALER"] = "1" if a.allow_unisolated_dealer else "0"
+            env["KEEP"] = "0"
+            env.pop("E2E_DEALER_PROBE_EXTERNAL", None)
             started = time.time()
             proc = subprocess.Popen(["bash", os.path.join(HERE, "..", "e2e-migration.sh")], env=env,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -302,10 +305,10 @@ class Suite(base.Runner):
             except BaseException as e:
                 # A timeout, Ctrl-C or any other error here: stop the script before the pod goes.
                 # SIGTERM to its whole group first (a kubectl in flight stops too); bash then runs its
-                # EXIT trap, which shreds its work dir and removes the dealer pod. SIGKILL after 5 min.
+                # EXIT trap, which shreds its work dir and removes the dealer pod. SIGKILL after 10 min.
                 try:
                     os.killpg(proc.pid, signal.SIGTERM)
-                    proc.communicate(timeout=300)
+                    proc.communicate(timeout=600)
                 except subprocess.TimeoutExpired:
                     # The group may have exited between the timeout and the kill.
                     with contextlib.suppress(ProcessLookupError):
@@ -339,14 +342,28 @@ class Suite(base.Runner):
                         log("  WARNING: the dealer's NetworkPolicy could not be deleted. Delete it by hand.")
                 else:
                     log("  WARNING: the dealer pod may still be there; its NetworkPolicy is kept. Delete it by hand.")
+                # The ceremony's files in the cosigners' memory-backed /tmp (requests, bundles,
+                # founding backups), once more: the script's own cleanup may not have reached them.
+                for n in NODES:
+                    try:
+                        gone_tmp = self.cluster.kubectl(
+                            "exec", self.cluster.pod(n), "-c", "cosigner", "--", "sh", "-c",
+                            "rm -rf /tmp/r[0-9].json /tmp/share-*.json /tmp/backup-founding-node*",
+                            timeout=60, check=False).returncode == 0
+                    except subprocess.TimeoutExpired:
+                        gone_tmp = False
+                    if not gone_tmp:
+                        log(f"  WARNING: the ceremony's files in {n}'s /tmp could not be removed. Remove them by hand.")
             stage.update({"seconds": round(time.time() - started, 1), "dealer_image": image,
                           "steps": [line[4:] for line in out.stdout.splitlines() if line.startswith("==> ")]})
             for line in out.stdout.splitlines():
                 if line.startswith("==> "):
                     log(f"  {line[4:]}")
             if out.returncode != 0:
-                tail = redact((out.stderr.strip() or out.stdout.strip())[-1500:])
-                return [{"failed": f"the split ceremony on the cluster failed (exit {out.returncode}): {tail}"}]
+                # Only the procedure's own FAIL lines, masked, then cut: never a command's raw output.
+                fails = [line for line in (out.stderr + out.stdout).splitlines() if line.startswith("FAIL:")]
+                why = redact("; ".join(fails) or "no FAIL line")[-1500:]
+                return [{"failed": f"the split ceremony on the cluster failed (exit {out.returncode}): {why}"}]
             with open(result_path) as f:
                 stage.update(json.load(f))
             self.imported_key = stage["key_id"]
@@ -1157,7 +1174,7 @@ def redact(text):
     """Text on its way into cluster.json and the log: long hex or base64 runs (key bytes, shares,
     sealed secrets) masked, should a failing ceremony ever print them."""
     text = re.sub(r"[0-9A-Fa-f]{32,}", "[hex]", text)
-    return re.sub(r"[A-Za-z0-9+/]{40,}={0,2}", "[base64]", text)
+    return re.sub(r"[A-Za-z0-9+/_-]{40,}={0,2}", "[base64]", text)
 
 
 def terminated(signum, _frame):
@@ -1225,6 +1242,8 @@ def main():
     args.rate = args.rate or int(steady.get("sign_per_sec", 20))
     args.max_rss_mib = args.max_rss_mib or int(profile.get("max_rss_mib", 256))
     suites = ["diagnose"] if args.diagnose else [s.strip() for s in args.suites.split(",") if s.strip()]
+    if len(set(suites)) != len(suites):
+        p.error(f"a suite is listed twice: {suites}")
     unknown = set(suites) - {"migration", "upgrade", "scenarios", "connect", "disrupt", "keys", "ramp", "diagnose"}
     if unknown:
         p.error(f"unknown suites: {sorted(unknown)}")

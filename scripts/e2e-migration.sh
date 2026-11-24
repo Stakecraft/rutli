@@ -102,11 +102,16 @@ FOUNDING_BACKUPS=() # each node's founding backup, as that node sees it
 step() { printf '\n==> %s\n' "$*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+# Set by env_init, never inherited: the cleanup shreds WORK, and a caller's WORK (the suite's
+# installation directory) must not be what a run that failed early shreds.
+WORK=""
+SYNC=""
 # shellcheck source=scripts/e2e-migration-env-local.sh
 . "$REPO/scripts/e2e-migration-env-$E2E_ENV.sh"
 
 on_exit() {
   local rc=$?
+  trap '' TERM INT # a second signal must not cut the cleanup short
   env_cleanup "$rc"
   # A run that passed but could not remove what it left in the pods has not passed.
   if [ "$rc" -eq 0 ] && [ "${CLEANUP_FAILED:-}" != "" ]; then
@@ -114,7 +119,7 @@ on_exit() {
     rc=1
   fi
   [ "$rc" -eq 0 ] && echo "==> migration e2e OK"
-  return "$rc"
+  exit "$rc" # an EXIT trap's return value is not the script's: only exit sets it
 }
 trap on_exit EXIT
 # A signal ends the run through the EXIT trap too (the cluster suite stops a run that takes too long
@@ -138,15 +143,20 @@ wait_marker() { # marker-name  [timeout-seconds]
 mark() { : >"$SYNC/$1"; }
 value() { sed -n "s/^$2=//p" "$SYNC/$1.env" | head -n 1; } # env-file  key
 
-verify_key() { # extra args; prints the report as JSON, whatever the exit code
-  env_client operator verify-key --key-id "$KEY_ID" --expect-fingerprint "$NS_FP" "$@" --json || true
+verify_key() { # extra args; prints the report as JSON with the command's exit code in .exit_code
+  local out rc=0
+  out="$(env_client operator verify-key --key-id "$KEY_ID" --expect-fingerprint "$NS_FP" "$@" --json)" || rc=$?
+  jq -c --argjson rc "$rc" '. + {exit_code: $rc}' <<<"$out" 2>/dev/null || printf '%s\n' "$out"
 }
+# A sign test that passed: the command succeeded, and every one of the three 2-of-3 quorums signed.
+ALL_QUORUMS='.exit_code == 0 and ([.sign_test[].signers | sort] | unique) == [[1, 2], [1, 3], [2, 3]]
+  and all(.sign_test[]; .ok)'
 # A command's output on its way to a log: the export password and long hex or base64 runs (key
 # bytes, shares, sealed secrets) masked, should a regression ever print them.
 redact() {
   PW="${EXPORT_PW:-}" awk '{ pw = ENVIRON["PW"]; if (pw != "") while ((i = index($0, pw)) > 0)
     $0 = substr($0, 1, i - 1) "[password]" substr($0, i + length(pw)); print }' \
-    | sed -E 's/[0-9A-Fa-f]{32,}/[hex]/g; s#[A-Za-z0-9+/]{40,}={0,2}#[base64]#g'
+    | sed -E 's/[0-9A-Fa-f]{32,}/[hex]/g; s#[A-Za-z0-9+/_-]{40,}={0,2}#[base64]#g'
 }
 refused() { # what  expected-message  command…
   local what=$1 expect=$2
@@ -266,8 +276,8 @@ step_3_split_ceremony() {
 
   step "   verify-key --sign-test with the operator certificate (Gate B)"
   rep="$(verify_key --sign-test)"
-  jq -e --arg d "$DIGEST" '.ok and .pkp_digest == $d and .refresh_count == 0 and (.sign_test | length == 3)
-    and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null || fail "verify-key: $rep"
+  jq -e --arg d "$DIGEST" '.ok and .pkp_digest == $d and .refresh_count == 0 and '"$ALL_QUORUMS" <<<"$rep" >/dev/null \
+    || fail "verify-key: $rep"
   refused "verify-key with a wrong fingerprint" "is not the expected" \
     env_client operator verify-key --key-id "$KEY_ID" --expect-fingerprint "$OLD_SIG_FP"
   echo "Gate B: 3/3 nodes, digest $DIGEST, every 2-of-3 quorum signs"
@@ -276,8 +286,7 @@ step_3_split_ceremony() {
   out="$(env_client refresher refresh --key-id "$KEY_ID")"
   grep -q "$GROUP" <<<"$out" || fail "refresh changed the group key: $out"
   rep="$(verify_key --sign-test)"
-  jq -e --arg d "$DIGEST" '.ok and .pkp_digest != $d and .refresh_count == 1 and (.sign_test | length == 3)
-    and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null \
+  jq -e --arg d "$DIGEST" '.ok and .pkp_digest != $d and .refresh_count == 1 and '"$ALL_QUORUMS" <<<"$rep" >/dev/null \
     || fail "verify-key after refresh: $rep"
   echo "Gate C: group key unchanged, new digest $(jq -r .pkp_digest <<<"$rep"), refresh count 1"
 
@@ -296,7 +305,7 @@ step_3_split_ceremony() {
     FOUNDING_BACKUPS[i]="$bundle"
   done
   rep="$(verify_key)"
-  jq -e '.ok and .refresh_count == 1' <<<"$rep" >/dev/null || fail "verify-key after the backups: $rep"
+  jq -e '.exit_code == 0 and .ok and .refresh_count == 1' <<<"$rep" >/dev/null || fail "verify-key after the backups: $rep"
 }
 
 # --- Steps 4-7 run in Canton: the cutover rolled back, the cutover that goes through, verify -------
@@ -426,7 +435,7 @@ step_8_destroy_ceremony() {
     [ "$(openssl dgst -sha256 -hex "$f" | awk '{print $NF}')" != "$EXPORT_SHA" ] || fail "a copy of the export file survives: $f"
   done < <(find "$WORK" -type f -size -64k)
   rep="$(verify_key --sign-test)"
-  jq -e '.ok and .refresh_count == 1 and (.sign_test | length == 3) and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null \
+  jq -e '.ok and .refresh_count == 1 and '"$ALL_QUORUMS" <<<"$rep" >/dev/null \
     || fail "verify-key after the destruction: $rep"
   echo "destroyed; verify-key --sign-test OK on the refreshed shares"
 }

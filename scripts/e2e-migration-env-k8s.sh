@@ -47,8 +47,13 @@ env_init() {
   [ -n "${E2E_DEALER_IMAGE:-}" ] || fail "E2E_DEALER_IMAGE is required for E2E_ENV=k8s"
   [ -f "${E2E_CERTS:-}/ca.crt" ] || fail "E2E_CERTS must name the installation's certificate directory (no ca.crt in '${E2E_CERTS:-}')"
   # The export and the dealer's output pass through here: memory-backed where the host has it.
-  local scratch="${TMPDIR:-/tmp}"
+  local scratch="${TMPDIR:-/tmp}" fs
   [ -d /dev/shm ] && [ -w /dev/shm ] && scratch=/dev/shm
+  fs="$(stat -f -c %T "$scratch" 2>/dev/null || echo unknown)"
+  case "$fs" in
+    tmpfs | ramfs) ;;
+    *) echo "WARNING: $scratch is not memory-backed ($fs): the export passes through this machine's disk" >&2 ;;
+  esac
   WORK="$(mktemp -d "$scratch/rutli-e2e-migration-k8s.XXXXXX")"
   SYNC="$WORK/sync"
   mkdir -p "$SYNC" "$WORK/certs"
@@ -193,22 +198,24 @@ YAML
   # failure, never a pass. A reachable network fails unless E2E_ALLOW_UNISOLATED_DEALER=1 (a
   # throwaway cluster whose network plugin enforces no policies, with the public test key only).
   # Policies add up, so another one in the namespace could open some destinations and not others:
-  # five targets of different kinds, so that one with a policy of its own cannot pass for isolation.
-  # Cosigner 1's pod (gRPC), the Kubernetes API service, the cluster DNS service (where there is
-  # one), the dealer's own node (the kubelet: policies may exempt the local node) and an address
-  # outside the cluster. Inside the pod a connection exits 10, a refusal 11, a timeout 124; any other
-  # exit is kubectl's or a missing tool's, and stops the run.
-  local ip api dns node target rc reachable="" targets=()
+  # targets of different kinds, so that one with a policy of its own cannot pass for isolation.
+  # Cosigner 1's pod (gRPC), the Kubernetes API service, the pod's own nameserver (TCP), the dealer's
+  # own node (the kubelet: policies may exempt the local node) and an address outside the cluster;
+  # then a DNS lookup through the pod's resolver (UDP first). Inside the pod a connection exits 10, a
+  # refusal 11, a timeout 124; any other exit is kubectl's or a missing tool's, and stops the run.
+  local ip api ns node target rc reachable="" targets=() external="${E2E_DEALER_PROBE_EXTERNAL:-1.1.1.1/443}"
   ip="$(_k get pod "$(_pod 1)" -o jsonpath='{.status.podIP}')"
   api="$(kubectl -n default get service kubernetes -o jsonpath='{.spec.clusterIP}')"
   node="$(_k get pod "$DEALER_POD" -o jsonpath='{.status.hostIP}')"
-  dns="$(kubectl -n kube-system get service kube-dns -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)"
+  ns="$(_k exec "$DEALER_POD" -- sed -n 's/^nameserver[[:space:]]*//p' /etc/resolv.conf | head -n 1)"
   [[ "$ip" =~ ^[0-9a-fA-F.:]+$ ]] || fail "no pod IP for cosigner 1 to probe the dealer's isolation with"
   [[ "$api" =~ ^[0-9a-fA-F.:]+$ ]] || fail "no API service IP to probe the dealer's isolation with"
   [[ "$node" =~ ^[0-9a-fA-F.:]+$ ]] || fail "no node IP for the dealer pod to probe its isolation with"
-  targets=("$ip/9101" "$api/443" "$node/10250")
-  [ "${E2E_DEALER_PROBE_EXTERNAL:-}" = none ] || targets+=("${E2E_DEALER_PROBE_EXTERNAL:-1.1.1.1/443}")
-  [[ "$dns" =~ ^[0-9a-fA-F.:]+$ ]] && targets+=("$dns/53")
+  [[ "$ns" =~ ^[0-9a-fA-F.:]+$ ]] || fail "no nameserver in the dealer pod's resolv.conf to probe its isolation with"
+  [[ "$external" =~ ^([0-9.]+|\[[0-9a-fA-F:]+\])/[0-9]+$ || "$external" = none ]] \
+    || fail "E2E_DEALER_PROBE_EXTERNAL must be IP/port or none, not '$external' (a name would need the DNS the pod must not have)"
+  targets=("$ip/9101" "$api/443" "$ns/53" "$node/10250")
+  [ "$external" = none ] || targets+=("$external")
   for target in "${targets[@]}"; do
     rc=0
     # shellcheck disable=SC2016  # expanded by the pod's shell
@@ -221,9 +228,18 @@ YAML
       *) fail "the dealer pod's isolation could not be checked (probe of $target exited $rc: kubectl exec failed, or no bash or timeout in $E2E_DEALER_IMAGE)" ;;
     esac
   done
+  # A name every cluster resolves through the pod's search path: an answer means DNS got through.
+  # No answer (2) or a timeout (124) is isolated; a missing getent (127) or a failed exec stops.
+  rc=0
+  _k exec "$DEALER_POD" -- timeout 15 getent hosts kubernetes.default >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    0) reachable="$reachable DNS" ;;
+    2 | 124) ;;
+    *) fail "the dealer pod's DNS isolation could not be checked (getent exited $rc)" ;;
+  esac
   if [ -z "$reachable" ]; then
     DEALER_ISOLATED=true
-    echo "the dealer pod reaches none of ${targets[*]} (all timed out): its NetworkPolicy holds"
+    echo "the dealer pod reaches none of ${targets[*]} and resolves no name: its NetworkPolicy holds"
   else
     DEALER_ISOLATED=false
     [ "${E2E_ALLOW_UNISOLATED_DEALER:-0}" = 1 ] || fail "the dealer pod reaches$reachable: its NetworkPolicy is not enforced here"
@@ -294,7 +310,10 @@ _dealer_down() {
   local left
   left="$(_kq get pod "$DEALER_POD" --ignore-not-found -o name 2>/dev/null)" || return 1
   [ -z "$left" ] || return 1
-  _kq delete networkpolicy "$DEALER_POD" --ignore-not-found >/dev/null 2>&1 || true
+  _kq delete networkpolicy "$DEALER_POD" --ignore-not-found >/dev/null 2>&1 || {
+    echo "WARNING: the dealer's NetworkPolicy $DEALER_POD could not be deleted" >&2
+    CLEANUP_FAILED="$CLEANUP_FAILED dealer-networkpolicy"
+  }
 }
 
 env_destroy_dealer() { # Step 8: the dealer's "host" and its memory-backed work dir go with the pod
