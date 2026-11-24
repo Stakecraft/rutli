@@ -32,6 +32,16 @@ fn store_with_old_markers(dir: &Path, sessions: &[String]) -> NonceStore {
     store
 }
 
+/// The exact bytes of a complete sentinel, as a pass writes them (the text itself is private to
+/// the crate): a scratch store is pruned once and the file it leaves is read back.
+fn complete_sentinel_bytes() -> Vec<u8> {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("scratch.nonces");
+    let store = store_with_old_markers(&dir, &sessions(1));
+    store.prune_older_than(HORIZON, 10).unwrap();
+    fs::read(dir.join(PRUNED_SENTINEL)).unwrap()
+}
+
 fn sessions(n: usize) -> Vec<String> {
     (0..n).map(|i| format!("s-{i}")).collect()
 }
@@ -72,14 +82,16 @@ fn a_marker_that_cannot_be_examined_fails_the_pass() {
     }
 }
 
-/// A marker that cannot be removed (the directory is read-only, the sentinel already there) fails
-/// the pass: it is never counted as gone, nor silently kept.
+/// A marker that cannot be removed (the directory is read-only, the complete sentinel already
+/// there) fails the pass: it is never counted as gone, nor silently kept. The sentinel must be
+/// complete: a sentinel with other content is rewritten first, which a read-only directory refuses
+/// before any marker is touched, and the removal would not be reached.
 #[test]
 fn a_marker_that_cannot_be_removed_fails_the_pass() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("k.nonces");
     let store = store_with_old_markers(&dir, &sessions(2));
-    fs::write(dir.join(PRUNED_SENTINEL), b"pruned before").unwrap();
+    fs::write(dir.join(PRUNED_SENTINEL), complete_sentinel_bytes()).unwrap();
     if !permissions_enforced(&dir) {
         return;
     }
