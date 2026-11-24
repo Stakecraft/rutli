@@ -137,7 +137,25 @@ Both end with the upgrade. A Sign that runs out of attempts now carries the
 
 Moving the image is the step that needs care. First the driver (a participant restart): signing,
 DKG and decryption are unchanged against 0.4.x cosigners, and creating hosted keys is refused until
-the cosigners are upgraded. Then, per cosigner, wait for the gate before the next:
+the cosigners are upgraded.
+
+**For the duration of the roll, raise the driver's sign attempt timeout to 12 s.** A 0.5.0 driver
+gives one sign attempt at one cosigner 5 s (`frost.sign-attempt-timeout`, default `5s`) and then
+fails over. A 0.4.x cosigner that leads a signature waits up to 10 s for a peer that is
+restarting: its peer RPC deadline is 10 s, and its peer channels send no keepalive pings (0.5.0
+cosigners do). With the defaults the driver gives up first, and the signature is dropped while a
+cosigner restarts. Set it in the driver's `frost` block when you restart the participant for the
+driver upgrade:
+
+```hocon
+frost { sign-attempt-timeout = 12s }   # during the roll only; must not exceed request-timeout (30 s)
+```
+
+Remove it (back to the default `5s`) after the last cosigner runs 0.5.0, at the participant's next
+restart. Detail: [architecture.md](architecture.md), "Deadlines, keepalive and what Canton waits
+for".
+
+Then, per cosigner, wait for the gate before the next:
 
 1. Upgrade one node to 0.5.0. It checks that every roster entry has a pin and that its own key is in
    its own entry. The log shows `peer N TLS key pins` for every node.
