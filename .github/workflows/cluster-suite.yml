@@ -17,6 +17,9 @@ on:
       - "deploy/helm/**"
       - "frost/loadgen/**"
       - "frost/Dockerfile.perf"
+      - "frost/Dockerfile.dealer"
+      - "scripts/e2e-migration.sh"
+      - "scripts/e2e-migration-env-k8s.sh"
   push:
     # No path filter on a push to main: every commit on main gets the whole set (see main-status.yml).
     branches: [main]
@@ -53,6 +56,7 @@ jobs:
       - name: Build the image under test
         run: |
           diff <(grep '^FROM ' frost/Dockerfile) <(grep '^FROM ' frost/Dockerfile.perf)
+          diff <(grep '^FROM ' frost/Dockerfile) <(grep '^FROM ' frost/Dockerfile.dealer)
           docker build -f frost/Dockerfile.perf -t rutli-perf:local frost
 
       # The migration suite's ceremony runs on the previous release's cosigners (the upgrade suite
@@ -66,9 +70,11 @@ jobs:
         run: |
           set -euo pipefail
           values=deploy/helm/rutli-cosigner/values.yaml
-          repo="$(sed -n 's/^  repository: \(.*\)$/\1/p' "$values" | head -n 1)"
-          tag="$(sed -n 's/^  tag: "\([0-9][^@"]*\)@.*/\1/p' "$values" | head -n 1)"
-          digest="$(sed -n 's/^  tag: "[^@"]*@\(sha256:[0-9a-f]\{64\}\)".*/\1/p' "$values" | head -n 1)"
+          # The top-level image: block only (other images in the values have blocks of their own).
+          block="$(awk '/^image:/ {on=1; next} on && /^[^ #]/ {on=0} on' "$values")"
+          repo="$(sed -n 's/^  repository: \([^ #]*\).*$/\1/p' <<<"$block" | head -n 1)"
+          tag="$(sed -n 's/^  tag: "\([0-9][^@"]*\)@.*/\1/p' <<<"$block" | head -n 1)"
+          digest="$(sed -n 's/^  tag: "[^@"]*@\(sha256:[0-9a-f]\{64\}\)".*/\1/p' <<<"$block" | head -n 1)"
           [ -n "$repo" ] && [ -n "$tag" ] && [ -n "$digest" ] || { echo "::error::no digest-pinned image in $values"; exit 1; }
           # Every platform of the release index must record the same commit (read from the registry,
           # nothing pulled: a second platform of one digest cannot be pulled next to the first).

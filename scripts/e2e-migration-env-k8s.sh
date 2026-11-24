@@ -67,11 +67,17 @@ env_init() {
     _in_node "$i" grep -q ' /tmp tmpfs ' /proc/mounts || fail "cosigner $i's /tmp is not memory-backed"
   done
   _k exec "$LOADGEN_POD" -- grep -q ' /tmp tmpfs ' /proc/mounts || fail "the load generator's /tmp is not memory-backed"
+  # shellcheck disable=SC2016  # expanded by the pod's shell (the cat below)
   for role in operator refresher; do
     jq --arg role "$role" '.tls.cert = "/certs/\($role).crt" | .tls.key = "/certs/\($role).key"
       | .tls.ca_cert = "/certs/ca.crt" | .profile = "lab"' "$WORK/node1.json" \
-      | _k exec -i "$LOADGEN_POD" -- sh -c "umask 077; cat > /tmp/e2e-$role.json"
+      | _k exec -i "$LOADGEN_POD" -- sh -c 'umask 077; cat > "$1"' sh "/tmp/e2e-$role.json"
   done
+
+  # The dealer pod, started and its isolation checked here, before anything of the key reaches it
+  # (and outside the procedure's `refused` checks, which would swallow a failure's message).
+  step "The dealer pod: started, its network isolation checked"
+  _dealer_up
 }
 
 env_cosigner() {
@@ -89,7 +95,8 @@ env_fetch() { _in_node "$1" cat "$2" >"$3"; }
 env_push() { # node  local-file: copied to the pod's /tmp (memory-backed); prints the path there
   local dest
   dest="/tmp/$(basename "$2")"
-  _k exec -i "$(_pod "$1")" -c cosigner -- sh -c "umask 077; cat > '$dest'" <"$2"
+  # shellcheck disable=SC2016  # expanded by the pod's shell
+  _k exec -i "$(_pod "$1")" -c cosigner -- sh -c 'umask 077; cat > "$1"' sh "$dest" <"$2"
   printf '%s\n' "$dest"
 }
 env_node_path() { printf '/data/%s\n' "$2"; }
@@ -97,7 +104,8 @@ env_node_exists() { _in_node "$1" test -e "$2"; }
 env_node_cat() {
   local n=$1
   shift
-  _in_node "$n" sh -c "cat $* 2>/dev/null || true"
+  # shellcheck disable=SC2016  # expanded by the pod's shell; each argument may be a glob
+  _in_node "$n" sh -c 'for p in "$@"; do for f in $p; do cat "$f" 2>/dev/null; done; done; true' sh "$@"
 } # globs expand in the pod
 env_node_ls() { _in_node "$1" ls "$2"; }
 env_node_shred() {
@@ -157,17 +165,28 @@ YAML
   _k wait --for=condition=Ready "pod/$DEALER_POD" --timeout=300s >/dev/null || fail "the dealer pod did not start"
   DEALER_STARTED=1
   # Does the NetworkPolicy hold? Only a network plugin that enforces policies makes it so (kind's
-  # default one does not). Before anything is copied in, try to reach cosigner 1 from the pod.
-  # A reachable network is a failure unless E2E_ALLOW_UNISOLATED_DEALER=1 (a throwaway cluster whose
-  # network plugin enforces no policies, with the public test key only); then it is reported.
-  if _k exec "$DEALER_POD" -- bash -c "timeout 3 bash -c '</dev/tcp/rutli-node-1.$NS.svc/9101'" >/dev/null 2>&1; then
-    DEALER_ISOLATED=false
-    [ "${E2E_ALLOW_UNISOLATED_DEALER:-0}" = 1 ] || fail "the dealer pod reaches the network: its NetworkPolicy is not enforced here"
-    echo "WARNING: the dealer pod reaches the network: this cluster's network plugin does not enforce its NetworkPolicy"
-  else
-    DEALER_ISOLATED=true
-    echo "the dealer pod reaches no cosigner: its NetworkPolicy holds"
-  fi
+  # default one does not). Before anything is copied in, the pod opens a TCP connection to cosigner
+  # 1's pod IP (no DNS involved) on its gRPC port. Only a timeout (exit 124) counts as isolated: a
+  # connection, or a refusal, means packets got through, and a probe that could not run at all is a
+  # failure, never a pass. A reachable network fails unless E2E_ALLOW_UNISOLATED_DEALER=1 (a
+  # throwaway cluster whose network plugin enforces no policies, with the public test key only).
+  local ip rc=0
+  ip="$(_k get pod "$(_pod 1)" -o jsonpath='{.status.podIP}')"
+  [[ "$ip" =~ ^[0-9a-fA-F.:]+$ ]] || fail "no pod IP for cosigner 1 to probe the dealer's isolation with"
+  # shellcheck disable=SC2016  # expanded by the pod's shell
+  _k exec "$DEALER_POD" -- bash -c 'exec timeout 5 bash -c "exec 3<>/dev/tcp/$1/9101"' sh "$ip" >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    124)
+      DEALER_ISOLATED=true
+      echo "the dealer pod reaches no cosigner (a connection to $ip:9101 timed out): its NetworkPolicy holds"
+      ;;
+    0 | 1)
+      DEALER_ISOLATED=false
+      [ "${E2E_ALLOW_UNISOLATED_DEALER:-0}" = 1 ] || fail "the dealer pod reaches the network: its NetworkPolicy is not enforced here"
+      echo "WARNING: the dealer pod reaches the network: this cluster's network plugin does not enforce its NetworkPolicy"
+      ;;
+    *) fail "the dealer pod's isolation could not be checked (probe exit $rc: no bash or timeout in $E2E_DEALER_IMAGE, or kubectl exec failed)" ;;
+  esac
   export DEALER_ISOLATED
 }
 
@@ -184,7 +203,8 @@ _dealer_in_pod() {
     case "$flag" in
       --in | --ca-cert | --recipient)
         val="/work/in/$(basename "$2")"
-        _k exec -i "$DEALER_POD" -- sh -c "umask 077; cat > '$val'" <"$2"
+        # shellcheck disable=SC2016  # expanded by the pod's shell
+        _k exec -i "$DEALER_POD" -- sh -c 'umask 077; cat > "$1"' sh "$val" <"$2"
         args+=("$flag" "$val")
         shift 2
         ;;
@@ -224,10 +244,19 @@ _dealer_in_pod() {
   return "$rc"
 }
 
+# Delete the dealer pod and wait; its deny-all NetworkPolicy goes only once the pod is gone, never
+# while it might still hold key material. Returns non-zero if the pod is still there.
+_dealer_down() {
+  _k delete pod "$DEALER_POD" --wait=true --timeout=120s --ignore-not-found >/dev/null 2>&1 || true
+  # Gone only when the API says so: an error of `get` keeps the policy.
+  local left
+  left="$(_k get pod "$DEALER_POD" --ignore-not-found -o name 2>/dev/null)" || return 1
+  [ -z "$left" ] || return 1
+  _k delete networkpolicy "$DEALER_POD" --ignore-not-found >/dev/null 2>&1 || true
+}
+
 env_destroy_dealer() { # Step 8: the dealer's "host" and its memory-backed work dir go with the pod
-  _k delete pod "$DEALER_POD" --wait=true --ignore-not-found >/dev/null
-  _k delete networkpolicy "$DEALER_POD" --ignore-not-found >/dev/null
-  ! _k get pod "$DEALER_POD" >/dev/null 2>&1 || fail "the dealer pod is still there"
+  _dealer_down || fail "the dealer pod is still there"
 }
 
 # --- no Canton on the cluster ----------------------------------------------------------------------
@@ -244,13 +273,19 @@ env_destroy_old_db() { _no_canton; }
 
 env_cleanup() {
   local rc=$1 i
-  _k delete pod "$DEALER_POD" --wait=true --timeout=120s --ignore-not-found >/dev/null 2>&1 || true
-  _k delete networkpolicy "$DEALER_POD" --ignore-not-found >/dev/null 2>&1 || true
-  # Ceremony files in the pods' memory-backed /tmp: requests, bundles, the client configs. The
-  # founding backups stay until the pods restart (they are what Step 8 keeps).
+  _dealer_down || echo "WARNING: the dealer pod $DEALER_POD is still there (its NetworkPolicy kept); delete it by hand" >&2
+  # A ceremony that failed before every node installed its share leaves a sealed one-time recipient
+  # secret on those nodes: abort-import removes it (never an installed share without its flag).
+  if [ "$rc" -ne 0 ] && [ -n "${KEY_ID:-}" ] && [ -n "${CEREMONY:-}" ]; then
+    for i in 1 2 3; do
+      env_cosigner "$i" abort-import --key-id "$KEY_ID" --ceremony-id "$CEREMONY" >/dev/null 2>&1 || true
+    done
+  fi
+  # Ceremony files in the pods' memory-backed /tmp: requests, bundles, the founding backups (Step 8
+  # checked them; the suite keeps no copy), the client configs.
   for i in 1 2 3; do
     # shellcheck disable=SC2016  # expanded by the pod's shell
-    _in_node "$i" sh -c 'for f in /tmp/r[0-9].json /tmp/share-*.json; do [ -e "$f" ] && rm -f "$f"; done; true' >/dev/null 2>&1 || true
+    _in_node "$i" sh -c 'rm -rf /tmp/r[0-9].json /tmp/share-*.json /tmp/backup-founding-node*; true' >/dev/null 2>&1 || true
   done
   _k exec "$LOADGEN_POD" -- sh -c 'rm -f /tmp/e2e-operator.json /tmp/e2e-refresher.json' >/dev/null 2>&1 || true
   if [ "$rc" -ne 0 ]; then
@@ -259,5 +294,7 @@ env_cleanup() {
       _k logs "$(_pod "$i")" -c cosigner --tail=30 2>/dev/null || true
     done
   fi
-  if [ "${KEEP:-0}" = 1 ]; then echo "work dir kept: $WORK"; else shred_local "$WORK"; fi
+  if [ -n "${WORK:-}" ]; then
+    if [ "${KEEP:-0}" = 1 ]; then echo "work dir kept: $WORK"; else shred_local "$WORK"; fi
+  fi
 }

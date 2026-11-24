@@ -112,6 +112,10 @@ on_exit() {
   return "$rc"
 }
 trap on_exit EXIT
+# A signal ends the run through the EXIT trap too (the cluster suite stops a run that takes too long
+# with SIGTERM): its cleanup removes the dealer pod and the work dir.
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 # --- the handshake with the Canton bootstrap script ----------------------------------------------
 # `$SYNC/<name>` is a marker, `$SYNC/<name>.env` the KEY=value lines that go with it (written first).
@@ -147,7 +151,7 @@ shred_local() {
   local p
   for p in "$@"; do
     [ -e "$p" ] || continue
-    find "$p" -type f -exec shred -u {} + 2>/dev/null || true
+    find "$p" -type f -exec shred -f -u {} + 2>/dev/null || true
     rm -rf "$p"
   done
 }

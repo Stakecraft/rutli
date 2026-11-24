@@ -57,6 +57,7 @@ import math
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -285,21 +286,39 @@ class Suite(base.Runner):
             env = dict(os.environ, E2E_ENV="k8s", E2E_STAGES="ceremony", E2E_PREFIX=prefix,
                        RUTLI_NAMESPACE=self.cluster.ns, E2E_CERTS=os.path.join(a.work, "certs"),
                        E2E_DEALER_IMAGE=image, E2E_RESULT=result_path)
-            if a.allow_unisolated_dealer:
-                env["E2E_ALLOW_UNISOLATED_DEALER"] = "1"
+            # Set either way: an inherited E2E_ALLOW_UNISOLATED_DEALER must not decide it.
+            env["E2E_ALLOW_UNISOLATED_DEALER"] = "1" if a.allow_unisolated_dealer else "0"
             started = time.time()
+            proc = subprocess.Popen(["bash", os.path.join(HERE, "..", "e2e-migration.sh")], env=env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                    start_new_session=True)
             try:
-                out = subprocess.run(["bash", os.path.join(HERE, "..", "e2e-migration.sh")], env=env,
-                                     capture_output=True, text=True, timeout=1800, check=False)
+                stdout, stderr = proc.communicate(timeout=1800)
+                out = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
             except subprocess.TimeoutExpired:
+                # SIGTERM first: the script's EXIT trap removes the dealer pod and shreds its work dir.
+                # To the whole group: a kubectl in flight stops too, and bash then runs its trap.
+                os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    proc.communicate(timeout=300)
+                except subprocess.TimeoutExpired:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.communicate()
                 return [{"failed": "the split ceremony on the cluster did not finish within 30 minutes"}]
             finally:
                 # Whatever happened to the script (a timeout kills it before its own cleanup), the
                 # dealer pod and what its memory holds go now, not at its 30-minute deadline.
                 self.cluster.kubectl("delete", "pod", "rutli-perf-dealer", "--wait=true", "--timeout=120s",
                                      "--ignore-not-found", timeout=180, check=False)
-                self.cluster.kubectl("delete", "networkpolicy", "rutli-perf-dealer", "--ignore-not-found",
-                                     timeout=60, check=False)
+                # Its deny-all NetworkPolicy goes only once the API confirms the pod is gone (an
+                # error of `get` keeps the policy).
+                left = self.cluster.kubectl("get", "pod", "rutli-perf-dealer", "--ignore-not-found", "-o", "name",
+                                            timeout=60, check=False)
+                if left.returncode == 0 and not left.stdout.strip():
+                    self.cluster.kubectl("delete", "networkpolicy", "rutli-perf-dealer", "--ignore-not-found",
+                                         timeout=60, check=False)
+                else:
+                    log("  WARNING: the dealer pod is still there; its NetworkPolicy is kept. Delete it by hand.")
             stage.update({"seconds": round(time.time() - started, 1), "dealer_image": image,
                           "steps": [line[4:] for line in out.stdout.splitlines() if line.startswith("==> ")]})
             for line in out.stdout.splitlines():
