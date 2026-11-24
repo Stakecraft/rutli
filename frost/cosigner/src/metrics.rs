@@ -272,9 +272,9 @@ pub const RUNTIME_WORKERS: &str = "rutli_runtime_workers";
 pub const RUNTIME_ALIVE_TASKS: &str = "rutli_runtime_alive_tasks";
 /// Gauge: tasks waiting in the async runtime's global queue.
 pub const RUNTIME_GLOBAL_QUEUE_DEPTH: &str = "rutli_runtime_global_queue_depth";
-/// Gauge (only ever grows while the process lives): seconds the async runtime's workers spent busy,
-/// all workers together. `rate(..) / rutli_runtime_workers` is the busy ratio.
-pub const RUNTIME_BUSY_SECONDS: &str = "rutli_runtime_busy_seconds";
+/// Counter: milliseconds the async runtime's workers spent busy, all workers together.
+/// `rate(..) / 1000 / rutli_runtime_workers` is the busy ratio.
+pub const RUNTIME_BUSY_MILLISECONDS: &str = "rutli_runtime_busy_milliseconds_total";
 /// Every histogram the daemon records and its bucket bounds: each is rendered as a Prometheus
 /// histogram, never as a summary ([`SIGN_DURATION_BUCKETS`] says why).
 pub const HISTOGRAM_BUCKETS: &[(&str, &[f64])] = &[
@@ -511,13 +511,13 @@ pub fn nonce_marker_observed(took: std::time::Duration, ok: bool) {
 /// so it may run on a thread outside the runtime.
 pub fn refresh_runtime_gauges(runtime: &tokio::runtime::RuntimeMetrics) {
     let workers = runtime.num_workers();
-    let busy: f64 = (0..workers)
-        .map(|w| runtime.worker_total_busy_duration(w).as_secs_f64())
+    let busy_ms: u128 = (0..workers)
+        .map(|w| runtime.worker_total_busy_duration(w).as_millis())
         .sum();
     metrics::gauge!(RUNTIME_WORKERS).set(workers as f64);
     metrics::gauge!(RUNTIME_ALIVE_TASKS).set(runtime.num_alive_tasks() as f64);
     metrics::gauge!(RUNTIME_GLOBAL_QUEUE_DEPTH).set(runtime.global_queue_depth() as f64);
-    metrics::gauge!(RUNTIME_BUSY_SECONDS).set(busy);
+    metrics::counter!(RUNTIME_BUSY_MILLISECONDS).absolute(busy_ms as u64);
 }
 
 /// Install the process-global Prometheus recorder and serve `/metrics` on `listen`.
@@ -886,10 +886,10 @@ pub fn describe() {
         RUNTIME_GLOBAL_QUEUE_DEPTH,
         "Tasks waiting in the async runtime's global queue"
     );
-    describe_gauge!(
-        RUNTIME_BUSY_SECONDS,
-        Unit::Seconds,
-        "Seconds the async runtime's workers spent busy, all workers together (cumulative gauge: only grows, use rate())"
+    describe_counter!(
+        RUNTIME_BUSY_MILLISECONDS,
+        Unit::Milliseconds,
+        "Milliseconds the async runtime's workers spent busy, all workers together"
     );
     describe_gauge!(
         KEYSTORE_UNREADABLE,
@@ -1280,7 +1280,6 @@ mod tests {
             RUNTIME_WORKERS,
             RUNTIME_ALIVE_TASKS,
             RUNTIME_GLOBAL_QUEUE_DEPTH,
-            RUNTIME_BUSY_SECONDS,
         ] {
             assert!(out.contains(&format!("# HELP {gauge} ")), "{gauge}:\n{out}");
             assert!(
@@ -1288,6 +1287,14 @@ mod tests {
                 "{gauge}:\n{out}"
             );
         }
+        assert!(
+            out.contains(&format!("# HELP {RUNTIME_BUSY_MILLISECONDS} ")),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!("# TYPE {RUNTIME_BUSY_MILLISECONDS} counter")),
+            "{out}"
+        );
         assert!(out.lines().any(|l| l == "rutli_signs_in_flight 0"), "{out}");
         assert!(out.lines().any(|l| l == "rutli_runtime_workers 2"), "{out}");
     }

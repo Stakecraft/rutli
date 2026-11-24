@@ -176,8 +176,7 @@ pub struct LeadGuard {
 impl Drop for LeadGuard {
     fn drop(&mut self) {
         self.load.leading.fetch_sub(1, Ordering::AcqRel);
-        let left = self.load.leading.load(Ordering::Acquire);
-        metrics::gauge!(crate::metrics::SIGNS_IN_FLIGHT).set(left as f64);
+        metrics::gauge!(crate::metrics::SIGNS_IN_FLIGHT).decrement(1.0);
     }
 }
 
@@ -190,13 +189,13 @@ impl SignLoad {
         }
     }
 
-    /// Count one signature led here until the guard drops; `rutli_signs_in_flight` follows (and
-    /// the key-store watchdog re-reads [`SignLoad::leading`] into it every pass, so two updates
-    /// racing cannot leave it wrong for long).
+    /// Count one signature led here until the guard drops; `rutli_signs_in_flight` follows. The
+    /// gauge is updated by increments and decrements, so concurrent updates cannot publish a stale
+    /// value; the key-store watchdog re-sets the absolute value from [`SignLoad::leading`] every
+    /// pass.
     pub fn lead(self: &Arc<Self>) -> LeadGuard {
         let count = self.leading.fetch_add(1, Ordering::AcqRel) + 1;
-        let now = self.leading.load(Ordering::Acquire);
-        metrics::gauge!(crate::metrics::SIGNS_IN_FLIGHT).set(now as f64);
+        metrics::gauge!(crate::metrics::SIGNS_IN_FLIGHT).increment(1.0);
         LeadGuard {
             load: self.clone(),
             count,
