@@ -858,66 +858,103 @@ class FrostBackend(
 
   /** Hosted-key specs learned in this process (`GenerateKey`, `PublicKey`, `KeyInfo` replies), so
     * that EC-only failover applies only to keys that are, or may be, EC. A hosted key id has a
-    * random part and is never used twice, so the spec of an id does not change: once learned it
-    * is held ([[settleSpec]]). */
+    * random part and is never used twice, so the spec of an id does not change: once learned, one
+    * cosigner's reply does not replace it ([[settleSpec]]). */
   private val hostedSpecOf = new java.util.concurrent.ConcurrentHashMap[String, String]()
   private def learnSpec(keyId: String, spec: String): Unit = if (spec.nonEmpty) { hostedSpecOf.put(keyId, spec); () }
 
-  /** The outcome of a metadata read (`PublicKey`, `KeyInfo`) of the hosted key `keyId`, held to the
-    * spec the driver knew the key by when the read began (`known`). `seen` has the specs the
-    * cosigners answered with, `specOf` a reply's spec ("" when it carries none).
+  /** How many cosigners must hold a hosted key under one other spec before the driver changes the
+    * spec it knows the key by: all but one ([[ownAnswerQuorum]], the bound for a cosigner's own
+    * answer), and never fewer than two, so that in no roster one cosigner's word is enough. */
+  private val specChangeQuorum: Int = math.max(2, ownAnswerQuorum)
+
+  /** The specs the cosigners hold the hosted key `keyId` under, each asked for its own copy
+    * (`KeyInfo`, local only, all at once): spec → how many cosigners. A cosigner that does not
+    * answer, lacks the key or names no spec has no vote. */
+  private def specVotes(keyId: String): Map[String, Int] =
+    probeCopies(keyId, attemptTimeout)
+      .collect { case (_, Right(info)) if info.getExists && info.getSpec.nonEmpty => info.getSpec }
+      .groupBy(identity)
+      .map { case (spec, votes) => spec -> votes.size }
+
+  /** A metadata read (`PublicKey`, `KeyInfo`) of the hosted key `keyId`, held to the spec the driver
+    * knew the key by when the read began (`known`). `seen` has the first reply under each spec the
+    * cosigners answered with, `specOf` gives a reply's spec ("" when it names none), and `usable`
+    * throws for a reply that cannot be handed on (a public key that is not what its spec says).
     *
     * One cosigner's reply does not change what the driver knows:
-    *   - the key was not known: the reply's spec is learned, as the first answer for the key;
-    *   - the reply is under the known spec: it is the answer. A cosigner that answered under
-    *     another spec was passed over by the walk like one that lacks the key (the next was asked,
-    *     and it lost the lead when another served);
-    *   - no cosigner answered under the known spec, and all but one of the roster
-    *     ([[ownAnswerQuorum]], the bound for a cosigner's own answer) answered under one other
-    *     spec: the roster agrees, that spec is learned and its first reply is the answer;
-    *   - otherwise the read fails as the walk ended (retryable while a cosigner could not be
-    *     reached, [[unconfirmed]]; final otherwise), a reply under another spec is not handed on,
-    *     and the known spec stays. */
+    *   - the key was not known: the reply's spec is learned, the first answer for the key;
+    *   - no cosigner answered under another spec: the read ends as the walk ended;
+    *   - a cosigner answered under another spec. The walk passed it over like one that lacks the
+    *     key (the next was asked, and it loses the lead when another serves). Then the roster is
+    *     asked ([[specVotes]]): when at least [[specChangeQuorum]] cosigners hold the key under
+    *     one other spec, that spec is learned (audit note `hosted-spec=<old>→<new>`) and its
+    *     reply is the answer — also when a cosigner still answers under the known spec, so a spec
+    *     learned from one cosigner's first answer does not outlive the others' agreement.
+    *     Otherwise the known spec stays and the read ends as the walk ended, except that a reply
+    *     under another spec is never handed on.
+    * A refusal the walk met (RESOURCE_EXHAUSTED, PERMISSION_DENIED, ...) stands as it is. */
   private def settleSpec[R](keyId: String, what: String, known: Option[String], seen: SpecsSeen[R], notes: AuditNotes)(
-      specOf: R => String
-  )(outcome: scala.util.Try[R]): scala.util.Try[R] = {
-    def refused(spec: String, knownAs: String): IllegalStateException =
-      new IllegalStateException(
-        s"hosted key $keyId: a cosigner answered $what under spec '$spec', the driver knows the key as '$knownAs', " +
-          "and the cosigners do not agree on another spec"
-      )
+      specOf: R => String,
+      usable: R => Unit,
+  )(call: Future[R]): Future[R] =
     known match {
       case None =>
-        outcome.map { reply =>
-          val spec = specOf(reply)
-          // Another read may have learned the key meanwhile: its spec stands.
-          val before = if (spec.nonEmpty) Option(hostedSpecOf.putIfAbsent(keyId, spec)) else None
-          before.filter(_ != spec).foreach(knownAs => throw refused(spec, knownAs))
+        call.map { reply =>
+          usable(reply)
+          // Another read may have learned the key meanwhile: what it learned stays.
+          if (specOf(reply).nonEmpty) { hostedSpecOf.putIfAbsent(keyId, specOf(reply)); () }
           reply
         }
       case Some(knownAs) =>
-        outcome match {
-          case scala.util.Success(reply) if specOf(reply) == knownAs => outcome
-          case _ =>
-            seen.agreedOn(ownAnswerQuorum, knownAs) match {
-              case Some((spec, reply)) =>
-                logger.warn(
-                  s"FROST: hosted key $keyId: no cosigner answered $what under the spec the driver knew it by ('$knownAs'), " +
-                    s"and at least $ownAnswerQuorum of ${channels.size} answered under '$spec'; the key is '$spec' from now on"
-                )
-                notes.add(s"hosted-spec=$knownAs→$spec")
-                hostedSpecOf.put(keyId, spec)
-                scala.util.Success(reply)
-              case None =>
-                outcome.map { reply =>
-                  val spec = specOf(reply)
-                  if (spec.nonEmpty) throw refused(spec, knownAs)
+        call.transformWith { outcome =>
+          val refusal = outcome match {
+            case scala.util.Failure(e: StatusRuntimeException) =>
+              !isLeaderSick(e.getStatus) && e.getStatus.getCode != Status.Code.NOT_FOUND
+            case _ => false
+          }
+          if (refusal || !seen.otherThan(knownAs)) Future.fromTry(outcome)
+          else
+            Future(blocking {
+              val votes = specVotes(keyId)
+              votes.toList.collect { case (spec, count) if spec != knownAs && count >= specChangeQuorum => spec } match {
+                case List(spec) =>
+                  // Learned only when no other read has changed the spec meanwhile, and noted then.
+                  def learn(): Unit =
+                    if (hostedSpecOf.replace(keyId, knownAs, spec)) {
+                      logger.warn(
+                        s"FROST: hosted key $keyId: ${votes(spec)} of ${channels.size} cosigners hold it under '$spec', " +
+                          s"the driver knew it as '$knownAs'; it is '$spec' from now on"
+                      )
+                      notes.add(s"hosted-spec=$knownAs→$spec")
+                    }
+                  seen.first(spec) match {
+                    case Some(reply) =>
+                      usable(reply)
+                      learn()
+                      reply
+                    case None =>
+                      // The cosigners that hold it under that spec were not reached by this read.
+                      learn()
+                      throw KmsDriverException(
+                        new IllegalStateException(
+                          s"hosted key $keyId: the cosigners hold it under '$spec', not '$knownAs'; $what is to be asked again"
+                        ),
+                        retryable = true,
+                      )
+                  }
+                case _ =>
+                  val reply = outcome.get
+                  if (specOf(reply).nonEmpty && specOf(reply) != knownAs)
+                    throw new IllegalStateException(
+                      s"hosted key $keyId: a cosigner answered $what under spec '${specOf(reply)}', the driver knows the key " +
+                        s"as '$knownAs', and fewer than $specChangeQuorum cosigners hold it under another spec"
+                    )
                   reply
-                }
-            }
+              }
+            })
         }
     }
-  }
 
   /** [[withFailover]] for an operation on a hosted key that is, or may be, `ec-p256-ecies`.
     *
@@ -962,6 +999,9 @@ class FrostBackend(
       // False for a call on a key whose type the driver does not know yet (PublicKey, KeyInfo): the
       // key may turn out to be RSA or AES, so the hop is noted as a plain `failover=`.
       knownEc: Boolean,
+      // Whether a stale answer counts towards ownAnswerQuorum. An answer under another spec than
+      // the driver knows the key by does not: it does not say the key is not there.
+      counts: A => Boolean,
   )(op: SignerGrpc.SignerBlockingStub => A): A = {
     val n = channels.size
     val start = startIndex()
@@ -1017,14 +1057,15 @@ class FrostBackend(
           // these cosigners' fault, and demoting all of them would switch the sign rotation off.
           val (reason, meaning) = o.fold(e => (e.getStatus.getCode.toString, MayBeOld), staleAnswer)
           val first = firstStale.getOrElse(o)
+          val staleNow = stales + (if (o.fold(_ => true, counts)) 1 else 0)
           next match {
             case Some(to) =>
               val key = if (knownEc) "an EC hosted key" else "a hosted key that may be EC"
               val note = if (knownEc) "ec-failover" else "failover"
               logger.warn(s"FROST: $what via ${endpoints(i)} answered $reason for $key — $meaning; asking $to")
               notes.add(s"$note=${endpoints(i)}→$to reason=$reason")
-              attempt(k + 1, Some(first), stales + 1, unreachable, sick, i :: staleAt)
-            case None => exhausted(Some(first), stales + 1, unreachable, sick)
+              attempt(k + 1, Some(first), staleNow, unreachable, sick, i :: staleAt)
+            case None => exhausted(Some(first), staleNow, unreachable, sick)
           }
         case Right(answer) =>
           // The cluster serves the key: the cosigners that answered stale lose the lead, to the
@@ -1048,9 +1089,10 @@ class FrostBackend(
       stale: Either[StatusRuntimeException, A] => Boolean,
       staleAnswer: A => (String, String) = (_: A) => ("NOT_FOUND", MayBeOld),
       knownEc: Boolean = false,
+      counts: A => Boolean = (_: A) => true,
   )(op: SignerGrpc.SignerBlockingStub => A): Future[A] = {
     val notes = currentNotes.get
-    Future(blocking(withEcFailover(what, notes, stale, staleAnswer, knownEc)(op)))
+    Future(blocking(withEcFailover(what, notes, stale, staleAnswer, knownEc, counts)(op)))
   }
 
   /** [[clusterCall]] for a call on a hosted key the driver knows not to be EC (RSA decrypt,
@@ -1069,8 +1111,8 @@ class FrostBackend(
     * `absent` recognises an answer that says the key is not there (`KeyInfo.exists = false`); it
     * ends the call as a [[NoSuchElementException]] when it is the roster's verdict. `otherSpec`
     * recognises an answer for the key under another spec than the driver knows it by: it is that
-    * cosigner's own answer too, passed over and counted like "not found" ([[settleSpec]] decides
-    * what the read ends with). Every other
+    * cosigner's own answer too and is passed over, but it does not count towards "not found"
+    * ([[settleSpec]] decides what the read ends with). Every other
     * status keeps its meaning: a leader-sick one fails over, and a refusal — RESOURCE_EXHAUSTED
     * above all, the per-node decrypt limit — is returned at once and leaves the lead where it is.
     * One attempt deadline per cosigner, inside the call's request timeout, as for [[clusterCall]]. */
@@ -2137,8 +2179,8 @@ class FrostBackend(
       // One cosigner's NOT_FOUND is confirmed with the others before it is believed, whatever the
       // key's type: for a key that is (or may be) EC it may come from a cosigner that predates the
       // spec (withEcFailover), for any key from one with a missing replica (clusterCallWholeRoster).
-      // The spec the driver knows the key by is held: a reply under another spec is that
-      // cosigner's own answer, passed over like NOT_FOUND (settleSpec).
+      // One cosigner's reply does not change the spec the driver knows the key by: a reply under
+      // another spec is that cosigner's own answer and is passed over (settleSpec).
       val notes = currentNotes.get
       val known = Option(hostedSpecOf.get(keyId))
       val seen = new SpecsSeen[PublicKeyReply]
@@ -2155,11 +2197,11 @@ class FrostBackend(
             { case Left(e) => e.getStatus.getCode == Status.Code.NOT_FOUND; case Right(reply) => other(reply) },
             (_: PublicKeyReply) => (OtherSpec, UnderOtherSpec),
             knownEc = known.contains(EcSpec),
+            counts = (_: PublicKeyReply) => false,
           )(ask)
         else clusterCallWholeRoster[PublicKeyReply]("publicKey", keyId, otherSpec = other)(ask)
-      call
-        .transform(outcome => settleSpec(keyId, "publicKey", known, seen, notes)(_.getSpec)(outcome))
-        .map(reply => hostedPublicKey(keyId, reply.getSpec, reply.getPublicKeyDer.toByteArray))
+      val canton = (reply: PublicKeyReply) => hostedPublicKey(keyId, reply.getSpec, reply.getPublicKeyDer.toByteArray)
+      settleSpec(keyId, "publicKey", known, seen, notes)(_.getSpec, (reply: PublicKeyReply) => { canton(reply); () })(call).map(canton)
     } else delegate.getPublicKey(keyId)
 
   override def keyExistsAndIsActive(keyId: String): Future[Unit] =
@@ -2268,11 +2310,13 @@ class FrostBackend(
             },
             (reply: KeyInfoReply) => if (reply.getExists) (OtherSpec, UnderOtherSpec) else ("NOT_FOUND", MayBeOld),
             knownEc = known.contains(EcSpec),
+            counts = (reply: KeyInfoReply) => !reply.getExists,
           )(ask)
         else clusterCallWholeRoster[KeyInfoReply]("keyInfo", keyId, !_.getExists, other)(ask)
-      call
-        .transform(outcome => settleSpec(keyId, "keyInfo", known, seen, notes)(reply => if (reply.getExists) reply.getSpec else "")(outcome))
-        .map(reply => if (!reply.getExists) throw new NoSuchElementException(s"key not found or inactive: $keyId"))
+      settleSpec(keyId, "keyInfo", known, seen, notes)(
+        (reply: KeyInfoReply) => if (reply.getExists) reply.getSpec else "",
+        (_: KeyInfoReply) => (),
+      )(call).map(reply => if (!reply.getExists) throw new NoSuchElementException(s"key not found or inactive: $keyId"))
     }
     else delegate.keyExistsAndIsActive(keyId)
 
@@ -2555,30 +2599,29 @@ object FrostBackend {
     * the key by. */
   private val OtherSpec = "OTHER_SPEC"
 
-  /** `wholeRoster` of [[FrostBackend.clusterCallWholeRoster]]: a cosigner's NOT_FOUND, its answer
-    * that the key does not exist, or its answer for the key under another spec than the driver
-    * knows it by, is its own and counts towards the bound at which it is final. */
+  /** `wholeRoster` of [[FrostBackend.clusterCallWholeRoster]]: a cosigner's NOT_FOUND, or its answer
+    * that the key does not exist, is its own and counts towards the bound at which it is final
+    * (`Some(true)`). Its answer for the key under another spec than the driver knows it by is its
+    * own too, but does not say the key is not there: it never becomes final by count
+    * (`Some(false)`). */
   private def hostedKeyIsNotThere(failure: Either[StatusRuntimeException, Rejected]): Option[Boolean] =
     failure match {
       case Left(e)         => if (e.getStatus.getCode == Status.Code.NOT_FOUND) Some(true) else None
-      case Right(rejected) => if (rejected.code == KeyAbsent || rejected.code == OtherSpec) Some(true) else None
+      case Right(rejected) =>
+        if (rejected.code == KeyAbsent) Some(true) else if (rejected.code == OtherSpec) Some(false) else None
     }
 
-  /** The specs the replies of one metadata read of a hosted key came with: how many cosigners
-    * answered with each, and the first reply of each. A read asks each cosigner at most once, and
-    * one thread runs it; the outcome is looked at after the read has ended. */
+  /** The specs the replies of one metadata read of a hosted key came with, and the first reply
+    * under each. One thread runs the read; this is looked at after the read has ended. */
   private final class SpecsSeen[R] {
-    @volatile private var seen = Map.empty[String, (Int, R)]
-    def add(spec: String, reply: R): Unit =
-      if (spec.nonEmpty) seen = seen.updated(spec, seen.get(spec).fold((1, reply)) { case (count, first) => (count + 1, first) })
+    @volatile private var seen = Map.empty[String, R]
+    def add(spec: String, reply: R): Unit = if (spec.nonEmpty && !seen.contains(spec)) seen = seen.updated(spec, reply)
 
-    /** The one spec other than `known` that at least `quorum` cosigners answered with, and its
-      * first reply. None when there is no such spec, or more than one (a roster of two). */
-    def agreedOn(quorum: Int, known: String): Option[(String, R)] =
-      seen.toList.collect { case (spec, (count, reply)) if spec != known && count >= quorum => spec -> reply } match {
-        case List(only) => Some(only)
-        case _          => None
-      }
+    /** Whether a cosigner answered under another spec than `known`. */
+    def otherThan(known: String): Boolean = seen.keysIterator.exists(_ != known)
+
+    /** The first reply under `spec`, if a cosigner gave one. */
+    def first(spec: String): Option[R] = seen.get(spec)
   }
 
   /** The failover note's reason for a group key that is not the pin. */

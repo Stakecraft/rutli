@@ -23,10 +23,9 @@ import scala.concurrent.{Await, ExecutionContext, Future}
 /** The driver remembers the spec of a hosted key it has seen, and holds a metadata read
   * (`getPublicKey`, `keyExistsAndIsActive`) to it. A hosted key id is never used twice, so the
   * spec of an id does not change, and one cosigner's reply must not change what the driver knows:
-  * a reply under another spec is that cosigner's own answer, passed over like "not found". The
-  * remembered spec changes only when the roster agrees on the other one — all but one cosigner,
-  * the bound for any answer that is a cosigner's own — and no cosigner answers under the
-  * remembered one.
+  * a reply under another spec is that cosigner's own answer, passed over like "not found". When a
+  * cosigner answers so, the driver asks every cosigner what it holds, and the remembered spec
+  * changes only when all but one of them (and at least two) hold the key under one other spec.
   *
   * Three cosigners, asked in roster order. They do no cryptography: what matters is which one is
   * asked, what Canton is told the key is, and what the audit note says.
@@ -50,14 +49,16 @@ class FrostHostedKeySpecSpec extends AnyWordSpec with Matchers {
   }
   private val RsaDer: Array[Byte] = Array[Byte](1, 2, 3)
 
-  /** One cosigner, which answers the two metadata reads as `answers` says. */
+  /** One cosigner, which answers the two metadata reads as `answers` says. `asked` counts the
+    * reads; the driver's question to every cosigner about its own copy (`KeyInfo`, local only) is
+    * answered the same way and not counted. */
   private final class Node extends SignerGrpc.SignerImplBase {
     val name: String = s"keyspec-${InProcessServerBuilder.generateName()}"
     @volatile var answers: Answer = Lacks
     val asked = new AtomicInteger
 
-    private def answer[R](obs: StreamObserver[R])(under: String => R)(lacks: => Unit): Unit = {
-      asked.incrementAndGet()
+    private def answer[R](obs: StreamObserver[R], counted: Boolean = true)(under: String => R)(lacks: => Unit): Unit = {
+      if (counted) asked.incrementAndGet()
       answers match {
         case Under(spec) =>
           obs.onNext(under(spec))
@@ -77,7 +78,7 @@ class FrostHostedKeySpecSpec extends AnyWordSpec with Matchers {
       }(obs.onError(Status.NOT_FOUND.withDescription("no such key").asRuntimeException()))
 
     override def keyInfo(req: KeyInfoRequest, obs: StreamObserver[KeyInfoReply]): Unit =
-      answer(obs)(spec => KeyInfoReply.newBuilder().setExists(true).setSpec(spec).build()) {
+      answer(obs, counted = !req.getLocalOnly)(spec => KeyInfoReply.newBuilder().setExists(true).setSpec(spec).build()) {
         obs.onNext(KeyInfoReply.newBuilder().setExists(false).build())
         obs.onCompleted()
       }
@@ -166,7 +167,7 @@ class FrostHostedKeySpecSpec extends AnyWordSpec with Matchers {
       }
     }
 
-    "take another spec when all but one cosigner answer under it and none under the known one" in {
+    "take another spec when all but one cosigner hold the key under it" in {
       for (known <- specs; r <- reads) {
         val other = Under(otherThan(known))
         val rosters: Seq[Seq[Answer]] =
@@ -221,6 +222,25 @@ class FrostHostedKeySpecSpec extends AnyWordSpec with Matchers {
         answering(nodes, Seq(Under(Rsa), Under(Ec), Under(Ec)))
         await(backend.getPublicKey(Key)).spec shouldBe EncryptionKeySpec.Rsa2048
         nodes.map(_.asked.get) shouldBe Seq(1, 0, 0)
+      }
+    }
+  }
+
+  "a spec learned from one cosigner's first answer" should {
+
+    "give way once the other cosigners are asked, also while a cosigner still answers under it" in {
+      for (r <- reads) withClue(s"${r.name}: ") {
+        withCluster(None) { (backend, nodes) =>
+          answering(nodes, Seq(Under(Rsa), Under(Ec), Under(Ec)))
+          await(backend.getPublicKey(Key)).spec shouldBe EncryptionKeySpec.Rsa2048
+          // Now the two that hold the key as EC are asked first; the third still says RSA and
+          // serves the read under the spec the driver knows. Two of three hold it as EC.
+          answering(nodes, Seq(Under(Ec), Under(Ec), Under(Rsa)))
+          val notes = new AuditNotes
+          read(backend, r, notes)
+          notes.render should include(s"hosted-spec=$Rsa→$Ec")
+          laterRead(backend, nodes, Ec) shouldBe (EncryptionKeySpec.EcP256 -> false)
+        }
       }
     }
   }
