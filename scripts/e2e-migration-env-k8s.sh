@@ -28,6 +28,7 @@ LOADGEN_POD="${E2E_LOADGEN_POD:-rutli-perf-loadgen}"
 DEALER_POD=rutli-perf-dealer
 
 _k() { kubectl -n "$NS" "$@"; }
+_kq() { kubectl -n "$NS" --request-timeout=30s "$@"; } # bounded: cleanup paths, which must end
 _pod() { printf 'rutli-cosigner-n%s-0' "$1"; }
 _in_node() {
   local n=$1
@@ -47,7 +48,7 @@ env_init() {
   DEALER=_dealer_in_pod
   DEALER_STARTED=0
   # A dealer pod left by an interrupted run (and whatever its memory held) goes before anything else.
-  _k delete pod "$DEALER_POD" --wait=true --ignore-not-found >/dev/null
+  _kq delete pod "$DEALER_POD" --wait=true --timeout=120s --ignore-not-found >/dev/null
   _k delete networkpolicy "$DEALER_POD" --ignore-not-found >/dev/null
 
   step "Cluster in namespace $NS: every cosigner healthy, the load generator ready"
@@ -100,7 +101,18 @@ env_push() { # node  local-file: copied to the pod's /tmp (memory-backed); print
   printf '%s\n' "$dest"
 }
 env_node_path() { printf '/data/%s\n' "$2"; }
-env_node_exists() { _in_node "$1" test -e "$2"; }
+# 0: there, 1: not there. Anything else (kubectl exec failed) stops the run: a check that could
+# not look must never pass as "absent".
+env_node_exists() {
+  local rc=0
+  # shellcheck disable=SC2016  # expanded by the pod's shell
+  _in_node "$1" sh -c 'if [ -e "$1" ]; then exit 10; else exit 11; fi' sh "$2" || rc=$?
+  case "$rc" in
+    10) return 0 ;;
+    11) return 1 ;;
+    *) fail "could not check $2 on node $1 (exit $rc)" ;;
+  esac
+}
 env_node_cat() {
   local n=$1
   shift
@@ -143,6 +155,7 @@ spec:
   securityContext:
     runAsNonRoot: true
     runAsUser: 10001
+    fsGroup: 10001
     seccompProfile: { type: RuntimeDefault }
   containers:
     - name: dealer
@@ -170,23 +183,34 @@ YAML
   # connection, or a refusal, means packets got through, and a probe that could not run at all is a
   # failure, never a pass. A reachable network fails unless E2E_ALLOW_UNISOLATED_DEALER=1 (a
   # throwaway cluster whose network plugin enforces no policies, with the public test key only).
-  local ip rc=0
+  # Two targets, so that one with an ingress policy of its own cannot pass for isolation: cosigner
+  # 1's pod (gRPC) and the Kubernetes API service. Inside the pod a connection exits 10, a refusal
+  # 11, a timeout 124; any other exit is kubectl's or a missing tool's, and stops the run.
+  local ip api target rc reachable=""
   ip="$(_k get pod "$(_pod 1)" -o jsonpath='{.status.podIP}')"
+  api="$(kubectl -n default get service kubernetes -o jsonpath='{.spec.clusterIP}')"
   [[ "$ip" =~ ^[0-9a-fA-F.:]+$ ]] || fail "no pod IP for cosigner 1 to probe the dealer's isolation with"
-  # shellcheck disable=SC2016  # expanded by the pod's shell
-  _k exec "$DEALER_POD" -- bash -c 'exec timeout 5 bash -c "exec 3<>/dev/tcp/$1/9101"' sh "$ip" >/dev/null 2>&1 || rc=$?
-  case "$rc" in
-    124)
-      DEALER_ISOLATED=true
-      echo "the dealer pod reaches no cosigner (a connection to $ip:9101 timed out): its NetworkPolicy holds"
-      ;;
-    0 | 1)
-      DEALER_ISOLATED=false
-      [ "${E2E_ALLOW_UNISOLATED_DEALER:-0}" = 1 ] || fail "the dealer pod reaches the network: its NetworkPolicy is not enforced here"
-      echo "WARNING: the dealer pod reaches the network: this cluster's network plugin does not enforce its NetworkPolicy"
-      ;;
-    *) fail "the dealer pod's isolation could not be checked (probe exit $rc: no bash or timeout in $E2E_DEALER_IMAGE, or kubectl exec failed)" ;;
-  esac
+  [[ "$api" =~ ^[0-9a-fA-F.:]+$ ]] || fail "no API service IP to probe the dealer's isolation with"
+  for target in "$ip/9101" "$api/443"; do
+    rc=0
+    # shellcheck disable=SC2016  # expanded by the pod's shell
+    _k exec "$DEALER_POD" -- bash -c \
+      'timeout 5 bash -c "exec 3<>/dev/tcp/$1"; r=$?; case $r in 0) exit 10 ;; 124) exit 124 ;; 126 | 127) exit $r ;; *) exit 11 ;; esac' \
+      sh "$target" 2>&1 || rc=$?
+    case "$rc" in
+      124) ;;
+      10 | 11) reachable="$reachable $target" ;;
+      *) fail "the dealer pod's isolation could not be checked (probe of $target exited $rc: kubectl exec failed, or no bash or timeout in $E2E_DEALER_IMAGE)" ;;
+    esac
+  done
+  if [ -z "$reachable" ]; then
+    DEALER_ISOLATED=true
+    echo "the dealer pod reaches neither cosigner 1 nor the API service (both timed out): its NetworkPolicy holds"
+  else
+    DEALER_ISOLATED=false
+    [ "${E2E_ALLOW_UNISOLATED_DEALER:-0}" = 1 ] || fail "the dealer pod reaches$reachable: its NetworkPolicy is not enforced here"
+    echo "WARNING: the dealer pod reaches$reachable: this cluster's network plugin does not enforce its NetworkPolicy"
+  fi
   export DEALER_ISOLATED
 }
 
@@ -247,12 +271,12 @@ _dealer_in_pod() {
 # Delete the dealer pod and wait; its deny-all NetworkPolicy goes only once the pod is gone, never
 # while it might still hold key material. Returns non-zero if the pod is still there.
 _dealer_down() {
-  _k delete pod "$DEALER_POD" --wait=true --timeout=120s --ignore-not-found >/dev/null 2>&1 || true
+  _kq delete pod "$DEALER_POD" --wait=true --timeout=120s --ignore-not-found >/dev/null 2>&1 || true
   # Gone only when the API says so: an error of `get` keeps the policy.
   local left
-  left="$(_k get pod "$DEALER_POD" --ignore-not-found -o name 2>/dev/null)" || return 1
+  left="$(_kq get pod "$DEALER_POD" --ignore-not-found -o name 2>/dev/null)" || return 1
   [ -z "$left" ] || return 1
-  _k delete networkpolicy "$DEALER_POD" --ignore-not-found >/dev/null 2>&1 || true
+  _kq delete networkpolicy "$DEALER_POD" --ignore-not-found >/dev/null 2>&1 || true
 }
 
 env_destroy_dealer() { # Step 8: the dealer's "host" and its memory-backed work dir go with the pod
@@ -273,28 +297,31 @@ env_destroy_old_db() { _no_canton; }
 
 env_cleanup() {
   local rc=$1 i
+  # The local work dir (the export, the dealer's output) first: nothing below needs it, and a cluster
+  # call that hangs must not keep it on disk.
+  if [ -n "${WORK:-}" ]; then
+    if [ "${KEEP:-0}" = 1 ]; then echo "work dir kept: $WORK"; else shred_local "$WORK"; fi
+  fi
   _dealer_down || echo "WARNING: the dealer pod $DEALER_POD is still there (its NetworkPolicy kept); delete it by hand" >&2
   # A ceremony that failed before every node installed its share leaves a sealed one-time recipient
   # secret on those nodes: abort-import removes it (never an installed share without its flag).
   if [ "$rc" -ne 0 ] && [ -n "${KEY_ID:-}" ] && [ -n "${CEREMONY:-}" ]; then
     for i in 1 2 3; do
-      env_cosigner "$i" abort-import --key-id "$KEY_ID" --ceremony-id "$CEREMONY" >/dev/null 2>&1 || true
+      _kq exec "$(_pod "$i")" -c cosigner -- env RUST_LOG=off rutli-cosigner --config "/config/cosigner-$i.json" \
+        abort-import --key-id "$KEY_ID" --ceremony-id "$CEREMONY" >/dev/null 2>&1 || true
     done
   fi
   # Ceremony files in the pods' memory-backed /tmp: requests, bundles, the founding backups (Step 8
   # checked them; the suite keeps no copy), the client configs.
   for i in 1 2 3; do
     # shellcheck disable=SC2016  # expanded by the pod's shell
-    _in_node "$i" sh -c 'rm -rf /tmp/r[0-9].json /tmp/share-*.json /tmp/backup-founding-node*; true' >/dev/null 2>&1 || true
+    _kq exec "$(_pod "$i")" -c cosigner -- sh -c 'rm -rf /tmp/r[0-9].json /tmp/share-*.json /tmp/backup-founding-node*; true' >/dev/null 2>&1 || true
   done
-  _k exec "$LOADGEN_POD" -- sh -c 'rm -f /tmp/e2e-operator.json /tmp/e2e-refresher.json' >/dev/null 2>&1 || true
+  _kq exec "$LOADGEN_POD" -- sh -c 'rm -f /tmp/e2e-operator.json /tmp/e2e-refresher.json' >/dev/null 2>&1 || true
   if [ "$rc" -ne 0 ]; then
     for i in 1 2 3; do
       echo "--- cosigner $i log (tail) ---"
-      _k logs "$(_pod "$i")" -c cosigner --tail=30 2>/dev/null || true
+      _kq logs "$(_pod "$i")" -c cosigner --tail=30 2>/dev/null || true
     done
-  fi
-  if [ -n "${WORK:-}" ]; then
-    if [ "${KEEP:-0}" = 1 ]; then echo "work dir kept: $WORK"; else shred_local "$WORK"; fi
   fi
 }

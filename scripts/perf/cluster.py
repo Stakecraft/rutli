@@ -295,30 +295,39 @@ class Suite(base.Runner):
             try:
                 stdout, stderr = proc.communicate(timeout=1800)
                 out = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
-            except subprocess.TimeoutExpired:
-                # SIGTERM first: the script's EXIT trap removes the dealer pod and shreds its work dir.
-                # To the whole group: a kubectl in flight stops too, and bash then runs its trap.
-                os.killpg(proc.pid, signal.SIGTERM)
+            except BaseException as e:
+                # A timeout, Ctrl-C or any other error here: stop the script before the pod goes.
+                # SIGTERM to its whole group first (a kubectl in flight stops too); bash then runs its
+                # EXIT trap, which shreds its work dir and removes the dealer pod. SIGKILL after 5 min.
                 try:
+                    os.killpg(proc.pid, signal.SIGTERM)
                     proc.communicate(timeout=300)
                 except subprocess.TimeoutExpired:
                     os.killpg(proc.pid, signal.SIGKILL)
                     proc.communicate()
+                except ProcessLookupError:
+                    pass
+                if not isinstance(e, subprocess.TimeoutExpired):
+                    raise
                 return [{"failed": "the split ceremony on the cluster did not finish within 30 minutes"}]
             finally:
                 # Whatever happened to the script (a timeout kills it before its own cleanup), the
                 # dealer pod and what its memory holds go now, not at its 30-minute deadline.
-                self.cluster.kubectl("delete", "pod", "rutli-perf-dealer", "--wait=true", "--timeout=120s",
-                                     "--ignore-not-found", timeout=180, check=False)
-                # Its deny-all NetworkPolicy goes only once the API confirms the pod is gone (an
-                # error of `get` keeps the policy).
-                left = self.cluster.kubectl("get", "pod", "rutli-perf-dealer", "--ignore-not-found", "-o", "name",
-                                            timeout=60, check=False)
-                if left.returncode == 0 and not left.stdout.strip():
+                try:
+                    self.cluster.kubectl("delete", "pod", "rutli-perf-dealer", "--wait=true", "--timeout=120s",
+                                         "--ignore-not-found", timeout=180, check=False)
+                    # Its deny-all NetworkPolicy goes only once the API confirms the pod is gone (an
+                    # error of `get` keeps the policy).
+                    left = self.cluster.kubectl("get", "pod", "rutli-perf-dealer", "--ignore-not-found", "-o",
+                                                "name", timeout=60, check=False)
+                    gone = left.returncode == 0 and not left.stdout.strip()
+                except subprocess.TimeoutExpired:
+                    gone = False
+                if gone:
                     self.cluster.kubectl("delete", "networkpolicy", "rutli-perf-dealer", "--ignore-not-found",
                                          timeout=60, check=False)
                 else:
-                    log("  WARNING: the dealer pod is still there; its NetworkPolicy is kept. Delete it by hand.")
+                    log("  WARNING: the dealer pod may still be there; its NetworkPolicy is kept. Delete it by hand.")
             stage.update({"seconds": round(time.time() - started, 1), "dealer_image": image,
                           "steps": [line[4:] for line in out.stdout.splitlines() if line.startswith("==> ")]})
             for line in out.stdout.splitlines():

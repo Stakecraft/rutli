@@ -739,6 +739,7 @@ main() {
   if [ "${E2E_STAGES:-all}" = ceremony ]; then
     step_2_from_vectors
     step_3_split_ceremony
+    unset EXPORT_PW EXPORT_PW_WRONG # only Step 3's dealer needed them
     step_8_destroy_ceremony
     if [ -n "${E2E_RESULT:-}" ]; then
       jq -n --arg key_id "$KEY_ID" --arg fp "$NS_FP" --arg group "$GROUP" --arg ceremony "$CEREMONY" \

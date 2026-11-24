@@ -92,8 +92,10 @@ jobs:
             exit 1
           fi
           echo "previous release v${tag} = ${expected} (the release image's commit and the tag agree)" | tee -a "$GITHUB_STEP_SUMMARY"
-          docker build -f- -t "rutli-dealer:$tag" "${url}#${expected}:frost" <frost/Dockerfile.dealer
-          echo "DEALER_IMAGE=rutli-dealer:$tag" >>"$GITHUB_ENV"
+          # A tag of this run only: no image cached under a reused name can stand in for it.
+          image="rutli-dealer:${tag}-${expected:0:12}-${GITHUB_RUN_ID}"
+          docker build -f- -t "$image" "${url}#${expected}:frost" <frost/Dockerfile.dealer
+          echo "DEALER_IMAGE=$image" >>"$GITHUB_ENV"
 
       - name: Cluster
         run: |
