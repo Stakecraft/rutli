@@ -56,17 +56,17 @@ fetch() { # name version url dest expected-sha256-or-empty
   local cached="" rc=0
   if [ -n "${GEN_GRPC_CACHE_DIR:-}" ] && [ -n "$5" ]; then
     cached="$GEN_GRPC_CACHE_DIR/$1-$2-$CLASSIFIER-$5"
-    if [ -f "$cached" ]; then
-      if sha_ok "$cached" "$5"; then
-        cp "$cached" "$4"
+    # Copy first, then check the private copy: that is the file that runs.
+    if [ -f "$cached" ] && cp "$cached" "$4" 2>/dev/null; then
+      if sha_ok "$4" "$5"; then
         echo "$1 $2: from the cache (sha256 ${5:0:12})"
         return 0
       fi
       echo "$1 $2: cached copy does not match, downloading again"
-      rm -f "$cached"
+      rm -f "$cached" "$4" || true
     fi
   fi
-  curl -fsSL --proto '=https' --retry 5 --retry-delay 10 --retry-max-time 180 --max-time 120 -o "$4" "$3" || rc=$?
+  curl -fsSL --proto '=https' --retry 5 --retry-delay 10 --retry-max-time 150 --max-time 60 -o "$4" "$3" || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "::error::could not download $1 from Maven Central (curl exit ${rc}; 22 is an HTTP error such as 429, rate limited): this is not a difference in the stubs, re-run the job"
     exit 3

@@ -50,7 +50,8 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/rutli-protoc
-          key: protoc-${{ runner.os }}-${{ runner.arch }}-${{ env.PROTOC_SHA256 }}-${{ env.PROTOC_GEN_GRPC_JAVA_SHA256 }}
+          # build.sbt holds the versions: a version change starts a new cache.
+          key: protoc-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.sbt') }}-${{ env.PROTOC_SHA256 }}-${{ env.PROTOC_GEN_GRPC_JAVA_SHA256 }}
       - name: Regenerate and compare
         run: |
           set -euo pipefail
@@ -66,10 +67,14 @@ jobs:
             echo "::error::git diff failed (exit ${rc}): the check could not compare"
             exit 1
           fi
-          untracked="$(git status --porcelain -- driver/src/main/java)"
-          if [ -n "$untracked" ]; then
-            git status --short -- driver/src/main/java
-            echo "::error::the generator added or removed files under driver/src/main/java: commit them"
+          # New files, ignored ones included, whatever the git configuration says about untracked files.
+          if ! extra="$(git ls-files --others -- driver/src/main/java)"; then
+            echo "::error::git ls-files failed: the check could not compare"
+            exit 1
+          fi
+          if [ -n "$extra" ]; then
+            printf '%s\n' "$extra"
+            echo "::error::the generator added files under driver/src/main/java: commit them"
             exit 1
           fi
           echo "OK: generated stubs are current"
