@@ -15,8 +15,8 @@ profile: production
 replicaCount: 3
 threshold: 2
 # Peer round deadlines of a signing session (chart values: signRound1Ms 500..5000, default 2000;
-# signRound2Ms 1000..9000, default 5000). The defaults are recommended; the production profile accepts any in-bounds value. Set only after every cosigner
-# runs a release that knows the section.
+# signRound2Ms 1000..9000, default 5000). The defaults are recommended; the production profile
+# accepts any in-bounds value. Set only after every cosigner runs a release that knows the section.
 peerDeadlines: {}
 signerAllowlist: [driver]
 operatorAllowlist: [operator]
