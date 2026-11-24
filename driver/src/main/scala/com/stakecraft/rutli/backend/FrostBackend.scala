@@ -577,8 +577,8 @@ class FrostBackend(
 
   /** [[demote]] with the endpoint that takes the lead named, for an endpoint whose demotion was held
     * back (it said it lacks the key): `to` is the endpoint that served the call, or the one the
-    * call ended at before every endpoint was asked. The next endpoint in the ring is not known to
-    * be good then: it may be one that failed later in the same walk. */
+    * call ended at. The next endpoint in the ring is not known to be good then: it may be one that
+    * failed later in the same walk. */
   private def demote(i: Int, to: Int): Unit = {
     // Recorded even when another call already moved the lead: it is still evidence that this node
     // failed just now, and it only delays the first endpoint's recovery. Before the lead moves, so
@@ -665,17 +665,14 @@ class FrostBackend(
     * last endpoint's error is thrown, as before. A failure for which `retryOn` does not hold is
     * thrown at once either way.
     *
-    * `heldBack` keeps the endpoints whose demotion `lacksKey` (next paragraph) holds back, for one
-    * driver call. They lose the lead when an endpoint serves the call, to that endpoint. They also
-    * lose it when the call ends before every endpoint was asked — the request budget is spent, or a
-    * later endpoint's refusal ends the call and costs that endpoint the lead — to the endpoint the
-    * call ended at: the endpoints not asked may be able to serve, and the lead must not stay
-    * behind on one that cannot. They keep it when every endpoint was asked and none served, and
-    * when a refusal that leaves its endpoint the lead ends the call.
-    *
     * `lacksKey` names the failures that say only "I do not have this key" (NOT_FOUND). Such an
-    * endpoint is not at fault unless the cluster has the key: it is held back, and loses the lead
-    * when a later endpoint serves the call, not when the call ends with the roster's "not found" or
+    * endpoint is not at fault unless the cluster has the key, so its demotion is held back while
+    * the walk goes on. It loses the lead when a later endpoint serves the call, to that endpoint.
+    * It also loses it when the call ends before the walk does — the request budget is spent, or a
+    * later endpoint's failure is thrown at once — to the endpoint the call ended at: that is where
+    * the lead would be had it been demoted as it failed. The endpoints not asked may be able to
+    * serve, and the lead must not stay behind on one that cannot. It keeps the lead only when the
+    * walk fails over off the last endpoint, that is when the call ends with the roster's "not found" or
     * with the retryable [[unconfirmed]]. Otherwise a lookup of a key that exists nowhere would
     * take the lead from every endpoint, and with it the sign rotation ([[signStart]]) for
     * [[leaderRecovery]]. A failure it does not name costs the lead at once, as `demoteOn` says. */
@@ -694,9 +691,6 @@ class FrostBackend(
       budgetEnd: Long,
       wholeRoster: Option[Either[StatusRuntimeException, Rejected] => Option[Boolean]] = None,
       lacksKey: Either[StatusRuntimeException, Rejected] => Boolean = (_: Either[StatusRuntimeException, Rejected]) => false,
-      // The endpoints this driver call holds back. A caller that runs this loop more than once for
-      // one call passes the same one, like `budgetEnd`.
-      heldBack: HeldBack = new HeldBack,
   )(op: SignerGrpc.SignerBlockingStub => A): A = {
     val n = channels.size
     // One attempt in flight at a time: the next cosigner is asked only once this attempt has failed
@@ -707,9 +701,10 @@ class FrostBackend(
     @tailrec def attempt(k: Int, lastReason: String, seen: Seen): A = {
       if (k > 0 && left < MinAttempt.toNanos) {
         // The call ends before this endpoint was asked. The endpoints held back lose the lead to
-        // it, so the next call starts past them: where it started before demotions were held back.
+        // it, so the next call starts past them: where it would start had each been demoted as it
+        // failed.
         val notAsked = (from + k) % n
-        heldBack.take().foreach(j => demote(j, notAsked))
+        seen.lackedKeyAt.reverse.foreach(j => demote(j, notAsked))
         logger.warn(s"FROST: $what: request-timeout $requestTimeout spent after $k cosigner(s); last: $lastReason")
         notes.add("request-timeout=spent")
         throw Status.DEADLINE_EXCEEDED
@@ -734,7 +729,7 @@ class FrostBackend(
           // The cluster has the key: the endpoints that said they lack it lose the lead now, to
           // the endpoint that served — not to the next one in the ring, which may be one that
           // failed later in this walk.
-          heldBack.take().foreach(j => demote(j, i))
+          seen.lackedKeyAt.reverse.foreach(j => demote(j, i))
           preferred.compareAndSet(observed, i)
           answer
         case Left(failure) =>
@@ -771,21 +766,21 @@ class FrostBackend(
           }
           // Held back only while the walk goes on: a failure that ends the call costs the lead now.
           val held: Boolean = deferred && retry
-          if (held) heldBack.add(i)
-          // A refusal that ends the call before every endpoint was asked, and costs this endpoint
-          // the lead: the endpoints held back lose it too, to this one, which passes it on in the
-          // next line. The lead then is where it was before demotions were held back.
-          if (!retry && loseLead && k + 1 < n) heldBack.take().foreach(j => demote(j, i))
+          val seenNow: Seen = if (held) counted.copy(lackedKeyAt = i :: counted.lackedKeyAt) else counted
+          // A failure that is thrown at once ends the call here. The endpoints held back lose the
+          // lead to this endpoint, which keeps it or passes it on in the next line: the lead then
+          // is where it would be had each been demoted as it failed.
+          if (!retry) seen.lackedKeyAt.reverse.foreach(j => demote(j, i))
           if (loseLead && !held) demote(i)
           if (!retry) throw error
           if (k + 1 < n) {
             val next = endpoints((i + 1) % n)
             logger.warn(s"FROST: $what via ${endpoints(i)} failed ($reason); failing over to $next")
             notes.add(s"failover=${endpoints(i)}→$next reason=$code")
-            attempt(k + 1, reason, counted)
+            attempt(k + 1, reason, seenNow)
           } else {
             logger.warn(s"FROST: $what via ${endpoints(i)} failed ($reason); no cosigner left to try")
-            throw (if (wholeRoster.isDefined) rosterVerdict(what, notes, counted, error) else error)
+            throw (if (wholeRoster.isDefined) rosterVerdict(what, notes, seenNow, error) else error)
           }
       }
     }
@@ -1746,9 +1741,6 @@ class FrostBackend(
             val lastTried = new AtomicInteger(-1)
             // One budget for the whole driver call, the cluster-id relearn included.
             val budgetEnd = System.nanoTime() + requestTimeout.toNanos
-            // And one record of the leaders held back: a leader that could not sign before the
-            // cluster id was learned again still loses the lead when the retry is signed.
-            val heldBack = new HeldBack
             def attempt(relearned: Boolean, from: Option[Int]): SignReply = {
               val req = SignRequest.newBuilder().setKeyId(keyId).setMessage(ByteString.copyFrom(data))
               val intent = signingIntent(keyId, data, requestId, approval, notes)
@@ -1776,11 +1768,10 @@ class FrostBackend(
                   budgetEnd,
                   // A leader's own "cannot sign" is not the cluster's while a cosigner was unreachable.
                   Some(signAnswerIsLeaderLocal _),
-                  // And it costs that leader the lead only when another leader then signs: when
-                  // every leader answers so (the shares are gone, a ceremony holds the key on all of
-                  // them), none is at fault and none leaves the rotation.
+                  // And it does not cost a leader the lead when every leader was asked and none
+                  // signed: when all answer so (the shares are gone, a ceremony holds the key on all
+                  // of them), none is at fault and none leaves the rotation.
                   signLeaderCannotSignNow _,
-                  heldBack,
                 )(_.sign(built))
               catch {
                 // A cosigner says the intent names another cluster: the learned id is wrong (one
@@ -2395,11 +2386,12 @@ object FrostBackend {
     * gone, or one that arrives while a ceremony holds the key everywhere, would take every
     * cosigner out of the sign rotation for [[leaderRecovery]], for every key.
     *
-    * Such a leader also loses the lead when the sign ends before every leader was asked: the
-    * request budget is spent, or a later leader refuses the sign for good and loses the lead for
-    * it. The leaders not asked may be able to sign, and the next sign has to reach them. A sign
-    * that learns the cluster id again is one sign: a leader held back before the retry loses the
-    * lead when the retry is signed.
+    * Such a leader also loses the lead when the sign ends before the walk does: the request budget
+    * is spent, or a later leader refuses the sign at once (also a cluster-id refusal, after which
+    * the sign is tried again from the refusing leader). The lead then is where it would be had
+    * the leader been demoted as it failed, so the next sign reaches the leaders that were not
+    * asked. A leader that answered so keeps its standing in one case only: the sign failed over
+    * off the last leader, so every leader was asked and none signed.
     *
     * A signature that does not verify is not in this set: a leader that returns one is demoted at
     * once, whether or not another leader signs. So are INTERNAL, UNKNOWN and an unreachable leader. */
@@ -2416,7 +2408,8 @@ object FrostBackend {
     * cosigner stop every sign by answering with a refusal while it leads, from process start when
     * it is endpoint 0.
     *
-    * A leader's own "cannot sign now" loses it the lead only once another leader has signed
+    * A leader's own "cannot sign now" is held back: it costs the lead once another leader has
+    * signed, or when the sign ends early, and not when every leader was asked and none signed
     * ([[signLeaderCannotSignNow]]).
     *
     * Not demoted:
@@ -2474,23 +2467,9 @@ object FrostBackend {
       lastOwn: Option[(String, Exception)] = None,
       unreachable: Option[(String, StatusRuntimeException)] = None,
       other: Option[Exception] = None,
+      // Endpoint indices whose demotion is held back (they said they lack the key), latest first.
+      lackedKeyAt: List[Int] = Nil,
   )
-
-  /** The endpoints whose demotion one driver call holds back (`lacksKey` of `withCheckedFailover`,
-    * which says when they lose the lead after all). One per driver call: a caller that runs the
-    * loop more than once for one call (a sign that learns the cluster id again) passes the same
-    * one to each run. Used only by the thread that runs the call. */
-  private final class HeldBack {
-    private var at: List[Int] = Nil
-    def add(i: Int): Unit = { at = i :: at }
-
-    /** What is held, in the order asked and each endpoint once; nothing is held afterwards. */
-    def take(): List[Int] = {
-      val all = at.reverse.distinct
-      at = Nil
-      all
-    }
-  }
 
   /** An answer the driver checked and refused to use (see `withCheckedFailover`): `code` names it
     * in the `failover=` note, `error` is what the call fails with when no cosigner is left. */

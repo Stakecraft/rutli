@@ -26,8 +26,9 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   * `frost.sign-leader = rotate` a cosigner that lost the lead is not a sign start for
   * `leader-recovery`, for any key. A leader that returns a signature the pinned key does not
   * verify, fails internally or cannot be reached still loses the lead at once. And a leader that
-  * answered from its own state loses the lead when the sign ends before every leader was asked:
-  * the next sign has to reach the leaders that were not.
+  * answered from its own state loses the lead when the sign ends before every leader was asked
+  * (the request budget is spent, a later leader's refusal is returned at once): the next sign must
+  * not start at it again.
   *
   * Three cosigners. What the tests look at is where the signs start once every cosigner signs
   * again: untouched, each starts every third sign.
@@ -41,7 +42,7 @@ class FrostSignRefusalLeadSpec extends AnyWordSpec with Matchers {
   private val FrostKey = "frost-ns"
 
   /** How long a `silent` cosigner holds a sign call: longer than any deadline used here. */
-  private val SilentFor: FiniteDuration = 1500.millis
+  private val SilentFor: FiniteDuration = 2500.millis
   private val Digest: Array[Byte] = Array.fill(34)(7.toByte)
 
   private val Group: KeyPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
@@ -235,10 +236,11 @@ class FrostSignRefusalLeadSpec extends AnyWordSpec with Matchers {
   }
 
   /** The first leader answers from its own state at once, the second does not answer, and the
-    * request budget is spent before the third is asked. Then every cosigner signs again, and
-    * `after` looks at where the signs start. */
+    * request budget is spent before the third is asked: the second leader's deadline leaves less
+    * of the budget than an attempt needs. Then every cosigner signs again, and `after` looks at
+    * where the signs start. */
   private def afterASpentBudget(rotate: Boolean)(after: (FrostBackend, IndexedSeq[Node]) => Assertion): Assertion =
-    withCluster(rotate, threaded = true, budget = 1.second, signAttempt = 980.millis) { (backend, nodes) =>
+    withCluster(rotate, threaded = true, budget = 2.seconds, signAttempt = 1980.millis) { (backend, nodes) =>
       nodes(0).refuses = Some(ownState.head)
       nodes(1).silent = true
       val notes = new AuditNotes
@@ -260,6 +262,22 @@ class FrostSignRefusalLeadSpec extends AnyWordSpec with Matchers {
 
     "not be a sign start until leader-recovery has passed, like the leader that did not answer" in {
       afterASpentBudget(rotate = true)((backend, nodes) => starts(backend, nodes, 6) shouldBe Seq(0, 0, 6))
+    }
+
+    "lose the lead to a later leader whose refusal is returned at once, and that leader keeps it" in {
+      // No intent here, so the refusal is that leader's alone to make: the sign is not moved on.
+      withCluster(rotate = false) { (backend, nodes) =>
+        nodes(0).refuses = Some(ownState.head)
+        nodes(1).refuses = Some(Status.PERMISSION_DENIED.withDescription("signer not allowed"))
+        intercept[StatusRuntimeException](sign(backend)).getStatus.getCode shouldBe Status.Code.PERMISSION_DENIED
+        nodes.map(_.signs.get) shouldBe Seq(1, 1, 0)
+        // The next sign starts at the leader that refused, not again at the one that could not sign.
+        intercept[StatusRuntimeException](sign(backend)).getStatus.getCode shouldBe Status.Code.PERMISSION_DENIED
+        nodes.map(_.signs.get) shouldBe Seq(1, 2, 0)
+
+        nodes.foreach(_.heal())
+        starts(backend, nodes, 3) shouldBe Seq(0, 3, 0)
+      }
     }
   }
 
