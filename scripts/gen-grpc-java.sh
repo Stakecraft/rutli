@@ -44,13 +44,38 @@ CENTRAL="https://repo1.maven.org/maven2"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# GEN_GRPC_CACHE_DIR (optional, CI sets it): keep the verified binaries there and reuse them, so most
+# runs do not download at all. A cached file is checked against the expected sha256 like a fresh one.
+# A download that still fails (Maven Central rate-limits shared runner addresses with HTTP 429) exits
+# with 3 and says so: that is not a difference in the stubs.
+fetch() { # name url dest expected-sha256-or-empty
+  local cached="" rc=0
+  if [ -n "${GEN_GRPC_CACHE_DIR:-}" ] && [ -n "$4" ]; then
+    cached="$GEN_GRPC_CACHE_DIR/$4"
+    if [ -f "$cached" ]; then
+      cp "$cached" "$3"
+      verify "$3" "$4"
+      echo "$1: from the cache (sha256 ${4:0:12})"
+      return 0
+    fi
+  fi
+  curl -fsSL --proto '=https' --retry 5 --retry-delay 10 --retry-max-time 180 -o "$3" "$2" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::could not download $1 from Maven Central (curl exit ${rc}; 22 is an HTTP error such as 429, rate limited): this is not a difference in the stubs, re-run the job"
+    exit 3
+  fi
+  verify "$3" "$4"
+  if [ -n "$cached" ]; then
+    mkdir -p "$GEN_GRPC_CACHE_DIR"
+    cp "$3" "$cached"
+  fi
+}
+
 echo "Fetching protoc $PROTOBUF_VERSION and protoc-gen-grpc-java $GRPC_VERSION ($CLASSIFIER)..."
-curl -fsSL --proto '=https' -o "$TMP/protoc" \
-  "$CENTRAL/com/google/protobuf/protoc/$PROTOBUF_VERSION/protoc-$PROTOBUF_VERSION-$CLASSIFIER.exe"
-curl -fsSL --proto '=https' -o "$TMP/grpc" \
-  "$CENTRAL/io/grpc/protoc-gen-grpc-java/$GRPC_VERSION/protoc-gen-grpc-java-$GRPC_VERSION-$CLASSIFIER.exe"
-verify "$TMP/protoc" "${PROTOC_SHA256:-}"
-verify "$TMP/grpc" "${PROTOC_GEN_GRPC_JAVA_SHA256:-}"
+fetch protoc "$CENTRAL/com/google/protobuf/protoc/$PROTOBUF_VERSION/protoc-$PROTOBUF_VERSION-$CLASSIFIER.exe" \
+  "$TMP/protoc" "${PROTOC_SHA256:-}"
+fetch protoc-gen-grpc-java "$CENTRAL/io/grpc/protoc-gen-grpc-java/$GRPC_VERSION/protoc-gen-grpc-java-$GRPC_VERSION-$CLASSIFIER.exe" \
+  "$TMP/grpc" "${PROTOC_GEN_GRPC_JAVA_SHA256:-}"
 chmod +x "$TMP/protoc" "$TMP/grpc"
 
 OUT="$REPO/driver/src/main/java"
