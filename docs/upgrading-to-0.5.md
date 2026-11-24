@@ -1,7 +1,8 @@
 # Upgrading a cluster to 0.5.0
 
 For operators of a cluster that runs 0.4.0 or 0.4.1. 0.5.0 is not released yet: this page describes
-`main`, and it will be re-checked against the release candidate and the release. It gathers the
+the first release candidate, `0.5.0-rc.1`, and it will be re-checked against each later candidate
+and the release. It gathers the
 upgrade notes that the changelog gives per change, in the order to do them. Each step names the page
 with the detail.
 
@@ -18,7 +19,16 @@ this order. Nothing here changes the key files or the wire format; a cluster wit
   A refresh in the next days would make backups of the older epoch unable to restore that node (they stay sensitive)
   ([disaster-recovery.md](disaster-recovery.md), "Backups and refreshes").
 - Check that no ceremony is running (`rutli_ceremonies_staged` is 0 on every node).
-- Read [CHANGELOG.md](../CHANGELOG.md), `## [Unreleased]`. This page lists what you must do, not what
+- **Order: the driver first, then the cosigners one at a time** (steps 1 and 2 change and check
+  the config only; the driver and the cosigners follow in step 6). A 0.5.0 driver works against 0.4.x
+  cosigners; a 0.4.x driver signs no generate intent, which a 0.5.0 cosigner requires to create a
+  hosted key.
+- **Do not create or delete hosted keys while the cluster runs mixed versions** (onboarding a new
+  node, rotating an encryption key). From the driver upgrade until every cosigner runs 0.5.0,
+  pause both. Serving keys that exist keeps working. The cluster does not enforce this fully; it
+  is an operating rule. Detail: [hosted-keys.md](hosted-keys.md), "Upgrading from 0.4.0 (mixed
+  versions)".
+- Read [CHANGELOG.md](../CHANGELOG.md), the `## [0.5.0-rc.1]` section (later `## [0.5.0]`). This page lists what you must do, not what
   changed.
 
 ## 1. Pin every cosigner's TLS key, while the nodes still run 0.4.x
@@ -125,7 +135,9 @@ Both end with the upgrade. A Sign that runs out of attempts now carries the
 
 ## 6. Upgrade one cosigner at a time
 
-Moving the image is the step that needs care. Per node, wait for the gate before the next:
+Moving the image is the step that needs care. First the driver (a participant restart): signing,
+DKG and decryption are unchanged against 0.4.x cosigners, and creating hosted keys is refused until
+the cosigners are upgraded. Then, per cosigner, wait for the gate before the next:
 
 1. Upgrade one node to 0.5.0. It checks that every roster entry has a pin and that its own key is in
    its own entry. The log shows `peer N TLS key pins` for every node.
@@ -161,6 +173,10 @@ nodes still pin its unchanged key. With the Helm chart, roll back the chart and 
 
 - Every node: `check-config` exits 0 under `production`; `rutli_peer_pins_unpinned` is 0.
 - `verify-key` for every key reports one epoch and no stale node.
+- Expect `RutliKeyEpochUnproven` for every key whose key file is more than three days old, until
+  you prove its epoch: `verify-key --sign-test --json` from a workstation, then `keyfile prove` on
+  every node ([ceremonies.md](ceremonies.md), "Proving an epoch"). Do it after the first refresh
+  on 0.5.0 too.
 - Then, in your own time: key-file v2 and `accept_v1: false`, and per-node seal bundles if you still
   share one seal secret ([runbook-per-node-seal.md](runbook-per-node-seal.md)). Both are on the
   production list.

@@ -6,8 +6,9 @@ secret a node holds. Treat every change as security-critical.
 ## Status
 
 - **Pre-1.0 and not yet externally audited.** The latest release is `0.4.1` (`0.4.0` with
-  security fixes). An independent third-party audit will review `0.5.0`, whose code freeze is
-  planned for mid-December 2026; its report will be published in this repository.
+  security fixes). The latest release candidate is `0.5.0-rc.1`. An independent third-party audit
+  will review `0.5.0`, whose code freeze is planned for mid-December 2026; its report will be
+  published in this repository.
 - **Internal security review, October 2026.** Two independent reviews of `0.4.0-rc.1`. Every
   critical and high finding is fixed in `0.4.0-rc.2` and `0.4.0-rc.3`. The findings and their status
   are in [docs/security/internal-review-2026-10.md](docs/security/internal-review-2026-10.md).
@@ -16,13 +17,14 @@ secret a node holds. Treat every change as security-critical.
 
 ## Supported versions
 
-Until 1.0, only the latest release or release candidate receives security fixes. A fix for the
+Until 1.0, the latest release and the latest release candidate receive security fixes. A fix for the
 latest release can ship as a patch release from its release branch, as `0.4.1` did; older releases
 get none. Upgrade to the latest release.
 
 | Version | Supported |
 |---|---|
-| `0.4.1` (latest) | Yes |
+| `0.5.0-rc.1` (latest candidate) | Yes |
+| `0.4.1` (latest release) | Yes |
 | `0.4.0` and older | No |
 
 ## Reporting a vulnerability

@@ -21,7 +21,13 @@
 # (`rutli-cosigner tls spki cosigner<i>.crt`, CHANGELOG, 0.5.0 upgrade note) and add them to the
 # exported values before the upgrade; CI renders this file with placeholder pins
 # (ci/peer-pins-values.yaml).
+#
+# profile: the chart's default is production, which needs the perNode topology (one seal secret per
+# node). The legacy topology shares one seal secret, so it runs the lab profile until the soak moves
+# to perNode; `rutli-cosigner check-config` lists what the production profile would still refuse
+# (docs/production-profile.md).
 topology: legacy
+profile: lab
 persistence:
   storageClassName: hcloud-volumes
   accessModes:

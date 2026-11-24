@@ -38,7 +38,7 @@ Status: **pre-production, not yet audited**. Use this as the engagement brief an
 - [ ] Release verification: the image signature and attestation (`SECURITY.md`, "Verify the image"), from 0.5.0
 - [ ] Soak harness + runbook: `deploy/soak/`, `docs/testnet-soak.md`
 - [ ] Hardening history: `CHANGELOG.md` security sections, `[0.2.0]` and `[0.4.0-rc.1]` to
-  `[0.4.0-rc.6]`, `[0.4.0]`, `[0.4.1]` and `[Unreleased]` (the hardening for 0.5.0); `docs/security/internal-review-2026-10.md`, `docs/security/threat-model.md`
+  `[0.4.0-rc.6]`, `[0.4.0]`, `[0.4.1]` and `[0.5.0-rc.1]` (the hardening for 0.5.0); `docs/security/internal-review-2026-10.md`, `docs/security/threat-model.md`
 - [ ] Ceremony / DR / approval runbooks: `docs/key-ceremony.md`, `docs/ceremonies.md`, `docs/split-ceremony.md`, `docs/disaster-recovery.md`, `docs/approval-quorum.md`
 
 ## Threat-model bullets for the auditor
