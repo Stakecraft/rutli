@@ -95,10 +95,12 @@ Backends, added over the phases:
   ([`deploy/devnet/canton-hosted.conf`](../deploy/devnet/canton-hosted.conf)). The driver asks the
   cluster for its `Capabilities` at startup rather than hardcoding the spec list. There is
   deliberately **no automatic fallback to the delegate on `NOT_FOUND`** — that would silently create
-  split custody and could reproduce the incident class. Endpoint failover never triggers on
-  `NOT_FOUND` either: it covers a node that is down (`UNAVAILABLE` / `DEADLINE_EXCEEDED`) and, for
-  operations safe to re-issue (sign, reads, decrypt, symmetric crypto), a leader that answers
-  `INTERNAL` / `UNKNOWN`; read-repair is what makes `NOT_FOUND` authoritative.
+  split custody and could reproduce the incident class. Endpoint failover covers a node that is down
+  (`UNAVAILABLE` / `DEADLINE_EXCEEDED`) and, for operations safe to re-issue (sign, reads, decrypt,
+  symmetric crypto), a leader that answers `INTERNAL` / `UNKNOWN`. Since 0.5.0 one cosigner's
+  `NOT_FOUND` for a hosted key is confirmed with the other cosigners as well: read-repair makes it
+  right in the normal case, but the driver does not rest a final "no such key" on one node
+  ([hosted-keys.md](hosted-keys.md)).
 - `DklsBackend` — Phase 4. Threshold ECDSA P-256/P-384 for protocol/sequencer keys.
 
 Routing by key type lets each key sit on the right backend simultaneously (e.g. namespace key on
