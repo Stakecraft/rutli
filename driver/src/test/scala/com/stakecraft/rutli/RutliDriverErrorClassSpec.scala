@@ -102,16 +102,20 @@ class RutliDriverErrorClassSpec extends AnyWordSpec with Matchers {
       }
     }
 
-    "report ABORTED for conflicting hosted-key material as final, by the cosigner's reason trailer" in {
-      def aborted(reason: Option[String]): KmsDriverException = {
+    "report ABORTED for conflicting hosted-key material as final, by the cosigner's reason trailer or its message" in {
+      def aborted(message: String, reason: Option[String]): KmsDriverException = {
         val trailers = new Metadata
         reason.foreach(r => trailers.put(Metadata.Key.of("rutli-error", Metadata.ASCII_STRING_MARSHALLER), r))
-        atCanton(() => Future.failed(Status.ABORTED.withDescription("hosted key rutli-enc-1").asRuntimeException(trailers)))
+        atCanton(() => Future.failed(Status.ABORTED.withDescription(message).asRuntimeException(trailers)))
       }
-      aborted(Some("hosted-conflict")).retryable shouldBe false
+      val conflict = "hosted key conflict for rutli-enc-1: cosigner 2 holds other material"
+      aborted(conflict, Some("hosted-conflict")).retryable shouldBe false
+      aborted("aborted", Some("hosted-conflict")).retryable shouldBe false
+      // Should the trailer not reach the driver, the cosigner's message still makes it final.
+      aborted(conflict, None).retryable shouldBe false
       // Any other reason, or none, is the plain "try again".
-      aborted(Some("sessions-full")).retryable shouldBe true
-      aborted(None).retryable shouldBe true
+      aborted("unknown session: sign-1", Some("sessions-full")).retryable shouldBe true
+      aborted("unknown session: sign-1", None).retryable shouldBe true
     }
 
     "report a member's \"ceremony already in progress\" as retryable when a leader passes it on as INTERNAL" in {
@@ -127,6 +131,8 @@ class RutliDriverErrorClassSpec extends AnyWordSpec with Matchers {
           "io: Permission denied (os error 13)",
           "dkg part 2 failed: a share is already in progress of being written",
           "rpc status: status: Aborted, message: \"unknown session: sign-1\"",
+          "a dkg ceremony (id dkg-0123456789abcdef0123456789abcdef) is already in progress for key frost-ns",
+          "rpc status: status: Internal, message: \"a dkg ceremony (id dkg-01) is already in progress for key frost-ns\"",
         )
       ) withClue(s"$other: ") {
         atCanton(() => Future.failed(Status.INTERNAL.withDescription(other).asRuntimeException())).retryable shouldBe false

@@ -208,7 +208,9 @@ class FrostNotNowSpec extends AnyWordSpec with Matchers {
       value.foreach(v => trailers.put(Metadata.Key.of("rutli-error", Metadata.ASCII_STRING_MARSHALLER), v))
       trailers
     }
-    val conflict = Status.ABORTED.withDescription("hosted key: cosigners hold different material under this id")
+    val conflict = Status.ABORTED.withDescription("hosted key conflict for rutli-sym-wrap: cosigner 2 holds other material")
+    val busy =
+      Status.ABORTED.withDescription("a genkey ceremony (id genkey-0123456789abcdef0123456789abcdef) is already in progress")
 
     "be final when the cosigners hold conflicting material under the id (the reason trailer reaches the driver)" in {
       withDriver { (driver, nodes) =>
@@ -220,7 +222,7 @@ class FrostNotNowSpec extends AnyWordSpec with Matchers {
 
     "be retryable when it is aborted for any other reason" in {
       withDriver { (driver, nodes) =>
-        nodes(0).generateFails = Some(conflict -> reason(None))
+        nodes(0).generateFails = Some(busy -> reason(None))
         failure(driver.generateSymmetricKey(Some("wrap"))(ctx)).retryable shouldBe true
         nodes.map(_.generateCalls.get) shouldBe Seq(1, 0, 0)
       }

@@ -235,10 +235,9 @@ object RutliDriver {
   private def transient(status: io.grpc.Status, trailers: Option[io.grpc.Metadata]): Boolean =
     status.getCode match {
       case io.grpc.Status.Code.UNAVAILABLE | io.grpc.Status.Code.DEADLINE_EXCEEDED => true
-      case io.grpc.Status.Code.ABORTED =>
-        !trailers.flatMap(t => Option(t.get(ErrorTrailer))).contains(HostedConflict)
+      case io.grpc.Status.Code.ABORTED => !hostedConflict(status, trailers)
       case io.grpc.Status.Code.INTERNAL =>
-        Option(status.getDescription).exists(d => CeremonyInProgress.findFirstIn(d).isDefined)
+        Option(status.getDescription).exists(d => MemberCeremonyInProgress.findFirstIn(d).isDefined)
       case _ => false
     }
 
@@ -248,8 +247,18 @@ object RutliDriver {
     io.grpc.Metadata.Key.of("rutli-error", io.grpc.Metadata.ASCII_STRING_MARSHALLER)
   private val HostedConflict = "hosted-conflict"
 
-  /** The cosigner's `CeremonyInProgress` message (`error.rs`), wherever it sits in a description. */
-  private val CeremonyInProgress = """ceremony \(id [^)]*\) is already in progress""".r
+  /** An ABORTED for conflicting hosted-key material: by the reason trailer, or — should the trailer
+    * not have reached the driver — by the cosigner's message for it (`HostedConflict` in
+    * `error.rs`). Final either way: Canton must not retry it for ever. */
+  private def hostedConflict(status: io.grpc.Status, trailers: Option[io.grpc.Metadata]): Boolean =
+    trailers.flatMap(t => Option(t.get(ErrorTrailer))).contains(HostedConflict) ||
+      Option(status.getDescription).exists(_.contains("hosted key conflict for "))
+
+  /** A member's `CeremonyInProgress` (`error.rs`) as a leader renders it into an INTERNAL: the
+    * member's status, code ABORTED, with the cosigner's message for a ceremony that holds the key.
+    * Nothing wider: the status must say Aborted and the message must be that one. */
+  private val MemberCeremonyInProgress =
+    """status:\s*Aborted,\s*message:\s*"a [a-z-]+ ceremony \(id [^)]+\) is already in progress""".r
 
   /** Lower-case hex SHA-256 of `data` — the `msg=` field of a sign's audit entry. */
   def sha256Hex(data: Array[Byte]): String =
