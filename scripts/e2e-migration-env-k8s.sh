@@ -337,7 +337,13 @@ env_cleanup() {
   # The local work dir (the export, the dealer's output) first: nothing below needs it, and a cluster
   # call that hangs must not keep it on disk.
   if [ -n "${WORK:-}" ]; then
-    if [ "${KEEP:-0}" = 1 ]; then echo "work dir kept: $WORK"; else shred_local "$WORK"; fi
+    # Guarded: under set -e a failed removal here would end the trap before the cluster's cleanup.
+    if [ "${KEEP:-0}" = 1 ]; then
+      echo "work dir kept: $WORK"
+    elif ! shred_local "$WORK"; then
+      echo "WARNING: the local work dir $WORK could not be removed" >&2
+      CLEANUP_FAILED="$CLEANUP_FAILED local-work-dir"
+    fi
   fi
   _dealer_down || {
     echo "WARNING: the dealer pod $DEALER_POD is still there (its NetworkPolicy kept); delete it by hand" >&2

@@ -321,7 +321,9 @@ class Suite(base.Runner):
                 return [{"failed": "the split ceremony on the cluster did not finish within 30 minutes"}]
             finally:
                 # Whatever happened to the script (a timeout kills it before its own cleanup), the
-                # dealer pod and what its memory holds go now, not at its 30-minute deadline.
+                # dealer pod and what its memory holds go now, not at its 30-minute deadline. A
+                # second SIGTERM must not cut this short; the handler comes back after it.
+                previous_term = signal.signal(signal.SIGTERM, signal.SIG_IGN)
                 try:
                     self.cluster.kubectl("delete", "pod", dealer, "--wait=true", "--timeout=120s",
                                          "--ignore-not-found", timeout=180, check=False)
@@ -354,6 +356,7 @@ class Suite(base.Runner):
                         gone_tmp = False
                     if not gone_tmp:
                         log(f"  WARNING: the ceremony's files in {n}'s /tmp could not be removed. Remove them by hand.")
+                signal.signal(signal.SIGTERM, previous_term)
             stage.update({"seconds": round(time.time() - started, 1), "dealer_image": image,
                           "steps": [line[4:] for line in out.stdout.splitlines() if line.startswith("==> ")]})
             for line in out.stdout.splitlines():
