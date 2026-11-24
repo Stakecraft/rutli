@@ -5,7 +5,7 @@
 //! cosigners' sign journals, through the real binary. The driver log is written here exactly as
 //! `HashChainedAuditLog` writes it; the journals by the cosigner's own `SignJournal`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rutli_cosigner::journal::{
@@ -89,6 +89,11 @@ fn journal_messages(dir: &Path, node: u16, entries: &[(&str, &str, &str, String,
     }
 }
 
+/// Where a test keeps the driver audit log and the journal directories of nodes 1 and 2.
+fn audit_and_two_journal_paths(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    (dir.join("audit.jsonl"), dir.join("j1"), dir.join("j2"))
+}
+
 fn run(audit: &Path, journals: &[&Path], extra: &[&str]) -> (i32, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rutli-cosigner"));
     cmd.arg("audit-cross-check")
@@ -108,11 +113,7 @@ fn run(audit: &Path, journals: &[&Path], extra: &[&str]) -> (i32, String) {
 #[test]
 fn consistent_logs_pass_and_every_kind_of_discrepancy_is_reported() {
     let tmp = tempfile::tempdir().unwrap();
-    let (audit, j1, j2) = (
-        tmp.path().join("audit.jsonl"),
-        tmp.path().join("j1"),
-        tmp.path().join("j2"),
-    );
+    let (audit, j1, j2) = audit_and_two_journal_paths(tmp.path());
     let (a, b, c) = ("a".repeat(32), "b".repeat(32), "c".repeat(32));
 
     // Two signs, each journaled by both participants; a failed attempt journaled on one node.
@@ -180,11 +181,7 @@ fn consistent_logs_pass_and_every_kind_of_discrepancy_is_reported() {
 #[test]
 fn an_audited_signature_no_journal_holds_and_unattributed_signatures_are_reported() {
     let tmp = tempfile::tempdir().unwrap();
-    let (audit, j1, j2) = (
-        tmp.path().join("audit.jsonl"),
-        tmp.path().join("j1"),
-        tmp.path().join("j2"),
-    );
+    let (audit, j1, j2) = audit_and_two_journal_paths(tmp.path());
     let (a, b) = ("a".repeat(32), "b".repeat(32));
     driver_log(
         &audit,
@@ -250,11 +247,7 @@ fn a_tampered_driver_audit_log_or_journal_is_an_error() {
 #[test]
 fn msg_names_which_message_the_driver_signed_and_which_were_signed_out_of_band() {
     let tmp = tempfile::tempdir().unwrap();
-    let (audit, j1, j2) = (
-        tmp.path().join("audit.jsonl"),
-        tmp.path().join("j1"),
-        tmp.path().join("j2"),
-    );
+    let (audit, j1, j2) = audit_and_two_journal_paths(tmp.path());
     let (a, b) = ("a".repeat(32), "b".repeat(32));
     let (m1, m2, m3) = (
         "1220".to_string() + &"11".repeat(32),
@@ -311,11 +304,7 @@ fn msg_names_which_message_the_driver_signed_and_which_were_signed_out_of_band()
 #[test]
 fn an_empty_or_missing_side_is_nothing_to_compare_not_consistent() {
     let tmp = tempfile::tempdir().unwrap();
-    let (audit, j1, j2) = (
-        tmp.path().join("audit.jsonl"),
-        tmp.path().join("j1"),
-        tmp.path().join("j2"),
-    );
+    let (audit, j1, j2) = audit_and_two_journal_paths(tmp.path());
     let a = "a".repeat(32);
     journal(&j1, 1, &[("frost-ns", PURPOSE_SIGN, &a, T0 + 1500)]);
 

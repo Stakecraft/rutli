@@ -1062,6 +1062,57 @@ fn fake_round1(id: u16) -> round1::Package {
         .unwrap()
 }
 
+/// Every peer begins ceremony `ceremony_id` and runs its part 1 (roster 1, 2, 3, no intent); returns
+/// the round-1 map the leader would broadcast.
+async fn begin_and_part1_everywhere(
+    rig: &Rig,
+    ceremony_id: &str,
+    kind: CeremonyKind,
+    expect: Option<(u64, [u8; 32])>,
+) -> BTreeMap<Identifier, round1::Package> {
+    for p in &rig.peers {
+        p.ceremony_begin(ceremony_id, KEY, kind, expect, None)
+            .await
+            .unwrap();
+    }
+    let mut map = BTreeMap::new();
+    for p in &rig.peers {
+        map.insert(
+            p.identifier(),
+            p.ceremony_part1(ceremony_id, KEY, kind, &[1, 2, 3], None)
+                .await
+                .unwrap(),
+        );
+    }
+    map
+}
+
+/// A refresh of `KEY` at its current epoch, run on every peer through part 2; returns the round-1
+/// digest part 3 takes.
+async fn refresh_through_part2_everywhere(rig: &Rig, ceremony_id: &str) -> [u8; 32] {
+    let v = rig.nodes[0].key_epoch(KEY).unwrap();
+    let expect = Some((v.epoch, v.pkp_digest.as_slice().try_into().unwrap()));
+    let map = begin_and_part1_everywhere(rig, ceremony_id, CeremonyKind::Refresh, expect).await;
+    part2_everywhere(rig, ceremony_id, &map).await
+}
+
+/// Every peer runs part 2 on `map`; returns the round-1 digest they all report (the last one's).
+async fn part2_everywhere(
+    rig: &Rig,
+    ceremony_id: &str,
+    map: &BTreeMap<Identifier, round1::Package>,
+) -> [u8; 32] {
+    let mut digest = [0u8; 32];
+    for p in &rig.peers {
+        digest = p
+            .ceremony_part2(ceremony_id, map)
+            .await
+            .unwrap()
+            .round1_digest;
+    }
+    digest
+}
+
 fn assert_aborted_everywhere(rig: &Rig, ceremony_id: &str) {
     for (i, n) in rig.nodes.iter().enumerate() {
         let rec = n
@@ -1127,23 +1178,8 @@ async fn a_node_refuses_a_map_with_a_forged_package_of_its_own_or_a_foreign_dige
 
     // An honest map, but the leader hands part 3 a digest that is not the nodes' own.
     let ceremony_id = "dkg-wrong-digest";
-    for p in &rig.peers {
-        p.ceremony_begin(ceremony_id, KEY, CeremonyKind::Dkg, None, None)
-            .await
-            .unwrap();
-    }
-    let mut map = BTreeMap::new();
-    for p in &rig.peers {
-        map.insert(
-            p.identifier(),
-            p.ceremony_part1(ceremony_id, KEY, CeremonyKind::Dkg, &[1, 2, 3], None)
-                .await
-                .unwrap(),
-        );
-    }
-    for p in &rig.peers {
-        p.ceremony_part2(ceremony_id, &map).await.unwrap();
-    }
+    let map = begin_and_part1_everywhere(&rig, ceremony_id, CeremonyKind::Dkg, None).await;
+    part2_everywhere(&rig, ceremony_id, &map).await;
     for p in &rig.peers {
         assert!(p.ceremony_part3(ceremony_id, &[7u8; 32]).await.is_err());
     }
@@ -1208,30 +1244,7 @@ async fn a_leader_dying_before_every_part3_leaves_one_staged_node_that_aborts_on
     let group = run_dkg(&rig.peers, KEY).await.unwrap();
     let before = rig.digests();
     let ceremony_id = "refresh-leader-died";
-    let v = rig.nodes[0].key_epoch(KEY).unwrap();
-    let expect = Some((v.epoch, v.pkp_digest.as_slice().try_into().unwrap()));
-    for p in &rig.peers {
-        p.ceremony_begin(ceremony_id, KEY, CeremonyKind::Refresh, expect, None)
-            .await
-            .unwrap();
-    }
-    let mut map = BTreeMap::new();
-    for p in &rig.peers {
-        map.insert(
-            p.identifier(),
-            p.ceremony_part1(ceremony_id, KEY, CeremonyKind::Refresh, &[1, 2, 3], None)
-                .await
-                .unwrap(),
-        );
-    }
-    let mut digest = [0u8; 32];
-    for p in &rig.peers {
-        digest = p
-            .ceremony_part2(ceremony_id, &map)
-            .await
-            .unwrap()
-            .round1_digest;
-    }
+    let digest = refresh_through_part2_everywhere(&rig, ceremony_id).await;
     // Only node 1 gets part 3; then the leader is gone.
     rig.peers[0]
         .ceremony_part3(ceremony_id, &digest)
@@ -1443,30 +1456,7 @@ async fn orphaned_session_no_votes_are_capped_and_a_refusal_is_not_evidence() {
     let rig = Rig::build(orphan, Some((0, 0)));
     let group = run_dkg(&rig.peers, KEY).await.unwrap();
     let ceremony_id = "refresh-capped-orphans";
-    let v = rig.nodes[0].key_epoch(KEY).unwrap();
-    let expect = Some((v.epoch, v.pkp_digest.as_slice().try_into().unwrap()));
-    for p in &rig.peers {
-        p.ceremony_begin(ceremony_id, KEY, CeremonyKind::Refresh, expect, None)
-            .await
-            .unwrap();
-    }
-    let mut map = BTreeMap::new();
-    for p in &rig.peers {
-        map.insert(
-            p.identifier(),
-            p.ceremony_part1(ceremony_id, KEY, CeremonyKind::Refresh, &[1, 2, 3], None)
-                .await
-                .unwrap(),
-        );
-    }
-    let mut digest = [0u8; 32];
-    for p in &rig.peers {
-        digest = p
-            .ceremony_part2(ceremony_id, &map)
-            .await
-            .unwrap()
-            .round1_digest;
-    }
+    let digest = refresh_through_part2_everywhere(&rig, ceremony_id).await;
     // Only node 1 stages; the leader is gone; nodes 2 and 3 orphan but may record no no-vote.
     rig.peers[0]
         .ceremony_part3(ceremony_id, &digest)
@@ -1611,20 +1601,7 @@ async fn a_crash_abort_is_not_a_split_and_its_quarantine_is_dropped() {
 async fn a_failed_delivery_tells_the_leader_only_its_category() {
     let rig = Rig::new();
     let ceremony_id = "dkg-delivery-category";
-    for p in &rig.peers {
-        p.ceremony_begin(ceremony_id, KEY, CeremonyKind::Dkg, None, None)
-            .await
-            .unwrap();
-    }
-    let mut map = BTreeMap::new();
-    for p in &rig.peers {
-        map.insert(
-            p.identifier(),
-            p.ceremony_part1(ceremony_id, KEY, CeremonyKind::Dkg, &[1, 2, 3], None)
-                .await
-                .unwrap(),
-        );
-    }
+    let map = begin_and_part1_everywhere(&rig, ceremony_id, CeremonyKind::Dkg, None).await;
     // Node 3 drops its session: node 1's delivery to it fails there with "unknown dkg session …".
     rig.peers[2].ceremony_abort(ceremony_id).await.unwrap();
     let err = rig.peers[0]
