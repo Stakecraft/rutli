@@ -16,9 +16,10 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 # The same command as frost/Dockerfile, on its own: built together with the load generator, cargo
 # could give the daemon's dependencies features that only the generator asks for.
 RUN cargo build --release --locked -p rutli-cosigner --bin rutli-cosigner
-RUN cargo build --release --locked -p rutli-loadgen --bin rutli-loadgen
-# The split ceremony's dealer, for the cluster suite's migration stage (its own pod, never a cosigner's).
-RUN cargo build --release --locked -p rutli-cosigner --bin rutli-dealer
+# With it, the split ceremony's dealer, for the cluster suite's migration stage (its own pod, never a
+# cosigner's).
+RUN cargo build --release --locked -p rutli-loadgen --bin rutli-loadgen \
+  && cargo build --release --locked -p rutli-cosigner --bin rutli-dealer
 
 # debian:stable-slim (trixie when pinned)
 FROM debian:stable-slim@sha256:fbfb4059d2127120aa05b6e6064523d2102552f0cf0026ddf0701c12f1f8f3e0

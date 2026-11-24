@@ -21,6 +21,7 @@ RUN cargo build --release --locked -p rutli-cosigner --bin rutli-dealer
 
 # debian:stable-slim (trixie when pinned)
 FROM debian:stable-slim@sha256:fbfb4059d2127120aa05b6e6064523d2102552f0cf0026ddf0701c12f1f8f3e0
-RUN useradd -r -u 10001 rutli
+# -l: no lastlog entry, which a high uid would make large.
+RUN useradd -l -r -u 10001 rutli
 COPY --from=build /src/target/release/rutli-dealer /usr/local/bin/rutli-dealer
 USER rutli

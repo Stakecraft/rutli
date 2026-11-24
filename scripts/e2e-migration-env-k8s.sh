@@ -27,7 +27,11 @@ DEALER_POD=rutli-perf-dealer
 
 _k() { kubectl -n "$NS" "$@"; }
 _pod() { printf 'rutli-cosigner-n%s-0' "$1"; }
-_in_node() { local n=$1; shift; _k exec "$(_pod "$n")" -c cosigner -- "$@"; }
+_in_node() {
+  local n=$1
+  shift
+  _k exec "$(_pod "$n")" -c cosigner -- "$@"
+}
 
 env_init() {
   [ "${E2E_STAGES:-all}" = ceremony ] || fail "E2E_ENV=k8s runs only E2E_STAGES=ceremony: there is no Canton on the cluster"
@@ -61,8 +65,16 @@ env_init() {
   done
 }
 
-env_cosigner() { local n=$1; shift; _in_node "$n" env RUST_LOG=off rutli-cosigner --config "/config/cosigner-$n.json" "$@"; }
-env_client() { local role=$1; shift; _k exec "$LOADGEN_POD" -- env RUST_LOG=off rutli-cosigner --config "/tmp/e2e-$role.json" "$@"; }
+env_cosigner() {
+  local n=$1
+  shift
+  _in_node "$n" env RUST_LOG=off rutli-cosigner --config "/config/cosigner-$n.json" "$@"
+}
+env_client() {
+  local role=$1
+  shift
+  _k exec "$LOADGEN_POD" -- env RUST_LOG=off rutli-cosigner --config "/tmp/e2e-$role.json" "$@"
+}
 env_node_out() { printf '/tmp/%s\n' "$2"; }
 env_fetch() { _in_node "$1" cat "$2" >"$3"; }
 env_push() { # node  local-file: copied to the pod's /tmp (memory-backed); prints the path there
@@ -73,9 +85,17 @@ env_push() { # node  local-file: copied to the pod's /tmp (memory-backed); print
 }
 env_node_path() { printf '/data/%s\n' "$2"; }
 env_node_exists() { _in_node "$1" test -e "$2"; }
-env_node_cat() { local n=$1; shift; _in_node "$n" sh -c "cat $* 2>/dev/null || true"; } # globs expand in the pod
+env_node_cat() {
+  local n=$1
+  shift
+  _in_node "$n" sh -c "cat $* 2>/dev/null || true"
+} # globs expand in the pod
 env_node_ls() { _in_node "$1" ls "$2"; }
-env_node_shred() { local n=$1; shift; _in_node "$n" rm -f -- "$@"; } # memory-backed /tmp: gone with the pages
+env_node_shred() {
+  local n=$1
+  shift
+  _in_node "$n" rm -f -- "$@"
+} # memory-backed /tmp: gone with the pages
 
 # --- the dealer pod -----------------------------------------------------------------------------
 DEALER_STARTED=0
