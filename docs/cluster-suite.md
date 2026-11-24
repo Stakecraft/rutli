@@ -27,6 +27,25 @@ For the same scenarios on one machine under Docker Compose, see [`load-testing.m
   It is never published by this project.
 - `kubectl`, `helm` and `openssl` where you run the suite, and `python3`.
 
+### Placement
+
+Where the cosigners sit changes the signing latency. A signature needs two of the three
+cosigners, so with one site far from the other two, a fair partner order puts the far site in
+two thirds of the signatures; which cosigner sits there decides which signatures wait for it.
+For runs to be compared, every run should have the same shape:
+
+- label the node for cosigner `<id>` with `rutli-perf/cosigner=<id>` (1, 2, 3), each on its own
+  site. The deploy pins each cosigner to its node through the chart's per-node `nodeSelector`.
+  Label before the first deploy: a volume bound in one zone keeps its pod there;
+- `rutli-perf/role=cosigner` and `rutli-perf/role=loadgen` still select the pools, as before:
+  where the `role=cosigner` pool exists, a pinned node needs both labels.
+
+A cosigner whose label is on no node is placed by the scheduler, so label all three or none.
+Either way `cluster.json` records under `placement` the node, zone and region (the nodes'
+`topology.kubernetes.io/*` labels) of each cosigner and of the load generator once the cosigners
+are healthy, and the report prints the cosigners' zones. If a pod moved by the end of the run (a
+disruption), `placement_end` holds where they were then, and the report says so.
+
 ## Running it
 
 ```sh
@@ -362,3 +381,10 @@ the ramp stops it without a verdict on that step; its headroom factor is then a 
   both runs passed, and each key count (sign latency and the slowest cosigner's `ListKeys`);
 - a lower headroom factor than the previous run's (with the same profile);
 - any failed scenario of the current run.
+
+It does not compare the latency of two runs whose cosigners were placed differently (another zone,
+or another node where a zone is not labelled, for any cosigner id; the load generator does not
+count): the report says `NOT COMPARED` with both placements and ends with "Latency NOT
+COMPARED" instead of "No regression". A run that did not record its placement, or a cosigner's
+node, compares only with another run without one: the first run after this change is not compared
+with older ones. A comparison not made does not change the exit code.

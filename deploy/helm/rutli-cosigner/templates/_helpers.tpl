@@ -95,6 +95,7 @@ topology=perNode: the roster as a JSON list of nodes with every default filled i
       "distPublicKey" ($n.distPublicKey | default "")
       "backupClaim" ($n.backupClaim | default "")
       "backupSecret" ($n.backupSecret | default "")
+      "nodeSelector" ($n.nodeSelector | default dict)
       "service" (printf "%s%d" $.Values.perNode.servicePrefix $id)) }}
 {{- end }}
 {{- $out | toJson }}

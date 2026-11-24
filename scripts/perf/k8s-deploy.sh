@@ -277,6 +277,15 @@ selector="{}"
 if kubectl get nodes -l rutli-perf/role=cosigner -o name 2>/dev/null | grep -q .; then
   selector='{ "rutli-perf/role": cosigner }'
 fi
+# A fixed placement: where the rig labels a node rutli-perf/cosigner=<id>, cosigner <id> runs there,
+# so every run has the same shape (which cosigner sits on the far site changes signing latency).
+# Without the labels the scheduler places them, and the result records where (cluster.py).
+pin=("" "" "")
+for i in 1 2 3; do
+  if kubectl get nodes -l "rutli-perf/cosigner=$i" -o name 2>/dev/null | grep -q .; then
+    pin[i - 1]=", nodeSelector: { \"rutli-perf/cosigner\": \"$i\" }"
+  fi
+done
 pull_values="[]"
 [ -z "$pull_secret" ] || pull_values="[{ name: \"$pull_secret\" }]"
 # The per-cluster production values: the drivers' key pins, the cluster id (derived from this CA,
@@ -306,9 +315,9 @@ keyfile:
 replicaCount: 3
 threshold: 2
 nodes:
-  - { id: 1, distPublicKey: "${dist[0]}" }
-  - { id: 2, distPublicKey: "${dist[1]}" }
-  - { id: 3, distPublicKey: "${dist[2]}" }
+  - { id: 1, distPublicKey: "${dist[0]}"${pin[0]} }
+  - { id: 2, distPublicKey: "${dist[1]}"${pin[1]} }
+  - { id: 3, distPublicKey: "${dist[2]}"${pin[2]} }
 hostedKeys:
   enabled: true
   commitmentKey: "$(openssl rand -hex 32)"

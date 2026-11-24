@@ -52,6 +52,7 @@ Standard library only.
 """
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -122,6 +123,26 @@ class K8sCluster:
     def exec(self, node, shell):
         out = self.kubectl("exec", self.pod(node), "-c", "cosigner", "--", "sh", "-c", shell, timeout=30, check=False)
         return out.stdout if out.returncode == 0 else None
+
+    def placement(self):
+        """Where each cosigner and the load generator run: {pod name: {node, zone, region}}, from the
+        nodes' topology labels (empty where a label is missing). Which cosigner sits on a far site
+        changes the signing latency, so runs are compared only with the same placement."""
+        out = {}
+        pods = [self.pod(n) for n in NODES] + ["rutli-perf-loadgen"]
+        for pod in pods:
+            node, labels = "", {}
+            # A readout: a kubectl that fails or hangs leaves the pod's record empty, never the run.
+            with contextlib.suppress(OSError, subprocess.SubprocessError, ValueError):
+                node = self.kubectl("get", "pod", pod, "-o", "jsonpath={.spec.nodeName}", timeout=30,
+                                    check=False).stdout.strip()
+                if node:
+                    got = self.kubectl("get", "node", node, "-o", "json", namespaced=False, timeout=30, check=False)
+                    if got.returncode == 0:
+                        labels = json.loads(got.stdout).get("metadata", {}).get("labels", {})
+            out[pod] = {"node": node, "zone": labels.get("topology.kubernetes.io/zone", ""),
+                        "region": labels.get("topology.kubernetes.io/region", "")}
+        return out
 
     def generator_cgroup(self, script):
         """`script` (diagnose.CGROUP_SCRIPT) in the first load generator pod; its output or None."""
@@ -1134,7 +1155,13 @@ def main():
                         "--frost-key", base.KEY_LIMITED, "--ecies-key", base.KEY_ECIES]
     log(f"waiting for the cosigners in namespace {args.namespace}")
     setup = {"failed": "the cosigners did not become healthy"}
+    placement = None
     if suite.wait_healthy(600):
+        # Where the cosigners run before any scenario (a disruption may move a pod): the placement
+        # the run is compared by.
+        placement = cluster.placement()
+        log("placement: " + "; ".join(f"{pod} on {p['node'] or '?'} ({p['zone'] or p['region'] or 'no zone label'})"
+                                      for pod, p in placement.items()))
         setup = suite.loadgen(suite.setup_args, wall_timeout=900)
         if "failed" not in setup:
             setup = suite.setup_classes() or setup
@@ -1165,6 +1192,12 @@ def main():
         (rig_failed if suite.ramp.get("rig") else failed).append("ramp")
     if diagnosis and (diagnosis.get("failed") or diagnosis.get("rig_failed")):
         (rig_failed if diagnosis.get("rig") or diagnosis.get("rig_failed") else failed).append("diagnose")
+    placement_end = cluster.placement()
+    if placement is None:
+        placement = placement_end
+    elif placement_end != placement:
+        log("WARNING: a pod moved during the run; placement at the end: "
+            + "; ".join(f"{pod} on {p['node'] or '?'}" for pod, p in placement_end.items()))
     doc = {
         "schema": 1,
         "kind": "cluster",
@@ -1173,6 +1206,10 @@ def main():
         # How the load generator times out and fails over a call (None: its defaults); runs are
         # compared only under the same policy.
         "client_policy": client_policy if any(v is not None for v in client_policy.values()) else None,
+        # Where the cosigners and the load generator ran, at the start; runs are compared only with
+        # the same placement of the cosigners. `placement_end` only when a pod moved during the run.
+        "placement": placement,
+        "placement_end": placement_end if placement_end != placement else None,
         # "tmpfs": a diagnostic installation, never a configuration and never a baseline.
         "diagnostic": diagnostic,
         "commit": args.commit,

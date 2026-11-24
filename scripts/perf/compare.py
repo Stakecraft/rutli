@@ -64,6 +64,22 @@ def judge(rows, problems, name, metric, was, value, threshold, floor_ms):
 PEER_DEADLINES_S = {"sign_round1": 2.0, "sign_round2": 5.0, "abort": 1.0, "control": 3.0}
 
 
+def placement_key(run):
+    """The sites of the cosigners, in identifier order (the load generator left out), or None where
+    the run did not record them."""
+    p = run.get("placement")
+    if not p:
+        return None
+    key = tuple((p[k].get("zone") or p[k].get("node")) for k in sorted(k for k in p if "cosigner" in k))
+    # A cosigner whose node could not be read: the placement is not known.
+    return key if key and all(key) else None
+
+
+def placement_text(run):
+    key = placement_key(run)
+    return "unrecorded" if key is None else " / ".join(key)
+
+
 def peer_margin(peer_calls):
     """The load generator's `server.peer_calls` (#258), each call with its deadline and
     `margin_3x` (at least 99.9 % of the calls within a third of the deadline, read at the bucket
@@ -188,6 +204,9 @@ def compare(previous, current, threshold, floor_ms):
     comparable = previous is not None and all(
         previous.get(k) == current.get(k) for k in ("schema", "kind", "environment", "client_policy")
     )
+    # Which cosigner sits on which site changes the latency (a far site in two thirds of the
+    # signatures, or in one): runs whose cosigners were placed differently are not compared.
+    moved = previous is not None and placement_key(previous) != placement_key(current)
     # A diagnostic run (data on tmpfs) is never a baseline, nor compared with one.
     diagnostic = previous is not None and (previous.get("diagnostic") or current.get("diagnostic"))
     if diagnostic:
@@ -197,6 +216,11 @@ def compare(previous, current, threshold, floor_ms):
     elif previous is not None and not comparable:
         rows.append(("(all)", "latency", "", "", "",
                      "not compared: the previous run is of another kind, environment or client deadline policy"))
+    elif moved:
+        comparable = False
+        rows.append(("(all)", "latency", "", "", "",
+                     (f"NOT COMPARED: the cosigners were placed differently ({placement_text(previous)} before, "
+                      f"{placement_text(current)} now)")))
     before = {s.get("name"): s for s in (previous or {}).get("scenarios", [])} if comparable else {}
     for scenario in current.get("scenarios", []):
         name = scenario.get("name")
@@ -280,6 +304,11 @@ def main(argv=None):
                   f"{dx.get('predicted_ceiling_signs_per_sec')}/s; keys: {dx.get('keys_verdict', 'not run')}", ""]
     if current.get("headroom_factor") is not None:
         lines += [f"Headroom factor: {current['headroom_factor']} (profile {current.get('profile')})", ""]
+    if current.get("placement") is not None:
+        lines += [f"Placement (cosigners 1/2/3): {placement_text(current)}", ""]
+    if current.get("placement_end"):
+        lines += [f"A pod moved during the run; at the end: {placement_text({'placement': current['placement_end']})}",
+                  ""]
     # cluster.json lists them all; a compose load.json has them per scenario only.
     peer = current.get("peer_calls")
     if peer is None:
@@ -305,7 +334,10 @@ def main(argv=None):
     if problems:
         lines += [f"{len(problems)} problem(s):"] + [f"- {x}" for x in problems]
     else:
-        lines += [f"No regression above {args.threshold:.0%} and no failed scenario."]
+        if any(str(r[-1]).lower().startswith("not compared") for r in rows):
+            lines += ["No failed scenario. Latency NOT COMPARED with the previous run (see above)."]
+        else:
+            lines += [f"No regression above {args.threshold:.0%} and no failed scenario."]
     report = "\n".join(lines) + "\n"
     print(report, end="")
     if args.markdown:

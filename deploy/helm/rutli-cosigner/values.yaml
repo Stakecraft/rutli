@@ -46,6 +46,10 @@ threshold: 2
 #                   <fullname>-backup-n<id>
 #   backupSecret:   backup.destination.type=script: credentials Secret for THIS node's destination,
 #                   mounted into its backup sidecar only, at /backup-creds
+#   nodeSelector:   this node's own nodeSelector, merged over the global `nodeSelector` (its non-empty
+#                   values win):
+#                   to place each cosigner on its own site, e.g. { topology.kubernetes.io/zone: "…" }.
+#                   Set it before the first install: a volume bound in one zone keeps its pod there.
 # e.g.
 #   nodes:
 #     - { id: 1, existingClaim: data-rutli-cosigner-0, distPublicKey: "…" }
