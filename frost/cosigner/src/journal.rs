@@ -1392,12 +1392,19 @@ mod tests {
         let j = SignJournal::open(tmp.path(), 1, FOREVER).unwrap();
         let dir = tmp.path().join("k");
         let mut n = 0u64;
-        while segments(&dir).unwrap().len() < 3 {
+        // About 4 MiB of 16 kB entries fill a segment; bounded, so a journal that stopped rotating
+        // fails the assertion below instead of looping.
+        while segments(&dir).unwrap().len() < 3 && n < 1_000 {
             let mut e = entry("k", &format!("{n:032x}"));
             e.approvers = vec!["x".repeat(16_000)];
             j.append_charged(e, UNLIMITED, T + n).unwrap();
             n += 1;
         }
+        assert_eq!(
+            segments(&dir).unwrap().len(),
+            3,
+            "the journal rotated twice"
+        );
         let report = read_key_dir(&dir).unwrap();
         assert_eq!(report.entries.len() as u64, n);
         for seg in segments(&dir).unwrap() {
@@ -1421,7 +1428,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_key_directory_is_synced_into_its_parent_and_an_existing_one_is_not() {
+    fn a_new_key_directory_needs_its_parent_opened_for_the_sync_and_an_existing_one_does_not() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("journal");
