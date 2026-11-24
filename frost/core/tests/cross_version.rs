@@ -360,6 +360,66 @@ fn round_messages_written_by_v2_are_read_by_3x_and_back() {
     let _: v3::keys::dkg::round2::Package = convert(&out[&id2(2)]);
 }
 
+/// The other direction of the test above: what a 3.x node writes must read on v2 (a rollback with
+/// part of the cluster already upgraded) and the transcript bytes must not move.
+#[test]
+fn round_messages_written_by_3x_are_read_by_v2_byte_for_byte() {
+    // DKG on 3.x only, through Rütli's wrapper. Round 3 is not needed to check the messages.
+    let mut dkg: BTreeMap<u16, DkgParticipant> = (1..=N)
+        .map(|i| (i, DkgParticipant::new(id3(i), N, T)))
+        .collect();
+    let mut r1 = BTreeMap::new();
+    for (i, p) in dkg.iter_mut() {
+        r1.insert(*i, p.part1().unwrap());
+    }
+    for (i, pkg) in &r1 {
+        let converted: v2::keys::dkg::round1::Package = convert(pkg);
+        // The transcript hash is over the postcard bytes: identical on both versions.
+        assert_eq!(
+            pkg.serialize().unwrap(),
+            converted.serialize().unwrap(),
+            "DKG round 1 bytes of node {i} differ"
+        );
+    }
+    for (i, p) in dkg.iter_mut() {
+        let others: BTreeMap<_, _> = r1
+            .iter()
+            .filter(|(j, _)| *j != i)
+            .map(|(j, pkg)| (id3(*j), pkg.clone()))
+            .collect();
+        for out in p.part2(&others).unwrap().values() {
+            let _: v2::keys::dkg::round2::Package = convert(out);
+        }
+    }
+
+    // The same for a refresh run.
+    let mut refresh: BTreeMap<u16, RefreshParticipant> = (1..=N)
+        .map(|i| (i, RefreshParticipant::new(id3(i), N, T)))
+        .collect();
+    let mut r1 = BTreeMap::new();
+    for (i, p) in refresh.iter_mut() {
+        r1.insert(*i, p.part1().unwrap());
+    }
+    for (i, pkg) in &r1 {
+        let converted: v2::keys::dkg::round1::Package = convert(pkg);
+        assert_eq!(
+            pkg.serialize().unwrap(),
+            converted.serialize().unwrap(),
+            "refresh round 1 bytes of node {i} differ"
+        );
+    }
+    for (i, p) in refresh.iter_mut() {
+        let others: BTreeMap<_, _> = r1
+            .iter()
+            .filter(|(j, _)| *j != i)
+            .map(|(j, pkg)| (id3(*j), pkg.clone()))
+            .collect();
+        for out in p.part2(&others).unwrap().values() {
+            let _: v2::keys::dkg::round2::Package = convert(out);
+        }
+    }
+}
+
 /// The guard's reason to exist: a package frost 3.x produces itself records `min_signers`, which v2
 /// refuses to read and which changes the digest.
 #[test]
