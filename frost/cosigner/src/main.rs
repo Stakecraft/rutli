@@ -3233,7 +3233,7 @@ fn post_delete_request(
     key_id: &str,
     delete_digest: &[u8; 32],
     threshold: usize,
-    nonce: &[u8; 16],
+    nonce: &[u8; APPROVAL_NONCE_BYTES],
 ) -> Result<(String, std::path::PathBuf, std::path::PathBuf)> {
     use sha2::Digest;
     // Domain-separated from sign approvals (audit F6): the request id is over `delete:<key>`, and
@@ -3413,8 +3413,8 @@ fn keyfile_status(
 fn keyfile_state(
     sealer: &rutli_cosigner::seal::Sealer,
     bytes: &[u8],
-    outdated: &mut usize,
-    previous: &mut usize,
+    outdated: &mut i32,
+    previous: &mut i32,
 ) -> String {
     use rutli_cosigner::seal::DekUse;
     match rutli_cosigner::seal::file_version(bytes) {

@@ -1269,9 +1269,13 @@ fn tar_corrupt(at: u64, what: &str) -> String {
 }
 
 /// Check a header block (checksum, size, extent inside the file) and say where its data sits.
-fn tar_extent(hdr: &[u8; 512], pos: u64, len: u64) -> std::result::Result<TarExtent, String> {
-    let stored =
-        tar_num(&hdr[148..156]).ok_or_else(|| tar_corrupt(pos, "bad header checksum field"))?;
+fn tar_extent(
+    hdr: &[u8; TAR_BLOCK_BYTES],
+    pos: u64,
+    len: u64,
+) -> std::result::Result<TarExtent, String> {
+    let stored = tar_num(&hdr[TAR_CHECKSUM_FIELD_START..TAR_CHECKSUM_FIELD_END])
+        .ok_or_else(|| tar_corrupt(pos, "bad header checksum field"))?;
     let sum: u64 = hdr
         .iter()
         .enumerate()
@@ -1318,7 +1322,7 @@ fn read_tar_meta(f: &mut std::fs::File, x: &TarExtent) -> std::result::Result<Ve
 fn read_tar_entry(
     f: &mut std::fs::File,
     shown: &str,
-    hdr: &[u8; 512],
+    hdr: &[u8; TAR_BLOCK_BYTES],
     x: &TarExtent,
     next_name: &mut Option<String>,
     on: &mut impl FnMut(TarItem),
@@ -1347,7 +1351,7 @@ fn read_tar_entry(
 fn read_tar_file(
     f: &mut std::fs::File,
     shown: &str,
-    hdr: &[u8; 512],
+    hdr: &[u8; TAR_BLOCK_BYTES],
     x: &TarExtent,
     next_name: &mut Option<String>,
     on: &mut impl FnMut(TarItem),
