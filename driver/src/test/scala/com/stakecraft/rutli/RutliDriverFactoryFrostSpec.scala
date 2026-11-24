@@ -258,8 +258,9 @@ class RutliDriverFactoryFrostSpec extends AnyWordSpec with Matchers {
       signsPerNode("sign-leader = \" Rotate \"") shouldBe Seq(2, 2, 2)
     }
 
-    "use the documented default when it is not set" in {
-      signsPerNode("") shouldBe (if (FrostBackend.DefaultRotateSigns) Seq(2, 2, 2) else Seq(6, 0, 0))
+    "be sticky when it is not set" in {
+      FrostBackend.DefaultRotateSigns shouldBe false
+      signsPerNode("") shouldBe Seq(6, 0, 0)
     }
   }
 

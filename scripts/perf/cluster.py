@@ -1081,7 +1081,7 @@ def main():
                    help="the slow-node scenarios (with HOOK_NET_DELAY): added delay in ms and leader policy each")
     p.add_argument("--sign-leader", choices=("sticky", "rotate"), default=None,
                    help="where the load generator starts a signature, as the driver's frost.sign-leader "
-                        "(default: sticky; rotate with --driver-deadlines, the driver's default)")
+                        "(default: sticky; rotate with --driver-deadlines. The driver's own default is sticky)")
     p.add_argument("--settle-secs", type=int, default=600,
                    help="after a disruption, how long the cluster may take to sign normally again")
     p.add_argument("--max-rss-mib", type=int, default=None, help="default: the profile's, else 256 (the chart's limit)")

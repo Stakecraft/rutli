@@ -2609,10 +2609,10 @@ object FrostBackend {
   private def isClusterRefusal(s: Status): Boolean =
     s.getCode == Status.Code.PERMISSION_DENIED && Option(s.getDescription).exists(_.contains("intent is for cluster"))
 
-  /** `frost.sign-leader`'s default, in one place: rotate. Whether it stays the 0.5.0 default
-    * depends on the stands' evidence before the freeze (docs/architecture.md); `sticky` is the
-    * alternative. */
-  val DefaultRotateSigns: Boolean = true
+  /** `frost.sign-leader`'s default, in one place: sticky. `rotate` is there to be switched on, and
+    * becomes the default in a later release, once it has run on the test stands for long enough
+    * (docs/architecture.md). */
+  val DefaultRotateSigns: Boolean = false
 
   /** No attempt starts with less of the call's budget left than this: it could not succeed. */
   private val MinAttempt: FiniteDuration = 50.millis
