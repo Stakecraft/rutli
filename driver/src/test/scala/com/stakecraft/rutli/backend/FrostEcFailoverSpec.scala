@@ -308,20 +308,32 @@ class FrostEcFailoverSpec extends AnyWordSpec with Matchers {
 
   "an RSA hosted key" should {
 
-    "keep NOT_FOUND authoritative once the driver knows the key is RSA" in withRig { r =>
+    "be served by the next cosigner when the first answers NOT_FOUND, once the driver knows the key is RSA" in withRig { r =>
       val b = r.backend()
       val rsa = await(b.generateEncryptionKeyPair(EncryptionKeySpec.Rsa2048, None)) // spec learned
       r.old.missingEverything = true
-      val before = r.current.publicKeyCalls.get
-      code(await(b.getPublicKey(rsa))) shouldBe Status.Code.NOT_FOUND
-      r.current.publicKeyCalls.get shouldBe before // no failover
+      val (oldBefore, currentBefore) = (r.old.publicKeyCalls.get, r.current.publicKeyCalls.get)
+      await(b.getPublicKey(rsa)).spec shouldBe EncryptionKeySpec.Rsa2048
+      r.old.publicKeyCalls.get shouldBe oldBefore + 1
+      r.current.publicKeyCalls.get shouldBe currentBefore + 1
+      // The cosigner that lacks the key lost the lead: it is not asked again.
+      await(b.getPublicKey(rsa)).spec shouldBe EncryptionKeySpec.Rsa2048
+      r.old.publicKeyCalls.get shouldBe oldBefore + 1
     }
 
-    "keep the first NOT_FOUND as the answer when another node reveals the key is RSA" in withRig { r =>
+    "be served by the next cosigner when the first answers NOT_FOUND and the driver has not seen the key yet" in withRig { r =>
       val rsa = await(r.backend().generateEncryptionKeyPair(EncryptionKeySpec.Rsa2048, None))
       r.old.missingEverything = true
       val fresh = r.backend() // has not learned the spec
-      code(await(fresh.getPublicKey(rsa))) shouldBe Status.Code.NOT_FOUND
+      await(fresh.getPublicKey(rsa)).spec shouldBe EncryptionKeySpec.Rsa2048
+    }
+
+    "still be reported as missing when no cosigner has it" in withRig { r =>
+      val b = r.backend()
+      val rsa = await(b.generateEncryptionKeyPair(EncryptionKeySpec.Rsa2048, None)) // spec learned
+      val gone = rsa + "-gone"
+      code(await(b.getPublicKey(gone))) shouldBe Status.Code.NOT_FOUND
+      r.old.publicKeyCalls.get should be >= 1
     }
   }
 }

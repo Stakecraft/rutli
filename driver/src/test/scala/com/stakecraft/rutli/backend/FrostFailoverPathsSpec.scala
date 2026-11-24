@@ -224,8 +224,10 @@ class FrostFailoverPathsSpec extends AnyWordSpec with Matchers {
       Op("decryptSymmetric", "symmetricDecrypt", _.decryptSymmetric(Data, HostedKey)),
     )
 
-    "fail over on a leader that is down or sick, and lead from the next cosigner afterwards" in {
-      for (op <- ops; status <- Seq(Status.UNAVAILABLE, Status.DEADLINE_EXCEEDED, Status.INTERNAL, Status.UNKNOWN))
+    "fail over on a leader that is down, sick or lacks the key, and lead from the next cosigner afterwards" in {
+      for (
+        op <- ops; status <- Seq(Status.UNAVAILABLE, Status.DEADLINE_EXCEEDED, Status.INTERNAL, Status.UNKNOWN, Status.NOT_FOUND)
+      )
         withClue(s"${op.name} ${status.getCode}: ") {
           withCluster(2, hostedKeys = true) { case (backend, Seq(a, b)) =>
             a.failing = Map(op.rpc -> status)
@@ -241,7 +243,7 @@ class FrostFailoverPathsSpec extends AnyWordSpec with Matchers {
     "return a refusal at once, and keep the next call on the same cosigner" in {
       for (
         op <- ops;
-        status <- Seq(Status.RESOURCE_EXHAUSTED, Status.PERMISSION_DENIED, Status.NOT_FOUND, Status.INVALID_ARGUMENT)
+        status <- Seq(Status.RESOURCE_EXHAUSTED, Status.PERMISSION_DENIED, Status.INVALID_ARGUMENT, Status.FAILED_PRECONDITION)
       )
         withClue(s"${op.name} ${status.getCode}: ") {
           withCluster(2, hostedKeys = true) { case (backend, Seq(a, b)) =>
@@ -274,11 +276,22 @@ class FrostFailoverPathsSpec extends AnyWordSpec with Matchers {
       Seq(leader, next).map(_.calls("keyInfo")) shouldBe Seq(1, 1)
     }
 
-    "take the leader's answer that the key does not exist, without asking another cosigner" in withRsaKey {
+    "ask the next cosigner when the leader says the key does not exist, and take the lead from that leader" in withRsaKey {
       (backend, leader, next) =>
         leader.keyExists = false
-        an[NoSuchElementException] should be thrownBy await(backend.keyExistsAndIsActive(HostedKey))
-        Seq(leader, next).map(_.calls("keyInfo")) shouldBe Seq(1, 0)
+        val notes = new AuditNotes
+        await(backend.withAuditNotes(notes)(backend.keyExistsAndIsActive(HostedKey)))
+        notes.render shouldBe hop(leader, next, "NOT_FOUND")
+        Seq(leader, next).map(_.calls("keyInfo")) shouldBe Seq(1, 1)
+        await(backend.keyExistsAndIsActive(HostedKey))
+        Seq(leader, next).map(_.calls("keyInfo")) shouldBe Seq(1, 2)
+    }
+
+    "report the key as missing once every cosigner says it does not exist" in withRsaKey { (backend, leader, next) =>
+      leader.keyExists = false
+      next.keyExists = false
+      an[NoSuchElementException] should be thrownBy await(backend.keyExistsAndIsActive(HostedKey))
+      Seq(leader, next).map(_.calls("keyInfo")) shouldBe Seq(1, 1)
     }
   }
 
