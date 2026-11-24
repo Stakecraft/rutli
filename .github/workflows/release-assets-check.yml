@@ -94,7 +94,11 @@ jobs:
           dealer_sha="$(scripts/release-assets.sh digest art/asset-dealer-x86_64 dealer-x86_64 | cut -d= -f2)"
           scripts/release-assets.sh gather art out
           scripts/release-assets.sh gather-sbom art out
-          scripts/release-assets.sh check-digests out jar="$jar_sha" dealer-x86_64="$dealer_sha"
+          sbom_driver_sha="$(scripts/release-assets.sh digest art/asset-sbom sbom-driver | cut -d= -f2)"
+          sbom_dealer_sha="$(scripts/release-assets.sh digest art/asset-sbom sbom-dealer | cut -d= -f2)"
+          scripts/release-assets.sh check-digests out jar="$jar_sha" dealer-x86_64="$dealer_sha" \
+            sbom-driver="$sbom_driver_sha" sbom-dealer="$sbom_dealer_sha"
+          scripts/release-assets.sh check-sboms out
           echo "$jar_sha" >"$RUNNER_TEMP/jar.sha256"
           scripts/release-assets.sh licenses out
           scripts/release-assets.sh sums out
@@ -110,6 +114,9 @@ jobs:
           scripts/release-assets.sh sign out
           scripts/release-assets.sh check-set out signed
           scripts/release-assets.sh verify out
+          # As between the signing and the upload job: a digest over the whole signed release.
+          scripts/release-assets.sh manifest-digest out | cut -d= -f2 >"$RUNNER_TEMP/release.sha256"
+          scripts/release-assets.sh check-manifest out "$(cat "$RUNNER_TEMP/release.sha256")"
 
       # The verification must fail when a file changes after signing, and when a signature belongs to
       # another file.
@@ -136,4 +143,10 @@ jobs:
           if scripts/release-assets.sh check-digests swapped jar="$(cat "$RUNNER_TEMP/jar.sha256")"; then
             echo "::error::a replaced artifact passed check-digests"; exit 1
           fi
-          echo "OK: tampering, an unexpected file, a file from the wrong artifact and a replaced artifact are detected"
+          # The signed release replaced between the signing and the upload job: one bundle changed.
+          rm -rf swapped; cp -r out swapped
+          printf ' ' >>"swapped/LICENSE.sigstore.json"
+          if scripts/release-assets.sh check-manifest swapped "$(cat "$RUNNER_TEMP/release.sha256")"; then
+            echo "::error::a changed release passed check-manifest"; exit 1
+          fi
+          echo "OK: tampering, an unexpected file, a file from the wrong artifact a replaced artifact and a changed signed release are detected"

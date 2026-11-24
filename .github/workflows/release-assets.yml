@@ -73,15 +73,18 @@ jobs:
       GH_REPO: ${{ github.repository }}
       REPLACE_PUBLISHED: ${{ inputs.replace_published }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: A release with SHA256SUMS needs replace_published
         run: |
           set -euo pipefail
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
-          if ! out="$(gh release view "$TAG" --json assets --jq '[.assets[].name] | index("SHA256SUMS") != null' 2>&1)"; then
-            # Only "no such release" is fine; any other error (rate limit, 5xx) stops the run.
-            [[ "$out" == *"release not found"* ]] || { echo "::error::cannot read the release ${TAG}: ${out}"; exit 1; }
-            echo "no release for ${TAG} yet: a draft is created at the end"
-          elif [ "$out" = true ] && [ "$REPLACE_PUBLISHED" != true ]; then
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
+          # Fails closed: any lookup error other than "no such release" stops the run.
+          state="$(scripts/release-assets.sh release-state "$TAG")"
+          echo "release ${TAG}: ${state}"
+          if [ "$state" = listed ] && [ "$REPLACE_PUBLISHED" != true ]; then
             echo "::error::the release ${TAG} already carries SHA256SUMS; start the run with replace_published to replace the files"
             exit 1
           fi
@@ -105,7 +108,7 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
           scripts/release-assets.sh version-check "$TAG"
 
       - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
@@ -148,7 +151,7 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
           scripts/release-assets.sh version-check "$TAG"
 
       # The Rust version of frost/rust-toolchain.toml, no build cache. Keep the two dealer jobs
@@ -196,7 +199,7 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
           scripts/release-assets.sh version-check "$TAG"
 
       # The Rust version of frost/rust-toolchain.toml, no build cache. Keep the two dealer jobs
@@ -294,6 +297,8 @@ jobs:
     env:
       TAG: ${{ github.ref_name }}
       RELEASE_CERT_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release-assets.yml@${{ github.ref }}
+    outputs:
+      release_sha256: ${{ steps.manifest.outputs.sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -337,6 +342,7 @@ jobs:
           scripts/release-assets.sh check-digests out \
             jar="$JAR_SHA256" dealer-x86_64="$DEALER_X86_64_SHA256" dealer-aarch64="$DEALER_AARCH64_SHA256" \
             sbom-driver="$SBOM_DRIVER_SHA256" sbom-dealer="$SBOM_DEALER_SHA256"
+          scripts/release-assets.sh check-sboms out
           scripts/release-assets.sh sums out
           scripts/release-assets.sh check-set out ready
 
@@ -371,6 +377,12 @@ jobs:
               --source-ref "$GITHUB_REF" --deny-self-hosted-runners
           done
 
+      # The digest over every signed file, bundles included, as a job output: the upload job compares
+      # (the release-set artifact could be replaced by another job of the run; this output cannot).
+      - name: Digest of the signed release
+        id: manifest
+        run: scripts/release-assets.sh manifest-digest out >>"$GITHUB_OUTPUT"
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-set
@@ -399,12 +411,16 @@ jobs:
           name: release-set
           path: out
 
-      # Nothing but the signed files goes to the release, whatever the signing job handed over.
+      # Nothing but the signed files goes to the release: the exact file list, and the digest over all
+      # of them that the signing job stated as its output.
       - name: The files to attach are exactly the signed files
+        env:
+          RELEASE_SHA256: ${{ needs.sign.outputs.release_sha256 }}
         run: |
           set -euo pipefail
           scripts/release-assets.sh version-check "$TAG"
           scripts/release-assets.sh check-set out signed
+          scripts/release-assets.sh check-manifest out "$RELEASE_SHA256"
 
       # A release that does not exist yet is created as a draft (with the assets); the maintainer
       # writes the notes and publishes it. An existing release only gets the files. The "already
@@ -415,10 +431,10 @@ jobs:
           set -euo pipefail
           # The release-lookup errors that are not "not found" stop the run, so a transient API error
           # cannot look like a missing release.
-          if ! out="$(gh release view "$TAG" --json assets --jq '[.assets[].name] | index("SHA256SUMS") != null' 2>&1)"; then
-            [[ "$out" == *"release not found"* ]] || { echo "::error::cannot read the release ${TAG}: ${out}"; exit 1; }
+          state="$(scripts/release-assets.sh release-state "$TAG")"
+          if [ "$state" = none ]; then
             gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes "Draft created by the release assets workflow; notes to follow."
-          elif [ "$out" = true ] && [ "$REPLACE_PUBLISHED" != true ]; then
+          elif [ "$state" = listed ] && [ "$REPLACE_PUBLISHED" != true ]; then
             echo "::error::the release ${TAG} already carries SHA256SUMS; start the run with replace_published to replace the files"
             exit 1
           fi
@@ -433,7 +449,7 @@ jobs:
           gh release view "$TAG" --json assets --jq '.assets[].name' | while read -r name; do
             if [[ "$name" =~ $ours ]] && [ ! -e "out/${name}" ]; then
               echo "removing ${name}, which is not in this set"
-              gh release delete-asset "$TAG" "$name" --yes
+              gh release delete-asset "$TAG" "$name" --yes </dev/null
             fi
           done
 

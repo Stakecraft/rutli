@@ -18,6 +18,10 @@
 #   scripts/release-assets.sh digest OUT KIND        the GITHUB_OUTPUT line sha256=<hex> of the file of KIND in OUT
 #   scripts/release-assets.sh check-digests OUT KIND=SHA256...  each file of KIND in OUT has that digest
 #   scripts/release-assets.sh check-set OUT STAGE    OUT holds exactly the expected files: STAGE built|ready|signed
+#   scripts/release-assets.sh check-sboms OUT        both SBOMs in OUT are SPDX with a plausible package count
+#   scripts/release-assets.sh manifest-digest OUT    sha256=<hex> over every file in OUT (bundles included)
+#   scripts/release-assets.sh check-manifest OUT SHA256   OUT is exactly the signed files the signing job stated
+#   scripts/release-assets.sh release-state TAG      none | listed | unlisted (SHA256SUMS on the release or not)
 #   scripts/release-assets.sh sums OUT               SHA256SUMS of every file in OUT (not the bundles)
 #   scripts/release-assets.sh sign OUT               a cosign bundle OUT/<file>.sigstore.json for every file
 #   scripts/release-assets.sh verify OUT             the commands a user runs, against every file
@@ -237,7 +241,6 @@ cmd_gather_sbom() {
     [ -f "$1/asset-sbom/$f" ] && [ ! -L "$1/asset-sbom/$f" ] || die "asset-sbom lacks the file $f"
     cp "$1/asset-sbom/$f" "$2/$f"
   done
-  check_sboms "$2"
   echo "OK: the two SBOMs"
 }
 
@@ -283,6 +286,47 @@ cmd_check_digests() {
   echo "OK: ${n} files are the ones their jobs made"
 }
 
+# A digest over the whole signed release (every file, bundles included), stated by the signing job as
+# a job output and compared by the job that uploads: the artifact between the two could be replaced by
+# any job of the run, the output cannot.
+manifest() { # OUT
+  (cd "$1" && find . -maxdepth 1 -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | cut -d' ' -f1
+}
+
+cmd_manifest_digest() {
+  [ -d "${1:-}" ] || die "usage: $0 manifest-digest OUT"
+  echo "sha256=$(manifest "$1")"
+}
+
+cmd_check_manifest() {
+  [ -d "${1:-}" ] || die "usage: $0 check-manifest OUT SHA256"
+  [[ "${2:-}" =~ ^[0-9a-f]{64}$ ]] || die "check-manifest: no valid digest (got '${2:-}')"
+  local have
+  have="$(manifest "$1")"
+  [ "$have" = "$2" ] || die "the files in $1 are not the ones the signing job signed (manifest ${have}, stated $2)"
+  (cd "$1" && sha256sum --check --strict --quiet SHA256SUMS)
+  echo "OK: $1 is the signed release the signing job stated"
+}
+
+# Whether the release for TAG exists and carries SHA256SUMS. Fails closed: an error that is not "no
+# such release", or an answer that is neither true nor false, stops the run.
+cmd_release_state() {
+  [ -n "${1:-}" ] || die "usage: $0 release-state TAG"
+  local out err
+  err="$(mktemp)"
+  if out="$(gh release view "$1" --json assets --jq '[.assets[].name] | index("SHA256SUMS") != null' 2>"$err")"; then
+    case "$out" in
+      true) echo listed ;;
+      false) echo unlisted ;;
+      *) die "unexpected answer about the release $1: ${out}" ;;
+    esac
+  elif grep -q 'release not found' "$err"; then
+    echo none
+  else
+    die "cannot read the release $1: $(cat "$err")"
+  fi
+}
+
 cmd_sums() {
   need_out "${1:-}"
   local tmp
@@ -305,9 +349,9 @@ cmd_sign() {
       # cosign 3 uses a signing config by default, which always uploads to the log: a key signature
       # that must stay out of the public log needs the config off (flag deprecated, still working).
       cosign sign-blob --yes --key "$COSIGN_KEY" --use-signing-config=false --tlog-upload=false \
-        --bundle "$1/$f.sigstore.json" "$1/$f" >/dev/null
+        --bundle "$1/$f.sigstore.json" "$1/$f" >/dev/null </dev/null
     else
-      cosign sign-blob --yes --bundle "$1/$f.sigstore.json" "$1/$f" >/dev/null
+      cosign sign-blob --yes --bundle "$1/$f.sigstore.json" "$1/$f" >/dev/null </dev/null
     fi
     echo "signed $f"
   done < <(assets "$1")
@@ -322,11 +366,11 @@ cmd_verify() {
   while read -r f; do
     [ -f "$1/$f.sigstore.json" ] || die "no signature bundle for $f"
     if [ -n "${COSIGN_PUBKEY:-}" ]; then
-      cosign verify-blob --key "$COSIGN_PUBKEY" --insecure-ignore-tlog=true --bundle "$1/$f.sigstore.json" "$1/$f" >/dev/null
+      cosign verify-blob --key "$COSIGN_PUBKEY" --insecure-ignore-tlog=true --bundle "$1/$f.sigstore.json" "$1/$f" >/dev/null </dev/null
     else
       cosign verify-blob --bundle "$1/$f.sigstore.json" \
         --certificate-identity "$RELEASE_CERT_IDENTITY" \
-        --certificate-oidc-issuer "$OIDC_ISSUER" "$1/$f" >/dev/null
+        --certificate-oidc-issuer "$OIDC_ISSUER" "$1/$f" >/dev/null </dev/null
     fi
     n=$((n + 1))
   done < <(assets "$1")
@@ -337,7 +381,7 @@ cmd_verify() {
 
 main() {
   local c="${1:-}"
-  [ -n "$c" ] || die "usage: $0 install-tools|version-check|build-jar|build-dealer|licenses|sbom|gather|gather-sbom|digest|check-digests|check-set|sums|sign|verify [args]"
+  [ -n "$c" ] || die "usage: $0 install-tools|version-check|build-jar|build-dealer|licenses|sbom|gather|gather-sbom|digest|check-digests|check-set|check-sboms|manifest-digest|check-manifest|release-state|sums|sign|verify [args]"
   shift
   case "$c" in
     install-tools) cmd_install_tools "$@" ;;
@@ -351,6 +395,10 @@ main() {
     digest) cmd_digest "$@" ;;
     check-digests) cmd_check_digests "$@" ;;
     check-set) cmd_check_set "$@" ;;
+    check-sboms) check_sboms "$@" ;;
+    manifest-digest) cmd_manifest_digest "$@" ;;
+    check-manifest) cmd_check_manifest "$@" ;;
+    release-state) cmd_release_state "$@" ;;
     sums) cmd_sums "$@" ;;
     sign) cmd_sign "$@" ;;
     verify) cmd_verify "$@" ;;

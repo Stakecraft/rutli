@@ -123,7 +123,8 @@ bundled crates require their notices to travel with the binary.
 The jobs of one run share a token for the run's artifacts, so any job could replace another job's
 artifact. Each job that makes a file therefore states its sha256 as a job output (which no other job
 can change), and every job that reads the file compares it with that digest and stops on a
-difference.
+difference; the signing job does the same for the whole signed release, which the upload job
+compares before it attaches anything.
 
 What the release workflow may do beyond `publish-image.yml`: the `build` jobs have `contents: read`;
 the `sbom` job (`contents: read`) is the only one that runs a parser tool (syft) on the built files;
@@ -150,7 +151,7 @@ cosign verify-blob --bundle "$FILE.sigstore.json" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   "$FILE"
 
-# Provenance: same workflow and tag, built on a GitHub-hosted runner
+# Provenance: same workflow and tag, attested by a job on a GitHub-hosted runner
 gh attestation verify "$FILE" --repo Stakecraft/rutli \
   --signer-workflow Stakecraft/rutli/.github/workflows/release-assets.yml \
   --source-ref "refs/tags/$TAG" --deny-self-hosted-runners
