@@ -263,7 +263,7 @@ impl NonceStore {
 /// past it); `None` when it holds anything else. Only a regular file is opened: a symbolic link, a
 /// FIFO (which would block the open) or a directory under the name is an error.
 fn complete_sentinel(path: &Path) -> Result<Option<File>> {
-    if !fs::symlink_metadata(path)?.file_type().is_file() {
+    if !fs::symlink_metadata(path)?.is_file() {
         return Err(CoreError::NonceStore(format!(
             "{} is not a regular file",
             path.display()
