@@ -86,7 +86,7 @@ GitHub-hosted runners (never the self-hosted ones), after its own approval on th
 environment. It builds the assets from the tag, signs them and attaches them to the release for the
 tag: an existing release gets the files, a missing one is created as a **draft** that the maintainer
 completes (notes, quality report) and publishes. `scripts/release-assets.sh` holds every step;
-`image-build-check.yml` runs the same script on pull requests with a throwaway key, so a broken
+`release-assets-check.yml` runs the same script on pull requests with a throwaway key, so a broken
 step shows before tag day.
 
 | Asset | Contents | License files |
@@ -139,8 +139,16 @@ dealer binaries before it uploads anything, so a file that does not verify is no
 SBOMs are signed like every other file; to read one, `jq '.packages[].name' rutli-dealer-<version>.spdx.json`.
 The container image is verified as described in [SECURITY.md](../SECURITY.md#verify-the-image).
 
-The files are always one set: a run for the same tag that is repeated (`workflow_dispatch`) signs
-again and replaces them all.
+The files are always one set. The builds are not reproducible, so a repeated run (`workflow_dispatch`)
+would sign a second set; it refuses to touch a release that already carries `SHA256SUMS` unless it is
+started with `replace_published`, and then it replaces every file. The provenance names the tagged
+workflow file, whose jobs all run on the hosted runners that file lists; `--deny-self-hosted-runners`
+checks the runner of the signing job.
+
+The dealer binaries are built on `ubuntu-24.04`, so they need glibc 2.39 or newer (Ubuntu 24.04,
+Debian 13, RHEL 10). On an older system, build them from the tag (`cargo build --release --locked -p
+rutli-cosigner --bin rutli-dealer` in `frost/`) or run the cosigner image. On macOS replace the last
+command with `shasum -a 256 -c --ignore-missing SHA256SUMS`.
 
 ## Tag-day order
 

@@ -20,6 +20,11 @@ on:
   # Manual re-run for a release tag only: pick the `v*` tag as the ref. A new run signs again and
   # replaces the assets of the release (gh release upload --clobber).
   workflow_dispatch:
+    inputs:
+      replace_published:
+        description: "Replace assets a release already carries (SHA256SUMS present). Off: such a run stops before the upload."
+        type: boolean
+        default: false
 
 # No job gets more than it asks for below.
 permissions: {}
@@ -178,8 +183,19 @@ jobs:
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
+          REPLACE_PUBLISHED: ${{ inputs.replace_published }}
         run: |
           set -euo pipefail
+          # The builds are not reproducible: a second run would leave two sets of checksums and
+          # attestations that both verify. A release that already has SHA256SUMS is not touched
+          # unless the run was started with replace_published.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            have="$(gh release view "$TAG" --json assets --jq '[.assets[].name] | index("SHA256SUMS") != null')"
+            if [ "$have" = true ] && [ "$REPLACE_PUBLISHED" != true ]; then
+              echo "::error::the release ${TAG} already carries SHA256SUMS; start the run with replace_published to replace the files"
+              exit 1
+            fi
+          fi
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes "Draft created by the release assets workflow; notes to follow."
           fi

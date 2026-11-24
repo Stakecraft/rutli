@@ -118,16 +118,26 @@ cmd_sbom() {
   [ -f "$jar" ] || die "no $jar: run build-jar first"
   # The jar: syft reads the Maven metadata inside the assembled archive.
   syft scan "file:${jar}" -o "spdx-json=$1/rutli-driver-${v}.spdx.json" -q
-  # The dealer: the crates it is built from, as locked in frost/Cargo.lock (the binary is one for
-  # every platform; the lock file is the same).
+  # The dealer: the crates of frost/Cargo.lock (the whole workspace, dev dependencies included; the
+  # binary is one for every platform and the lock file is the same). A copy of the lock file alone, so
+  # a build directory next to it cannot change the result.
   dealers="$(find "$1" -maxdepth 1 -name "rutli-dealer-${v}-*" ! -name '*.json' ! -name '*.spdx.json' | wc -l | tr -d ' ')"
   [ "$dealers" -ge 1 ] || die "no dealer binary in $1: run build-dealer first"
-  syft scan "dir:${REPO}/frost" -o "spdx-json=$1/rutli-dealer-${v}.spdx.json" -q
+  local lockdir
+  lockdir="$(mktemp -d)"
+  cp "$REPO/frost/Cargo.lock" "$lockdir/Cargo.lock"
+  syft scan "dir:${lockdir}" -o "spdx-json=$1/rutli-dealer-${v}.spdx.json" -q
   local f
   for f in "$1/rutli-driver-${v}.spdx.json" "$1/rutli-dealer-${v}.spdx.json"; do
     jq -e '.spdxVersion != null and ((.packages // []) | length) > 0' "$f" >/dev/null \
       || die "$(basename "$f") is not an SPDX document with packages"
   done
+  # The jar's SBOM comes from the Maven metadata kept inside the assembled jar (build.sbt keeps
+  # META-INF/maven); a handful of packages means that metadata is gone.
+  [ "$(jq '.packages | length' "$1/rutli-driver-${v}.spdx.json")" -ge 5 ] \
+    || die "the driver jar's SBOM lists fewer than 5 packages: is META-INF/maven in the jar?"
+  [ "$(jq '.packages | length' "$1/rutli-dealer-${v}.spdx.json")" -ge 20 ] \
+    || die "the dealer's SBOM lists fewer than 20 packages: is Cargo.lock being read?"
   echo "OK: SBOMs for the driver jar ($(jq '.packages | length' "$1/rutli-driver-${v}.spdx.json") packages) and the dealer ($(jq '.packages | length' "$1/rutli-dealer-${v}.spdx.json") packages)"
 }
 
@@ -150,7 +160,10 @@ cmd_sign() {
   local f
   while read -r f; do
     if [ -n "${COSIGN_KEY:-}" ]; then
-      cosign sign-blob --yes --key "$COSIGN_KEY" --tlog-upload=false --bundle "$1/$f.sigstore.json" "$1/$f" >/dev/null
+      # cosign 3 uses a signing config by default, which always uploads to the log: a key signature
+      # that must stay out of the public log needs the config off (flag deprecated, still working).
+      cosign sign-blob --yes --key "$COSIGN_KEY" --use-signing-config=false --tlog-upload=false \
+        --bundle "$1/$f.sigstore.json" "$1/$f" >/dev/null
     else
       cosign sign-blob --yes --bundle "$1/$f.sigstore.json" "$1/$f" >/dev/null
     fi

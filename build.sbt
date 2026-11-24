@@ -103,6 +103,9 @@ lazy val driver = (project in file("driver"))
     assembly / assemblyMergeStrategy := {
       case PathList("META-INF", "rutli", _*)    => MergeStrategy.first
       case PathList("META-INF", "services", _*) => MergeStrategy.concat
+      // pom.properties of each bundled dependency: what SBOM and vulnerability scanners read to
+      // identify the jar's contents (the release SBOM, scripts/release-assets.sh).
+      case PathList("META-INF", "maven", _*)    => MergeStrategy.first
       // Dependencies' license and notice files are reproduced in META-INF/rutli/THIRD-PARTY-LICENSES.txt.
       case PathList("META-INF", _*)             => MergeStrategy.discard
       // scala-library's root LICENSE and NOTICE would otherwise read as this jar's own.
