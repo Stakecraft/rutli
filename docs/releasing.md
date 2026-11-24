@@ -3,8 +3,9 @@
 What a Rütli release consists of and what has to ship with each artifact. Tagging `v*` runs
 `.github/workflows/publish-image.yml` on GitHub-hosted runners (never the self-hosted CI runners):
 it builds the cosigner image for amd64 and arm64 natively, pushes the multi-arch index, signs it
-with cosign (keyless) and attests its build provenance. The other assets are attached to the GitHub
-release by the maintainer.
+with cosign (keyless) and attests its build provenance. `.github/workflows/release-assets.yml` does
+the same for the driver jar and the dealer binary (build, SBOM, signature, provenance) and attaches
+them to the GitHub release (see "Release assets").
 
 ## Before tagging
 
@@ -80,16 +81,69 @@ refreshes only the runtime base image digest.
 
 ## Release assets
 
+`.github/workflows/release-assets.yml` runs on the same `v*` tag as `publish-image.yml`, on
+GitHub-hosted runners (never the self-hosted ones), after its own approval on the `release`
+environment. It builds the assets from the tag, signs them and attaches them to the release for the
+tag: an existing release gets the files, a missing one is created as a **draft** that the maintainer
+completes (notes, quality report) and publishes. `scripts/release-assets.sh` holds every step;
+`image-build-check.yml` runs the same script on pull requests with a throwaway key, so a broken
+step shows before tag day.
+
 | Asset | Contents | License files |
 |---|---|---|
 | `rutli-driver-<version>.jar` | `sbt driver/assembly` | Inside the jar: `META-INF/rutli/LICENSE`, `NOTICE`, `THIRD-PARTY-LICENSES.txt` |
-| `rutli-dealer-<version>-<os>-<arch>` | `cargo build --release -p rutli-cosigner --bin rutli-dealer` | **Attach next to it:** `THIRD-PARTY-LICENSES-rust.txt` (a copy of `frost/THIRD-PARTY-LICENSES.txt`) and `LICENSE` |
-| `SHA256SUMS` | `sha256sum` of every other asset | — |
+| `rutli-dealer-<version>-linux-x86_64`, `-linux-aarch64` | `cargo build --release --locked -p rutli-cosigner --bin rutli-dealer`, each on a native runner | `THIRD-PARTY-LICENSES-rust.txt` (a copy of `frost/THIRD-PARTY-LICENSES.txt`) and `LICENSE`, attached by the workflow |
+| `rutli-driver-<version>.spdx.json`, `rutli-dealer-<version>.spdx.json` | SPDX SBOMs: the driver's from the assembled jar, the dealer's from `frost/Cargo.lock` | — |
+| `SHA256SUMS` | `sha256sum` of every file above (not of the bundles) | — |
+| `<file>.sigstore.json` | the keyless cosign signature of `<file>`, one bundle per file above, `SHA256SUMS` included | — |
 | `ghcr.io/stakecraft/rutli-cosigner:<version>` | `publish-image.yml` | In the image: `/usr/share/doc/rutli-cosigner/THIRD-PARTY-LICENSES.txt` |
 
-A binary without its license file next to it is not a complete release: the MIT and BSD
-licenses of the bundled crates require their notices to travel with the binary.
+The workflow also stores a GitHub build provenance attestation for every file (from `SHA256SUMS`).
+Release builds use no build cache. A binary for another platform (for example macOS) is not built by
+the workflow: if the maintainer attaches one by hand it is unsigned and the notes say so. A binary
+without its license file next to it is not a complete release: the MIT and BSD licenses of the
+bundled crates require their notices to travel with the binary.
+
+What the release workflow may do beyond `publish-image.yml`: the `build` jobs have `contents: read`;
+the `sign` job has `contents: write` (attach the files to the release), `id-token: write` (keyless
+signing) and `attestations: write` (the provenance attestation). `publish-image.yml` keeps its
+permissions.
+
+### Verify the release assets
+
+Download the files you use and their `.sigstore.json` bundles from the release. You need cosign 3 or
+newer and, for the second check, the GitHub CLI (`gh`, 2.103 or newer).
 
 ```bash
-cp frost/THIRD-PARTY-LICENSES.txt THIRD-PARTY-LICENSES-rust.txt
+TAG=v0.5.0
+ID="https://github.com/Stakecraft/rutli/.github/workflows/release-assets.yml@refs/tags/$TAG"
+FILE=rutli-dealer-0.5.0-linux-x86_64        # or rutli-driver-0.5.0.jar, an .spdx.json, SHA256SUMS
+
+# Signature: made by release-assets.yml in Stakecraft/rutli, run on that tag
+cosign verify-blob --bundle "$FILE.sigstore.json" \
+  --certificate-identity "$ID" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "$FILE"
+
+# Provenance: same workflow and tag, built on a GitHub-hosted runner
+gh attestation verify "$FILE" --repo Stakecraft/rutli \
+  --signer-workflow Stakecraft/rutli/.github/workflows/release-assets.yml \
+  --source-ref "refs/tags/$TAG" --deny-self-hosted-runners
+
+# The checksums of all files (verify SHA256SUMS itself with the first command)
+sha256sum --check --ignore-missing SHA256SUMS
 ```
+
+The release workflow runs the first command for every file and the second for the jar and both
+dealer binaries before it uploads anything, so a file that does not verify is not released. The
+SBOMs are signed like every other file; to read one, `jq '.packages[].name' rutli-dealer-<version>.spdx.json`.
+The container image is verified as described in [SECURITY.md](../SECURITY.md#verify-the-image).
+
+The files are always one set: a run for the same tag that is repeated (`workflow_dispatch`) signs
+again and replaces them all.
+
+## Tag-day order
+
+1. Tag. Two runs wait for approval on the `release` environment: `publish-image.yml` and
+   `release-assets.yml`; approve both.
+2. When both are green, pin the image digest (above), complete and publish the draft release.

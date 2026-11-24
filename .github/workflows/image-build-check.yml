@@ -16,6 +16,12 @@ on:
       - "frost/**"
       - ".github/workflows/**"
       - ".github/dependabot.yml"
+      # The release assets dry run below builds the driver jar and the dealer with the release script.
+      - "driver/**"
+      - "build.sbt"
+      - "project/**"
+      - "scripts/release-assets.sh"
+      - "scripts/publish-canton-deps.sh"
   push:
     # No path filter on a push to main: every commit on main gets the whole set (see main-status.yml).
     branches: [main]
@@ -84,6 +90,13 @@ jobs:
           a="$(pins .github/workflows/publish-image.yml)"; b="$(pins .github/workflows/image-build-check.yml)"
           [ -n "$a" ] && [ "$a" = "$b" ] || { echo "::error::docker action pins differ between publish-image.yml and image-build-check.yml:"; diff <(echo "$a") <(echo "$b") || true; exit 1; }
           echo "OK: same docker action pins"
+      - name: The release assets workflow and ci.yml use one Canton version
+        run: |
+          set -euo pipefail
+          v() { sed -n 's/^  CANTON_TAG: \(v[0-9.]*\).*$/\1/p' "$1" | head -n 1; }
+          a="$(v .github/workflows/ci.yml)"; b="$(v .github/workflows/release-assets.yml)"
+          [ -n "$a" ] && [ "$a" = "$b" ] || { echo "::error::CANTON_TAG differs: ci.yml '${a}', release-assets.yml '${b}'"; exit 1; }
+          echo "OK: CANTON_TAG ${a}"
       - name: The release dry run builds and tags by the release workflow's rules
         run: |
           set -euo pipefail
@@ -260,3 +273,78 @@ jobs:
           jq -e '(if has("SLSA") then {p: .} else . end) | (keys | length) == 1 and all(.[]; .SLSA != null)' provenance.json >/dev/null \
             || { echo "::error::cannot read provenance"; jq -c 'keys' provenance.json; exit 1; }
           echo "OK: ${IMAGE}@${digest} holds the platform image with SBOM and provenance, tags: $(jq -r '.tags | join(" ")' <<<"$META_JSON")"
+
+  # The release assets (release-assets.yml) without a tag: the same script builds the driver jar and
+  # the dealer, writes their SBOMs and SHA256SUMS, signs every file and verifies the signatures as a
+  # user would. The signing key is a throwaway key made here (cosign sign-blob --key, no transparency
+  # log upload), so nothing is signed with the project's identity and nothing is published. Not
+  # covered: the keyless identity, the provenance attestation and the upload to a release.
+  release-assets-dry-run:
+    name: Release assets with a throwaway key
+    needs: pins
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CANTON_TAG: v3.6.1
+      COSIGN_PASSWORD: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: sbt/setup-sbt@7e114eae4f32ec3f93c851c2793376a77f384409 # v1.5.15
+      - name: Canton kms-driver-api (published locally, as the release workflow)
+        run: scripts/publish-canton-deps.sh "$CANTON_TAG"
+
+      - name: Rust version (frost/rust-toolchain.toml)
+        id: rust
+        run: |
+          set -euo pipefail
+          v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
+          [ -n "$v" ] || { echo "::error::no channel in frost/rust-toolchain.toml"; exit 1; }
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
+
+      - name: Install cosign and syft (pinned, checked by sha256)
+        run: scripts/release-assets.sh install-tools
+
+      - name: Build, SBOMs, checksums
+        run: |
+          set -euo pipefail
+          scripts/release-assets.sh version-check
+          scripts/release-assets.sh build-jar out
+          scripts/release-assets.sh build-dealer out
+          scripts/release-assets.sh licenses out
+          scripts/release-assets.sh sbom out
+          scripts/release-assets.sh sums out
+
+      - name: Sign with a throwaway key and verify
+        run: |
+          set -euo pipefail
+          keys="${RUNNER_TEMP}/keys"
+          mkdir -p "$keys"
+          (cd "$keys" && cosign generate-key-pair >/dev/null)
+          export COSIGN_KEY="${keys}/cosign.key" COSIGN_PUBKEY="${keys}/cosign.pub"
+          scripts/release-assets.sh sign out
+          scripts/release-assets.sh verify out
+
+      # The verification must fail when a file changes after signing, and when a signature belongs to
+      # another file.
+      - name: A changed file and a swapped signature are refused
+        run: |
+          set -euo pipefail
+          export COSIGN_PUBKEY="${RUNNER_TEMP}/keys/cosign.pub"
+          jar="$(printf '%s\n' out/rutli-driver-*.jar | head -n 1)"
+          cp -r out tampered
+          printf 'x' >> "tampered/$(basename "$jar")"
+          if scripts/release-assets.sh verify tampered; then echo "::error::a changed jar passed the verification"; exit 1; fi
+          rm -rf tampered; cp -r out tampered
+          cp "tampered/LICENSE.sigstore.json" "tampered/$(basename "$jar").sigstore.json"
+          if scripts/release-assets.sh verify tampered; then echo "::error::a swapped signature passed the verification"; exit 1; fi
+          echo "OK: tampering is detected"

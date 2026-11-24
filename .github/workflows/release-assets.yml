@@ -1,0 +1,197 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+name: Release assets
+
+# The driver jar and the dealer binary of a release, built from the tag on GitHub-hosted runners,
+# each with an SPDX SBOM, a SHA256SUMS file, a keyless cosign signature (a Sigstore bundle per file)
+# and a GitHub build provenance attestation; everything is attached to the release for the tag.
+#   guard   refuses any ref that is not a v* tag (and carries the `release` environment)
+#   build   the jar (sbt driver/assembly) and the dealer for linux-x86_64 and linux-aarch64
+#   sign    the only job with a signing identity (id-token) and the only one that may write to the
+#           release (contents: write): SBOMs, SHA256SUMS, signatures, provenance, the user's
+#           verification commands, then the upload
+# The container image has its own workflow (publish-image.yml), unchanged. How a user verifies these
+# files: docs/releasing.md, "Verify the release assets". image-build-check.yml runs the same
+# scripts/release-assets.sh commands on pull requests with a throwaway key, so a broken step shows
+# before a tag.
+on:
+  push:
+    tags: ["v*"]
+  # Manual re-run for a release tag only: pick the `v*` tag as the ref. A new run signs again and
+  # replaces the assets of the release (gh release upload --clobber).
+  workflow_dispatch:
+
+# No job gets more than it asks for below.
+permissions: {}
+
+concurrency:
+  group: release-assets-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CANTON_TAG: v3.6.1 # as ci.yml (image-build-check.yml checks that they agree)
+
+jobs:
+  guard:
+    name: Require a release tag ref
+    runs-on: ubuntu-24.04
+    environment: release
+    steps:
+      - name: Require a v* tag ref
+        if: ${{ github.ref_type != 'tag' || !startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          echo "::error::This workflow publishes only from a v* tag ref (got ${REF}). Run it on a release tag."
+          exit 1
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: guard
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: driver jar
+            asset: jar
+            runner: ubuntu-24.04
+          - name: dealer linux-x86_64
+            asset: dealer
+            runner: ubuntu-24.04
+          - name: dealer linux-aarch64
+            asset: dealer
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The tag and the versions in the tree agree
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
+          scripts/release-assets.sh version-check "$TAG"
+
+      # --- the jar
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        if: matrix.asset == 'jar'
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: sbt/setup-sbt@7e114eae4f32ec3f93c851c2793376a77f384409 # v1.5.15
+        if: matrix.asset == 'jar'
+      - name: Canton kms-driver-api (published locally, as ci.yml)
+        if: matrix.asset == 'jar'
+        run: scripts/publish-canton-deps.sh "$CANTON_TAG"
+      - name: Build the driver jar
+        if: matrix.asset == 'jar'
+        run: scripts/release-assets.sh build-jar out
+
+      # --- the dealer: the Rust version of frost/rust-toolchain.toml, no build cache
+      - name: Rust version (frost/rust-toolchain.toml)
+        if: matrix.asset == 'dealer'
+        id: rust
+        run: |
+          set -euo pipefail
+          v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
+          [ -n "$v" ] || { echo "::error::no channel in frost/rust-toolchain.toml"; exit 1; }
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
+        if: matrix.asset == 'dealer'
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
+      - name: Build the dealer
+        if: matrix.asset == 'dealer'
+        run: scripts/release-assets.sh build-dealer out
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: asset-${{ matrix.name }}
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
+
+  sign:
+    name: SBOM, signatures, provenance, upload
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write      # upload the assets to the release of the tag (and create it as a draft if needed)
+      id-token: write      # keyless signing: the workflow's OIDC identity goes into the certificates
+      attestations: write  # store the build provenance attestation with the repository
+    env:
+      TAG: ${{ github.ref_name }}
+      RELEASE_CERT_IDENTITY: https://github.com/Stakecraft/rutli/.github/workflows/release-assets.yml@${{ github.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: asset-*
+          merge-multiple: true
+          path: out
+
+      - name: Install cosign and syft (pinned, checked by sha256)
+        run: scripts/release-assets.sh install-tools
+
+      - name: Licenses, SBOMs, checksums
+        run: |
+          set -euo pipefail
+          scripts/release-assets.sh licenses out
+          scripts/release-assets.sh sbom out
+          scripts/release-assets.sh sums out
+
+      # Keyless: Fulcio issues a short-lived certificate for this workflow at this tag ref, and each
+      # signature is recorded in the public Rekor log.
+      - name: Sign every file (cosign sign-blob, keyless)
+        run: scripts/release-assets.sh sign out
+
+      - name: Attest build provenance of every asset
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: out/SHA256SUMS
+          # A storage record would need the artifact-metadata permission; nothing reads it.
+          create-storage-record: false
+
+      # The commands of docs/releasing.md ("Verify the release assets"), so a signature or an
+      # attestation a user cannot verify fails the release here, before anything is uploaded.
+      - name: Verify as a user would
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          scripts/release-assets.sh verify out
+          for f in out/rutli-driver-*.jar out/rutli-dealer-*-linux-x86_64 out/rutli-dealer-*-linux-aarch64; do
+            gh attestation verify "$f" --repo Stakecraft/rutli \
+              --signer-workflow Stakecraft/rutli/.github/workflows/release-assets.yml \
+              --source-ref "$GITHUB_REF" --deny-self-hosted-runners
+          done
+
+      # A release that does not exist yet is created as a draft (with the assets); the maintainer
+      # writes the notes and publishes it. An existing release only gets the files.
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes "Draft created by the release assets workflow; notes to follow."
+          fi
+          gh release upload "$TAG" out/* --clobber
+
+      - name: Summary
+        run: |
+          {
+            echo "### Release assets for ${TAG}"
+            echo
+            echo '```'
+            cat out/SHA256SUMS
+            echo '```'
+            echo "Verify: docs/releasing.md, 'Verify the release assets'. Signing identity: \`${RELEASE_CERT_IDENTITY}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
