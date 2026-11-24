@@ -388,8 +388,12 @@ fn a_hosted_key_fence_parked_on_a_hung_key_file_does_not_freeze_health() {
             .await
         })
     };
-    assert!(gate.parked_within(1, Duration::from_secs(5)), "the fence must reach the store");
-    let h = answers_within(&rt, answer, health()).expect("Health must answer while the fence is parked");
+    assert!(
+        gate.parked_within(1, Duration::from_secs(5)),
+        "the fence must reach the store"
+    );
+    let h = answers_within(&rt, answer, health())
+        .expect("Health must answer while the fence is parked");
     assert!(h.ok, "{}", h.detail);
 
     // In process (the leader's own node): the same.
@@ -398,7 +402,10 @@ fn a_hosted_key_fence_parked_on_a_hung_key_file_does_not_freeze_health() {
         let p = peers[0].clone();
         rt.spawn(async move { p.ceremony_fence("del-2", "rutli-gone-2", "delkey").await })
     };
-    assert!(gate.parked_within(2, Duration::from_secs(5)), "the local fence must reach the store");
+    assert!(
+        gate.parked_within(2, Duration::from_secs(5)),
+        "the local fence must reach the store"
+    );
     answers_within(&rt, answer, health()).expect("Health must answer while both fences are parked");
 
     // The volume answers again: both fences complete (nothing hosted there yet: a delete fence on a
