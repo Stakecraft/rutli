@@ -23,11 +23,11 @@
 # (ci/peer-pins-values.yaml).
 #
 # profile: the chart's default is production, which needs the perNode topology (one seal secret per
-# node). The legacy topology shares one seal secret, so it runs the lab profile until the soak moves
-# to perNode; `rutli-cosigner check-config` lists what the production profile would still refuse
-# (docs/production-profile.md).
+# node), so these values do not render on their own. That is deliberate: a plain `helm upgrade` cannot
+# move the soak. An upgrade of the legacy soak passes `--set profile=lab` explicitly (what
+# scripts/ci-deploy-policy.sh does) until the soak moves to perNode; `rutli-cosigner check-config`
+# lists what the production profile would still refuse (docs/production-profile.md).
 topology: legacy
-profile: lab
 persistence:
   storageClassName: hcloud-volumes
   accessModes:
