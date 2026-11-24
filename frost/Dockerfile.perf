@@ -1,7 +1,7 @@
 # Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # The image of the load tests (scripts/perf-load.sh): the cosigner built exactly as frost/Dockerfile
-# builds it, plus the load generator. Never published, never a release artifact.
+# builds it, plus the load generator and the split ceremony's dealer. Never published, never a release artifact.
 #
 # One image instead of two so that the workspace is compiled once, and so that a cluster under test
 # and its load generator are always the same commit. The two FROM lines must be those of
@@ -17,12 +17,15 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 # could give the daemon's dependencies features that only the generator asks for.
 RUN cargo build --release --locked -p rutli-cosigner --bin rutli-cosigner
 RUN cargo build --release --locked -p rutli-loadgen --bin rutli-loadgen
+# The split ceremony's dealer, for the cluster suite's migration stage (its own pod, never a cosigner's).
+RUN cargo build --release --locked -p rutli-cosigner --bin rutli-dealer
 
 # debian:stable-slim (trixie when pinned)
 FROM debian:stable-slim@sha256:fbfb4059d2127120aa05b6e6064523d2102552f0cf0026ddf0701c12f1f8f3e0
 RUN useradd -r -u 10001 rutli && mkdir /data && chown rutli /data
 COPY --from=build /src/target/release/rutli-cosigner /usr/local/bin/rutli-cosigner
 COPY --from=build /src/target/release/rutli-loadgen /usr/local/bin/rutli-loadgen
+COPY --from=build /src/target/release/rutli-dealer /usr/local/bin/rutli-dealer
 USER rutli
 VOLUME ["/data"]
 ENTRYPOINT ["rutli-cosigner"]

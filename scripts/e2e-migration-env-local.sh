@@ -28,6 +28,8 @@
 #   env_canton_logs              the Canton log files (driver AUDIT lines, commitment errors)
 #   env_driver_audit NAME        the driver's hash-chained audit log of participant NAME
 #   env_old_db_exists / env_destroy_old_db   the old participant's database (Step 8)
+#   env_destroy_dealer           remove the dealer's host or pod and what it held (Step 8)
+#   env_node_shred N PATH…       delete PATH… on node N (Step 8)
 #   env_cleanup RC               stop everything; print logs when RC is not 0
 #
 # Shared with the procedure script: WORK (a directory on the operator's machine), SYNC (where the
@@ -260,6 +262,9 @@ env_driver_audit() { printf '%s\n' "$WORK/driver-audit-$1.jsonl"; }
 # The old participant's H2 database. With DB_CLOSE_DELAY=-1 the Canton JVM may still hold it open
 # after the participant stopped: deleting it removes the directory entries, which is what a script
 # can check; the blocks are gone only when the JVM exits (and on an SSD not provably then).
+env_destroy_dealer() { :; } # the dealer ran on this machine: its output is the dealer dir
+env_node_shred() { shift; shred_local "$@"; } # the nodes' files are on this machine
+
 env_old_db_exists() { ls "$WORK/old-db"/participant_1* >/dev/null 2>&1; }
 env_destroy_old_db() { if [ "$(uname)" = Darwin ]; then /bin/rm -P -rf "$WORK/old-db"; else rm -rf "$WORK/old-db"; fi; }
 

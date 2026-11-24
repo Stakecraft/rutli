@@ -56,6 +56,7 @@ of the same name.
 
 | Suite | What happens | Fails when |
 |---|---|---|
+| `migration` | first: an existing Canton namespace key brought in by the split ceremony, as [migration.md](migration.md) and [split-ceremony.md](split-ceremony.md) do it (see "The migration suite" below); the imported key is then the first tenant's namespace-class key for every later suite | a step of the ceremony fails or is refused, a check of `scripts/e2e-migration.sh` fails, or the imported key does not sign within the driver's deadlines |
 | `upgrade` | `helm upgrade` from the previous release to `--upgrade-image` under 5 signatures a second | a key is missing or changed afterwards, or does not sign; signatures that fail while the cosigners restart are counted, not forbidden (the chart restarts all three at once) |
 | `scenarios` | the scenarios of [`load-testing.md`](load-testing.md): steady stream, burst, several clients, ECIES, a cosigner pod killed under load, the cold-cache restart, and the limits | as described there |
 | `connect` | N new clients connecting at the same moment (`connect.clients` of the profile: 50, 200, 500), one signature each, with each client's connection time recorded apart from its request (`rutli-loadgen --eager-connect`) and the cosigners' `rutli_grpc_handshake_timeouts_total` | never: a measurement of what many clients connecting together costs, for example every driver reconnecting after a cosigner restart |
@@ -65,7 +66,7 @@ of the same name.
 | `key-classes` | last, with `classes`: the same spot checks at rest, then twice the namespace-class key's per-minute limit plus five at once | a spot check fails, fewer than the limit or more than one and a half times it pass, or the rest is not refused with `RESOURCE_EXHAUSTED` |
 | `ramp` | the profile's baseline load × each factor (1, 3, 10, 20, 30, 45, 70, 100, 150, 200, 300 in `devnet-validator`); a step runs the baseline's phases one after another (average, busiest minute, burst), each × the factor | never: the last factor at which every phase passed is the **headroom factor**. A phase over the SLO or with an error drops out and the ramp goes on with the others, so each part of the real load gets its own headroom (`real_load_headroom`) |
 
-They run in the order `upgrade`, `scenarios`, `connect`, `keys`, `ramp`, `disrupt` (disruption last, so that
+They run in the order `migration`, `upgrade`, `scenarios`, `connect`, `keys`, `ramp`, `disrupt` (disruption last, so that
 what it leaves behind cannot skew the measurements of the others), then `key-classes` when the
 profile has classes; `--suites` picks a subset. With several tenants, every ramp step runs the
 shape for each tenant at once, each on its own keys with its own driver certificate.
@@ -256,6 +257,69 @@ no ECDH. The hosted-key decryption limit is per key and node
 (`hosted_keys.decrypt_rate_limit_per_min`, 6000 by default): spread a high decryption rate over
 enough `ecdh_keys`, or the ramp measures the limit. `scripts/perf/profiles/smoke.json` is the short
 profile CI uses; its numbers mean nothing.
+
+## The migration suite
+
+The cosigner half of a migration, on the cluster under test, run by `scripts/e2e-migration.sh` itself
+(`E2E_ENV=k8s E2E_STAGES=ceremony`), so the cluster runs the same procedure and the same checks
+as the Compose end-to-end test, not a second copy:
+
+1. **The key.** B1's Canton 3.6.1 namespace key, exported with a password by
+   `keys.secret.download_to` (`frost/canton-key/testdata/vectors`), stands for Step 2's export:
+   there is no participant on the cluster. Its key id is `perf-mig<run>-frost-import-cb0e86a9`,
+   with a new prefix every run, because an imported id can never be deleted.
+2. **Recipient requests and Gate 0.** `share-recipient` and `recipient-sas` run in each cosigner
+   pod (`kubectl exec … -c cosigner`, never a second mount of its volume). The SAS of each request
+   must equal the one read back from the node's sealed state.
+3. **The dealer** runs in a pod of its own, `rutli-perf-dealer`:
+   - no service account token, no network (a NetworkPolicy denies every connection), its work
+     directory in memory;
+   - files reach it and leave it through the machine that runs the suite;
+   - it must refuse a wrong password, no password and a wrong fingerprint, then split with
+     `--confirm-sas`.
+4. **Gates A to C** (all checks of `scripts/e2e-migration.sh`):
+   - a dry run on every node, then the install; an identical re-import is accepted;
+   - `verify-key --sign-test` with the operator certificate, from the load generator pod, every
+     2-of-3 quorum signing;
+   - a refresh with the refresher certificate;
+   - `verify-key` again: same group key, new digest, refresh count 1;
+   - the dealt bundles refused after the refresh;
+   - founding backups.
+5. **Step 8, the cosigner half.** The export copy, the dealer output and the request files are
+   shredded on the suite's machine, and the dealer pod and its memory go. Then: no recipient
+   secret left on any node, the founding backups still there, no copy of the export left (by
+   sha256), and `verify-key --sign-test` still passing.
+6. **The Signer API.** The imported key signs under the driver's deadlines. With the production
+   profile, it becomes the first tenant's namespace-class key: it signs during every disruption
+   and during the upgrade, and the namespace rate limit (`perf-mig*`, 10 a minute) is checked on
+   it.
+
+**Dealer and cosigners from one release.** With the upgrade suite, the cosigners start on the
+previous release (`k8s-deploy.sh --previous`). The dealer must then be of that release:
+`--dealer-image` names an image built from that tag's sources with `frost/Dockerfile.dealer`, as
+the kind job does. Without it, the migration suite is skipped and says why. Without the upgrade
+suite, the dealer is the load generator's image (`frost/Dockerfile.perf` builds `rutli-dealer`
+too).
+
+**Covered only by the Compose end-to-end test** (`scripts/e2e-migration.sh`, Canton 3.6.1):
+- the export from a live participant;
+- Steps 4 to 7 in Canton (the new participant, `register_kms_signing_key`, the identity and the
+  OTK, the rollback before the point of no return, party hosting, commitments, the driver's
+  audit);
+- the participant database's destruction.
+
+**Covered nowhere automated:**
+- Step 6 (the Splice re-onboarding);
+- Step 2.1 on Canton 3.7;
+- the destruction of database backups, WAL and object storage.
+
+These differ from [migration.md](migration.md) on purpose:
+- a public test key, not a live one;
+- a key prefix per run;
+- the dealer in a pod on the same cluster, not on an air-gapped host;
+- the SAS read back by the script, with no witnesses;
+- founding backups in the pods' memory, not shipped;
+- one refresh.
 
 ## The production profile
 

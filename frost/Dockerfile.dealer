@@ -1,0 +1,26 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+# The split ceremony's dealer alone, built from any release's frost/ directory: the cluster suite's
+# migration stage when its cosigners start on the previous release (`--previous`), because the
+# dealer and the cosigners of a ceremony must be one release (docs/split-ceremony.md). Never
+# published. Build it with that tag's sources as the context and this file from the tree:
+#
+#   docker build -f- -t rutli-dealer:0.4.1 "https://github.com/Stakecraft/rutli.git#v0.4.1:frost" \
+#     <frost/Dockerfile.dealer
+#
+# The FROM lines are those of frost/Dockerfile.perf: the image-build check compares the Rust
+# version with frost/rust-toolchain.toml.
+
+# rust:1.100.0-slim
+FROM rust:1.100.0-slim@sha256:6f14b2b4b278ec0d50aa1d69541c304ce0f95e0f6268487aa9924af1c2e9aebe AS build
+WORKDIR /src
+COPY . .
+ARG CARGO_BUILD_JOBS=4
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+RUN cargo build --release --locked -p rutli-cosigner --bin rutli-dealer
+
+# debian:stable-slim (trixie when pinned)
+FROM debian:stable-slim@sha256:fbfb4059d2127120aa05b6e6064523d2102552f0cf0026ddf0701c12f1f8f3e0
+RUN useradd -r -u 10001 rutli
+COPY --from=build /src/target/release/rutli-dealer /usr/local/bin/rutli-dealer
+USER rutli
