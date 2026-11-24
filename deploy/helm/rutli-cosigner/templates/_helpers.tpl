@@ -151,3 +151,32 @@ value that is not 64 hex, more than two values, or one value under two nodes.
 {{- end }}
 {{- $out | toJson }}
 {{- end }}
+
+{{/*
+The `peer_deadlines` config object from .Values.peerDeadlines (call only when it is non-empty).
+Fails the render on an unknown key or a value outside the bounds the cosigner enforces at startup.
+*/}}
+{{- define "rutli-cosigner.peerDeadlines" -}}
+{{- $pd := .Values.peerDeadlines }}
+{{- range $k, $_ := $pd }}
+{{- if not (has $k (list "signRound1Ms" "signRound2Ms")) }}
+{{- fail (printf "peerDeadlines.%s is not a known key (signRound1Ms, signRound2Ms)" $k) }}
+{{- end }}
+{{- end }}
+{{- $parts := list }}
+{{- if hasKey $pd "signRound1Ms" }}
+{{- $v := int $pd.signRound1Ms }}
+{{- if or (lt $v 500) (gt $v 5000) }}
+{{- fail (printf "peerDeadlines.signRound1Ms must be between 500 and 5000, got %d" $v) }}
+{{- end }}
+{{- $parts = append $parts (printf "\"sign_round1_ms\": %d" $v) }}
+{{- end }}
+{{- if hasKey $pd "signRound2Ms" }}
+{{- $v := int $pd.signRound2Ms }}
+{{- if or (lt $v 1000) (gt $v 9000) }}
+{{- fail (printf "peerDeadlines.signRound2Ms must be between 1000 and 9000, got %d" $v) }}
+{{- end }}
+{{- $parts = append $parts (printf "\"sign_round2_ms\": %d" $v) }}
+{{- end }}
+{{- printf "{ %s }" (join ", " $parts) }}
+{{- end }}

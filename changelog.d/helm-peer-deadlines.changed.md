@@ -1,0 +1,1 @@
+- **Helm chart: `peerDeadlines` sets the peer round deadlines of a signing session.** It renders the cosigner's `peer_deadlines` section (`signRound1Ms`, `signRound2Ms`); empty keeps the defaults, which are recommended. A value out of bounds fails `helm template`. Set it only after every cosigner runs a release that knows the section.

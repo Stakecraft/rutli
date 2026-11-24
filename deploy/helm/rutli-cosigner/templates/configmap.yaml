@@ -129,6 +129,9 @@ data:
       {{- if $.Values.keyfile }}
       "keyfile": {{ $.Values.keyfile | toJson }},
       {{- end }}
+      {{- if $.Values.peerDeadlines }}
+      "peer_deadlines": {{ include "rutli-cosigner.peerDeadlines" $ }},
+      {{- end }}
       "peer_allowlist": {{ $peerAllow | toJson }}
     }
 {{- end }}
@@ -188,6 +191,9 @@ data:
       {{- end }}
       {{- if $.Values.keyfile }}
       "keyfile": {{ $.Values.keyfile | toJson }},
+      {{- end }}
+      {{- if $.Values.peerDeadlines }}
+      "peer_deadlines": {{ include "rutli-cosigner.peerDeadlines" $ }},
       {{- end }}
       "peer_allowlist": {{ $peerAllow | toJson }}
     }
