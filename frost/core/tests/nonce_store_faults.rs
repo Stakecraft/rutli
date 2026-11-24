@@ -91,14 +91,22 @@ fn a_marker_that_cannot_be_removed_fails_the_pass() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("k.nonces");
     let store = store_with_old_markers(&dir, &sessions(2));
-    fs::write(dir.join(PRUNED_SENTINEL), complete_sentinel_bytes()).unwrap();
+    let sentinel = complete_sentinel_bytes();
+    fs::write(dir.join(PRUNED_SENTINEL), &sentinel).unwrap();
     if !permissions_enforced(&dir) {
         return;
     }
     set_mode(&dir, 0o500);
     let verdict = store.prune_older_than(HORIZON, 10);
     set_mode(&dir, 0o700);
-    assert!(matches!(verdict, Err(CoreError::Io(_))), "got {verdict:?}");
+    // The refusal of the removal itself (the directory cannot be written to): reading and
+    // syncing the sentinel and the directory work in a read-only directory, so any earlier step
+    // that failed would not be this error. Run with the removal skipped, the pass succeeds.
+    assert!(
+        matches!(&verdict, Err(CoreError::Io(e)) if e.kind() == std::io::ErrorKind::PermissionDenied),
+        "got {verdict:?}"
+    );
+    assert_eq!(fs::read(dir.join(PRUNED_SENTINEL)).unwrap(), sentinel);
     for s in sessions(2) {
         assert!(store.is_consumed(&s).unwrap(), "{s} must still be burned");
     }
