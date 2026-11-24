@@ -16,14 +16,17 @@ const BURST: usize = 400;
 /// How many of `BURST` simultaneous connects to `addr` complete within `within`, while nothing
 /// accepts.
 async fn connected(addr: std::net::SocketAddr, within: Duration) -> usize {
-    let tries = (0..BURST).map(|_| {
-        tokio::spawn(async move {
-            tokio::time::timeout(within, tokio::net::TcpStream::connect(addr))
-                .await
-                .ok()
-                .and_then(Result::ok)
+    // Every connect is started before any is awaited: one burst, not one connect after another.
+    let tries: Vec<_> = (0..BURST)
+        .map(|_| {
+            tokio::spawn(async move {
+                tokio::time::timeout(within, tokio::net::TcpStream::connect(addr))
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+            })
         })
-    });
+        .collect();
     let mut kept = Vec::new();
     for t in tries {
         if let Some(s) = t.await.unwrap() {
