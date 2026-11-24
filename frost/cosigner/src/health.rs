@@ -476,16 +476,33 @@ pub async fn probe(health: &Arc<KeystoreHealth>) -> std::result::Result<(), Stri
 /// A dedicated thread — a watchdog — and deliberately not a tokio task: the verdict is what makes a
 /// node with a stalled volume turn work away, so it must keep moving when that stall has wedged the
 /// async runtime. Each tick waits for its own probe long enough to publish "unresponsive" itself.
+///
+/// Each tick first samples the load gauges ([`sample_load_gauges`]): the signatures this node leads
+/// and, when started from inside the async runtime, that runtime's own metrics. From this thread
+/// they stay current while the runtime is saturated, which is when they are read.
 pub fn spawn_monitor(node: Arc<Node>, interval: Duration) -> std::thread::JoinHandle<()> {
+    let runtime = tokio::runtime::Handle::try_current()
+        .ok()
+        .map(|h| h.metrics());
     std::thread::Builder::new()
         .name("rutli-keystore-watchdog".into())
         .spawn(move || loop {
+            sample_load_gauges(&node, runtime.as_ref());
             let health = node.keystore_health();
             let _ = health.probe_blocking(health.unresponsive_after.max(PROBE_TIMEOUT));
             node.prune_expired_sign_sessions();
             std::thread::sleep(interval);
         })
         .expect("spawn the key-store watchdog thread")
+}
+
+/// `rutli_signs_in_flight` from the node's own count, and the `rutli_runtime_*` gauges from
+/// `runtime` (none outside a runtime).
+pub fn sample_load_gauges(node: &Node, runtime: Option<&tokio::runtime::RuntimeMetrics>) {
+    metrics::gauge!(crate::metrics::SIGNS_IN_FLIGHT).set(node.sign_load().leading() as f64);
+    if let Some(runtime) = runtime {
+        crate::metrics::refresh_runtime_gauges(runtime);
+    }
 }
 
 #[cfg(test)]

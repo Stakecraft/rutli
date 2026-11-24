@@ -189,6 +189,9 @@ struct KeyJournal {
     /// match the disk, so nobody may append through this instance again — it is evicted and the
     /// next use reopens the journal from disk.
     broken: bool,
+    /// How long the last append's `sync_data` took, taken by [`SignJournal::append_charged`] and
+    /// recorded once the key's lock is released.
+    fsync: Option<std::time::Duration>,
 }
 
 impl SignJournal {
@@ -237,8 +240,21 @@ impl SignJournal {
 
     /// Charge (if `entry` has a new charge id) against `limits`, then append `entry` durably — or
     /// refuse with [`DaemonError::RateLimited`] and append nothing. `seq`, `ts_ms`, `node`, `prev`
-    /// and `hash` are filled in here. The check and the append are one step per key.
+    /// and `hash` are filled in here. The check and the append are one step per key. Timed in
+    /// `rutli_sign_journal_append_duration_seconds`.
     pub fn append_charged(
+        &self,
+        entry: JournalEntry,
+        limits: Limits,
+        now_ms: u64,
+    ) -> Result<JournalEntry> {
+        crate::metrics::timed(crate::metrics::SIGN_JOURNAL_APPEND_DURATION, || {
+            self.append_charged_untimed(entry, limits, now_ms)
+        })
+    }
+
+    /// [`SignJournal::append_charged`] without its timing.
+    fn append_charged_untimed(
         &self,
         entry: JournalEntry,
         limits: Limits,
@@ -266,9 +282,15 @@ impl SignJournal {
                 continue;
             }
             let result = self.charge_and_append(&mut guard, entry.clone(), limits, now_ms);
-            if guard.broken {
-                drop(guard);
+            let fsync = guard.fsync.take();
+            let broken = guard.broken;
+            drop(guard);
+            if broken {
                 self.evict(&entry.key_id, &key);
+            }
+            if let Some(took) = fsync {
+                metrics::histogram!(crate::metrics::SIGN_JOURNAL_FSYNC_DURATION)
+                    .record(took.as_secs_f64());
             }
             return result;
         }
@@ -415,6 +437,7 @@ impl KeyJournal {
             charges: VecDeque::new(),
             shares: HashMap::new(),
             broken: false,
+            fsync: None,
         };
         for e in recent.iter().filter(|e| e.ts_ms + DAY_MS > now_ms) {
             if let Some(id) = e.charge_id() {
@@ -482,7 +505,10 @@ impl KeyJournal {
             ) {
                 return Err(std::io::Error::other("injected: fsync failed"));
             }
-            f.sync_data()
+            let syncing = std::time::Instant::now();
+            let synced = f.sync_data();
+            self.fsync = Some(syncing.elapsed());
+            synced
         })();
         if let Err(e) = written {
             self.broken = true;

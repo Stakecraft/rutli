@@ -23,7 +23,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 /// What one [`NonceStore::prune_older_than`] pass did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -43,8 +43,13 @@ pub const PRUNED_SENTINEL: &str = ".signed";
 
 use crate::{CoreError, Result};
 
+/// Told how long each [`NonceStore::consume`] took and whether it succeeded. This crate exports no
+/// metrics; the daemon passes one that records them.
+pub type ConsumeObserver = fn(Duration, bool);
+
 pub struct NonceStore {
     dir: PathBuf,
+    observer: Option<ConsumeObserver>,
 }
 
 impl NonceStore {
@@ -52,11 +57,31 @@ impl NonceStore {
     pub fn open(dir: impl Into<PathBuf>) -> Result<Self> {
         let dir = dir.into();
         fs::create_dir_all(&dir)?;
-        Ok(Self { dir })
+        Ok(Self {
+            dir,
+            observer: None,
+        })
+    }
+
+    /// Call `observer` after every [`NonceStore::consume`] with its duration and outcome.
+    #[must_use]
+    pub fn with_observer(mut self, observer: ConsumeObserver) -> Self {
+        self.observer = Some(observer);
+        self
     }
 
     /// Burn `session_id`. Ok exactly once per session; every later call is [`CoreError::NonceReuse`].
     pub fn consume(&self, session_id: &str) -> Result<()> {
+        let started = Instant::now();
+        let result = self.burn(session_id);
+        if let Some(observe) = self.observer {
+            observe(started.elapsed(), result.is_ok());
+        }
+        result
+    }
+
+    /// [`NonceStore::consume`] without the observer.
+    fn burn(&self, session_id: &str) -> Result<()> {
         let path = self.marker_path(session_id)?;
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut f) => {
@@ -242,6 +267,26 @@ mod tests {
                 truncated: false
             }
         );
+    }
+
+    /// The observer hears every consume with its outcome: a burn and a refused reuse.
+    #[test]
+    fn the_observer_hears_each_consume_and_its_outcome() {
+        let tmp = tempfile::tempdir().unwrap();
+        let heard = |session: &str| {
+            let store = NonceStore::open(tmp.path())
+                .unwrap()
+                .with_observer(|took, ok| panic!("heard ok={ok} after {took:?}"));
+            let call = std::panic::catch_unwind(|| store.consume(session));
+            let said = call.expect_err("the observer was called");
+            said.downcast_ref::<String>().cloned().unwrap_or_default()
+        };
+        assert!(heard("s1").starts_with("heard ok=true"));
+        assert!(heard("s1").starts_with("heard ok=false"));
+        assert!(NonceStore::open(tmp.path())
+            .unwrap()
+            .is_consumed("s1")
+            .unwrap());
     }
 
     #[test]

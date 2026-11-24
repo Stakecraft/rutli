@@ -175,7 +175,8 @@ pub struct LeadGuard {
 
 impl Drop for LeadGuard {
     fn drop(&mut self) {
-        self.load.leading.fetch_sub(1, Ordering::AcqRel);
+        let left = self.load.leading.fetch_sub(1, Ordering::AcqRel) - 1;
+        metrics::gauge!(crate::metrics::SIGNS_IN_FLIGHT).set(left as f64);
     }
 }
 
@@ -188,8 +189,12 @@ impl SignLoad {
         }
     }
 
+    /// Count one signature led here until the guard drops; `rutli_signs_in_flight` follows (and
+    /// the key-store watchdog re-reads [`SignLoad::leading`] into it every pass, so two updates
+    /// racing cannot leave it wrong for long).
     pub fn lead(self: &Arc<Self>) -> LeadGuard {
         let count = self.leading.fetch_add(1, Ordering::AcqRel) + 1;
+        metrics::gauge!(crate::metrics::SIGNS_IN_FLIGHT).set(count as f64);
         LeadGuard {
             load: self.clone(),
             count,
