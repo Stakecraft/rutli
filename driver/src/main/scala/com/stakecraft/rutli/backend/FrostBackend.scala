@@ -879,8 +879,9 @@ class FrostBackend(
 
   /** A metadata read (`PublicKey`, `KeyInfo`) of the hosted key `keyId`, held to the spec the driver
     * knew the key by when the read began (`known`). `seen` has the replies the cosigners gave, by
-    * spec, `specOf` gives a reply's spec ("" when it names none), and `usable` throws for a reply
-    * that cannot be handed on (a public key that is not what its spec says).
+    * spec, `specOf` gives a reply's spec ("" when it names none), `absent` holds for a reply that
+    * says the key is not there, and `usable` throws for a reply that cannot be handed on (a public
+    * key that is not what its spec says).
     *
     * One cosigner's reply does not change what the driver knows:
     *   - the key was not known: the reply's spec is learned, the first answer for the key;
@@ -895,8 +896,10 @@ class FrostBackend(
     *     answer; without one the read fails, retryable when the walk ended on a cosigner that
     *     could not be reached, final otherwise. A reply under another spec is never handed on.
     * A refusal the walk met (RESOURCE_EXHAUSTED, PERMISSION_DENIED, ...) stands as it is. The
-    * cosigners are asked within what is left of the read's request timeout (`started`). When
-    * another read has changed what the driver knows meanwhile, this one is to be made again. */
+    * cosigners are asked within what is left of the read's request timeout (`started`), and for
+    * [[SpecVoteFloor]] at least: a walk that used the budget up on cosigners answering under
+    * another spec would otherwise end the same way at every retry. When another read has changed
+    * what the driver knows meanwhile, this one is to be made again. */
   private def settleSpec[R](
       keyId: String,
       what: String,
@@ -904,7 +907,7 @@ class FrostBackend(
       seen: SpecsSeen[R],
       notes: AuditNotes,
       started: Long,
-  )(specOf: R => String, usable: R => Unit)(call: Future[R]): Future[R] = {
+  )(specOf: R => String, absent: R => Boolean, usable: R => Unit)(call: Future[R]): Future[R] = {
     def askAgain(under: String, knownNow: String): KmsDriverException =
       KmsDriverException(
         new IllegalStateException(
@@ -926,17 +929,24 @@ class FrostBackend(
           reply
         }
       case Some(knownAs) =>
+        // A reply under the known spec is the answer only while the driver still knows the key by
+        // it: another read may have learned otherwise since this one began.
+        def stillKnown(reply: R): R = {
+          val knownNow = hostedSpecOf.get(keyId)
+          if (specOf(reply) == knownAs && knownNow != knownAs) throw askAgain(knownAs, String.valueOf(knownNow))
+          reply
+        }
         call.transformWith { outcome =>
           val refusal = outcome match {
             case scala.util.Failure(e: StatusRuntimeException) =>
               !isLeaderSick(e.getStatus) && e.getStatus.getCode != Status.Code.NOT_FOUND
             case _ => false
           }
-          if (refusal || !seen.otherThan(knownAs)) Future.fromTry(outcome)
+          if (refusal || !seen.otherThan(knownAs)) Future.fromTry(outcome.map(stillKnown))
           else
             Future(blocking {
               val left = requestTimeout - (System.nanoTime() - started).nanos
-              val votes = specVotes(keyId, left.min(attemptTimeout + ProbeSlack))
+              val votes = specVotes(keyId, left.max(SpecVoteFloor).min(attemptTimeout + ProbeSlack))
               // The other spec enough cosigners hold the key under, with the first reply of this
               // read under it that can be handed on. Without such a reply nothing changes: a
               // spec is learned only together with an answer under it.
@@ -961,7 +971,9 @@ class FrostBackend(
                   reply
                 case None =>
                   outcome match {
-                    case scala.util.Success(reply) if specOf(reply) == knownAs => reply
+                    // Under the known spec, or (KeyInfo from a cosigner that names none) under no spec.
+                    case scala.util.Success(reply) if !absent(reply) && (specOf(reply) == knownAs || specOf(reply).isEmpty) =>
+                      stillKnown(reply)
                     // A cosigner that may serve the key under the known spec could not be reached.
                     case scala.util.Failure(e: StatusRuntimeException) if isNodeDown(e.getStatus) => throw e
                     case _ =>
@@ -2223,8 +2235,11 @@ class FrostBackend(
           )(ask)
         else clusterCallWholeRoster[PublicKeyReply]("publicKey", keyId, otherSpec = other)(ask)
       val canton = (reply: PublicKeyReply) => hostedPublicKey(keyId, reply.getSpec, reply.getPublicKeyDer.toByteArray)
-      settleSpec(keyId, "publicKey", known, seen, notes, started)(_.getSpec, (reply: PublicKeyReply) => { canton(reply); () })(call)
-        .map(canton)
+      settleSpec(keyId, "publicKey", known, seen, notes, started)(
+        _.getSpec,
+        (_: PublicKeyReply) => false,
+        (reply: PublicKeyReply) => { canton(reply); () },
+      )(call).map(canton)
     } else delegate.getPublicKey(keyId)
 
   override def keyExistsAndIsActive(keyId: String): Future[Unit] =
@@ -2339,6 +2354,7 @@ class FrostBackend(
         else clusterCallWholeRoster[KeyInfoReply]("keyInfo", keyId, !_.getExists, other)(ask)
       settleSpec(keyId, "keyInfo", known, seen, notes, started)(
         (reply: KeyInfoReply) => if (reply.getExists) reply.getSpec else "",
+        (reply: KeyInfoReply) => !reply.getExists,
         (_: KeyInfoReply) => (),
       )(call).map(reply => if (!reply.getExists) throw new NoSuchElementException(s"key not found or inactive: $keyId"))
     }
@@ -2604,6 +2620,9 @@ object FrostBackend {
 
   /** No attempt starts with less of the call's budget left than this: it could not succeed. */
   private val MinAttempt: FiniteDuration = 50.millis
+  /** The least time the cosigners get to say what they hold a hosted key under, when a read that
+    * saw a spec disagreement has little of its request timeout left. */
+  private val SpecVoteFloor: FiniteDuration = 1.second
   /** How much longer than its calls' deadline the hosted-key copy probe waits for them. */
   private val ProbeSlack: FiniteDuration = 200.millis
   /** `observed` for a [[withCheckedFailover]] call whose answer must not make its node the
