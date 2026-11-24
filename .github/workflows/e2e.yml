@@ -126,51 +126,37 @@ jobs:
         if: steps.canton-api-cache.outputs.cache-hit != 'true'
         run: scripts/publish-canton-deps.sh "$CANTON_TAG"
 
-      # The Canton release (one JVM: sequencer, mediator, two participants); see CANTON_VERSION.
-      - name: Cache Canton release
+      # The two Canton releases (one JVM each run: sequencer, mediator, participants): CANTON_VERSION
+      # for every Canton script, CANTON37_VERSION for the second migration run. One cache entry holds
+      # both, keyed by both digests.
+      - name: Cache Canton releases
         id: canton-release-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.cache/rutli-e2e/canton-open-source-${{ env.CANTON_VERSION }}
-          key: canton-release-${{ runner.os }}-${{ env.CANTON_VERSION }}-${{ env.CANTON_SHA256 }}
-      - name: Download Canton release
+          path: |
+            ~/.cache/rutli-e2e/canton-open-source-${{ env.CANTON_VERSION }}
+            ~/.cache/rutli-e2e/canton-open-source-${{ env.CANTON37_VERSION }}
+          key: canton-release-${{ runner.os }}-${{ env.CANTON_VERSION }}-${{ env.CANTON_SHA256 }}-${{ env.CANTON37_VERSION }}-${{ env.CANTON37_SHA256 }}
+      - name: Download Canton releases
         if: steps.canton-release-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          tarball="canton-open-source-${CANTON_VERSION}.tar.gz"
-          tmp="$(mktemp -d)"
-          curl -fsSL --retry 3 -o "${tmp}/${tarball}" \
-            "https://github.com/digital-asset/canton/releases/download/v${CANTON_VERSION}/${tarball}"
-          echo "${CANTON_SHA256}  ${tmp}/${tarball}" | sha256sum -c -
           mkdir -p "$HOME/.cache/rutli-e2e"
-          rm -rf "$HOME/.cache/rutli-e2e/canton-open-source-${CANTON_VERSION}"
-          tar -xzf "${tmp}/${tarball}" -C "$HOME/.cache/rutli-e2e"
-          rm -rf "$tmp"
-          test -x "$HOME/.cache/rutli-e2e/canton-open-source-${CANTON_VERSION}/bin/canton"
+          for pair in "${CANTON_VERSION}:${CANTON_SHA256}" "${CANTON37_VERSION}:${CANTON37_SHA256}"; do
+            version="${pair%%:*}"
+            sha="${pair##*:}"
+            tarball="canton-open-source-${version}.tar.gz"
+            tmp="$(mktemp -d)"
+            curl -fsSL --retry 3 -o "${tmp}/${tarball}" \
+              "https://github.com/digital-asset/canton/releases/download/v${version}/${tarball}"
+            echo "${sha}  ${tmp}/${tarball}" | sha256sum -c -
+            rm -rf "$HOME/.cache/rutli-e2e/canton-open-source-${version}"
+            tar -xzf "${tmp}/${tarball}" -C "$HOME/.cache/rutli-e2e"
+            rm -rf "$tmp"
+            test -x "$HOME/.cache/rutli-e2e/canton-open-source-${version}/bin/canton"
+          done
       - name: CANTON_HOME
         run: echo "CANTON_HOME=$HOME/.cache/rutli-e2e/canton-open-source-${CANTON_VERSION}" >> "$GITHUB_ENV"
-
-      # The Canton 3.7 release for the second migration run; see CANTON37_VERSION.
-      - name: Cache Canton 3.7 release
-        id: canton37-release-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/rutli-e2e/canton-open-source-${{ env.CANTON37_VERSION }}
-          key: canton-release-${{ runner.os }}-${{ env.CANTON37_VERSION }}-${{ env.CANTON37_SHA256 }}
-      - name: Download Canton 3.7 release
-        if: steps.canton37-release-cache.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          tarball="canton-open-source-${CANTON37_VERSION}.tar.gz"
-          tmp="$(mktemp -d)"
-          curl -fsSL --retry 3 -o "${tmp}/${tarball}" \
-            "https://github.com/digital-asset/canton/releases/download/v${CANTON37_VERSION}/${tarball}"
-          echo "${CANTON37_SHA256}  ${tmp}/${tarball}" | sha256sum -c -
-          mkdir -p "$HOME/.cache/rutli-e2e"
-          rm -rf "$HOME/.cache/rutli-e2e/canton-open-source-${CANTON37_VERSION}"
-          tar -xzf "${tmp}/${tarball}" -C "$HOME/.cache/rutli-e2e"
-          rm -rf "$tmp"
-          test -x "$HOME/.cache/rutli-e2e/canton-open-source-${CANTON37_VERSION}/bin/canton"
 
       # grpcurl (the split ceremony's raw gRPC calls) is pinned by version and sha256 and installed
       # without sudo. To bump: set GRPCURL_VERSION, then GRPCURL_SHA256 to the linux_x86_64 line of
