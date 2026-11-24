@@ -48,11 +48,15 @@ def summarise(paths):
     # Outcomes that are no verdict on the tests (a broken build or test tool, a shape this script
     # does not know): counted, and the report is then not complete.
     unrecognised = 0
+    # Runs that stopped before every mutant had a verdict (a job cut off by its time limit or
+    # cancelled): their numbers are partial, and the report is then not complete.
+    incomplete_runs = 0
     for path in paths:
         runs += 1
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         baselines = 0
+        tested = 0
         for o in data.get("outcomes", []):
             scenario = o.get("scenario")
             summary = o.get("summary")
@@ -66,6 +70,7 @@ def summarise(paths):
                 print(f"warning: unrecognised outcome {scenario!r}: {summary!r} in {path}", file=sys.stderr)
                 unrecognised += 1
                 continue
+            tested += 1
             mod = modules.setdefault(mutant["file"], empty())
             mod[counter] += 1
             mod["total"] += 1
@@ -73,6 +78,9 @@ def summarise(paths):
                 mod["missed_mutants"].append(mutant_name(mutant))
         # Each run has exactly one baseline (the workflow never skips it).
         baseline_ok &= baselines == 1
+        if "total_mutants" in data and tested != data["total_mutants"]:
+            print(f"warning: {path} has {tested} of {data['total_mutants']} mutants tested", file=sys.stderr)
+            incomplete_runs += 1
     total = empty()
     del total["missed_mutants"]
     for mod in modules.values():
@@ -84,6 +92,7 @@ def summarise(paths):
         "runs": runs,
         "baseline_ok": baseline_ok,
         "unrecognised": unrecognised,
+        "incomplete_runs": incomplete_runs,
         "modules": dict(sorted(modules.items())),
         "total": total,
     }
@@ -114,7 +123,8 @@ def main():
     report = {
         "version": report.pop("version"),
         "commit": args.commit,
-        "complete": report["runs"] == expected and report["baseline_ok"] and report["unrecognised"] == 0,
+        "complete": report["runs"] == expected and report["baseline_ok"] and report["unrecognised"] == 0
+        and report["incomplete_runs"] == 0,
     } | report
     json.dump(report, sys.stdout, indent=2, sort_keys=False)
     sys.stdout.write("\n")
