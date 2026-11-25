@@ -598,9 +598,12 @@ class FrostBackend(
     ()
   }
 
-  /** The endpoint `i` just said it lacks the key, and its demotion is held back: what a later
-    * [[demoteHeld]] needs, taken now — the lead as it is and the time. */
-  private def hold(i: Int): Held = Held(i, preferred.state, nowNanos())
+  /** The endpoint `i` said it lacks the key, and its demotion is held back: what a later
+    * [[demoteHeld]] needs. `leadBefore` is the lead as it was before the endpoint was asked and
+    * `answeredAt` the time its answer was in. A lead that moved while the endpoint was being
+    * asked is newer than the answer too: the held demotion then never moves it. */
+  private def hold(i: Int, leadBefore: Long, answeredAt: Long): Held =
+    Held(i, if (preferred.state == leadBefore) leadBefore else Lead.Moved, answeredAt)
 
   /** Demote an endpoint whose demotion was held back. `to` takes the lead: the endpoint that served
     * the call, or for a sign that ended otherwise the one the lead would have reached
@@ -635,9 +638,12 @@ class FrostBackend(
     * failed: the lead then moved for another reason, such as another node answering first). A transient blip (one
     * missed deadline, a restart) therefore does not keep the lead elsewhere for good. */
   private def startIndex(): Int = {
-    val p = preferred.get
+    // By the lead as read here, not by its index: if the lead has moved since (the first endpoint
+    // may have got the lead back and lost it again), this read of its demotion time is out of date.
+    val seen = preferred.state
+    val p = preferred.indexOf(seen)
     val lost = demotedAt.get(0)
-    if (p != 0 && (lost == 0L || System.nanoTime() - lost > leaderRecovery.toNanos) && preferred.compareAndSet(p, 0)) {
+    if (p != 0 && (lost == 0L || System.nanoTime() - lost > leaderRecovery.toNanos) && preferred.moveIfUnmoved(seen, p, 0)) {
       logger.info(
         s"FROST: leader back to ${endpoints(0)} (lost the lead more than $leaderRecovery ago); leader order ${leaderOrder(0)}"
       )
@@ -756,6 +762,7 @@ class FrostBackend(
       val i = (from + k) % n
       tried(i)
       val deadline: FiniteDuration = FiniteDuration(math.min(attemptDeadline.toNanos, math.max(left, 0L)), NANOSECONDS)
+      val leadBefore: Long = preferred.state
       val outcome: Either[Either[StatusRuntimeException, Rejected], A] =
         try {
           val answer = op(stubFor(channels(i), deadline))
@@ -764,6 +771,7 @@ class FrostBackend(
             case None           => Right(answer)
           }
         } catch { case e: StatusRuntimeException => Left(Left(e)) }
+      val answeredAt: Long = nowNanos()
       outcome match {
         case Right(answer) =>
           // After this call's own demotions the preference is normally `i` already; if another call
@@ -808,7 +816,8 @@ class FrostBackend(
           }
           // Held back only while the walk goes on: a failure that ends the call costs the lead now.
           val held: Boolean = deferred && retry
-          val seenNow: Seen = if (held) counted.copy(lackedKeyAt = hold(i) :: counted.lackedKeyAt) else counted
+          val seenNow: Seen =
+            if (held) counted.copy(lackedKeyAt = hold(i, leadBefore, answeredAt) :: counted.lackedKeyAt) else counted
           // A failure that is thrown at once ends the call here: the lead goes to this endpoint,
           // which keeps it or passes it on in the next line.
           if (!retry) release(seen.lackedKeyAt, i)
@@ -1086,9 +1095,11 @@ class FrostBackend(
         staleAt: List[Held],
     ): A = {
       val i = (start + k) % n
+      val leadBefore: Long = preferred.state
       val outcome: Either[StatusRuntimeException, A] =
         try Right(op(stubFor(channels(i))))
         catch { case e: StatusRuntimeException => Left(e) }
+      val answeredAt: Long = nowNanos()
       def settle(o: Either[StatusRuntimeException, A]): A = o.fold(e => throw e, identity)
       // The roster is exhausted without an answer to use (see the three cases above).
       def exhausted(
@@ -1123,7 +1134,7 @@ class FrostBackend(
           // Not demoted here: a stale answer costs the lead only when another cosigner then serves
           // the call (below). A key that is nowhere, or a blob no cosigner's secret opens, is not
           // these cosigners' fault, and demoting all of them would switch the sign rotation off.
-          val heldNow = hold(i) // the lead and the time as they are when the answer is in
+          val heldNow = hold(i, leadBefore, answeredAt)
           val (reason, meaning) = o.fold(e => (e.getStatus.getCode.toString, MayBeOld), staleAnswer)
           val first = firstStale.getOrElse(o)
           val staleNow = stales + (if (o.fold(_ => true, counts)) 1 else 0)
@@ -2718,20 +2729,23 @@ object FrostBackend {
   )
 
   /** An endpoint whose demotion is held back: its index, the lead as it was when the endpoint
-    * answered ([[Lead.state]]) and the time of the answer (System.nanoTime). */
+    * answered ([[Lead.state]], or [[Lead.Moved]]) and the time of the answer (System.nanoTime). */
   private final case class Held(index: Int, lead: Long, at: Long)
 
   /** The preferred leader and how many times the lead has moved, as one atomic value. A call that
     * holds a demotion back, or makes the endpoint that served it the preferred leader, keeps the
     * value it saw ([[state]]) and moves the lead later only if nothing has moved it since
-    * ([[moveIfUnmoved]]). A demotion of an endpoint that failed just now, and the return of the
-    * lead to the first endpoint, go by endpoint index, as with a plain atomic integer. An index
-    * has 16 bits, far more than a roster has cosigners. */
+    * ([[moveIfUnmoved]]); so does the return of the lead to the first endpoint. Only the
+    * demotion of an endpoint that failed just now goes by endpoint index, as with a plain atomic
+    * integer: it is the newest thing known about that endpoint. An index has 16 bits, far more
+    * than a roster has cosigners. */
   private final class Lead {
     // The count of moves in the upper bits, the endpoint index in the lower 16.
     private val packed = new java.util.concurrent.atomic.AtomicLong(0L)
-    private def indexOf(value: Long): Int = (value & 0xffffL).toInt
     private def moved(value: Long, to: Int): Long = (((value >>> 16) + 1L) << 16) | (to.toLong & 0xffffL)
+
+    /** The endpoint index in a [[state]]. */
+    def indexOf(value: Long): Int = (value & 0xffffL).toInt
 
     /** The endpoint index of the preferred leader. */
     def get: Int = indexOf(packed.get)
@@ -2748,9 +2762,17 @@ object FrostBackend {
       else compareAndSet(from, to)
     }
 
-    /** Move the lead from `from` to `to` if it was on `from` in `seen` and has not moved since. */
+    /** Move the lead from `from` to `to` if it was on `from` in `seen` and has not moved since.
+      * Never for [[Lead.Moved]]. */
     def moveIfUnmoved(seen: Long, from: Int, to: Int): Boolean =
       indexOf(seen) == from && (if (from == to) packed.get == seen else packed.compareAndSet(seen, moved(seen, to)))
+  }
+
+  private object Lead {
+
+    /** In place of a [[Lead.state]] that is known to be out of date: its index is no endpoint's
+      * (a roster has fewer than 65,535), so [[Lead.moveIfUnmoved]] never moves for it. */
+    val Moved: Long = -1L
   }
 
   /** An answer the driver checked and refused to use (see `withCheckedFailover`): `code` names it
