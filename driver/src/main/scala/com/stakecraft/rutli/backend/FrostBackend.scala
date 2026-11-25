@@ -567,24 +567,42 @@ class FrostBackend(
   private def stubFor(ch: ManagedChannel, deadline: FiniteDuration = attemptTimeout): SignerGrpc.SignerBlockingStub =
     SignerGrpc.newBlockingStub(ch).withDeadlineAfter(math.max(deadline.toMillis, 1L), TimeUnit.MILLISECONDS)
 
-  /** Index into `endpoints` of the preferred leader: the cosigner that last served a request. */
-  private val preferred = new AtomicInteger(0)
+  /** The preferred leader: the index into `endpoints` of the cosigner that last served a request,
+    * with a count of how often the lead has moved ([[Lead]]). */
+  private val preferred = new Lead
 
   /** Endpoint `i` failed in a way that should cost it the lead: if it is still the preferred leader,
     * the next endpoint in ring order is, so the next call starts elsewhere. A compare-and-set, so it
     * never overrides a newer value another call wrote. */
-  private def demote(i: Int): Unit = demote(i, (i + 1) % channels.size)
-
-  /** [[demote]] with the endpoint that takes the lead named, for an endpoint whose demotion was held
-    * back (it said it lacks the key): `to` is the endpoint that served the call, or for a sign
-    * that ended otherwise the one the lead would have reached (`holdOnlyIfAll`). The next endpoint
-    * in the ring is not known to be good then: it may be one that failed later in the same walk. */
-  private def demote(i: Int, to: Int): Unit = {
+  private def demote(i: Int): Unit = {
+    val to = (i + 1) % channels.size
     // Recorded even when another call already moved the lead: it is still evidence that this node
     // failed just now, and it only delays the first endpoint's recovery. Before the lead moves, so
     // that startIndex never sees the lead off endpoint 0 without its demotion time.
     demotedAt.set(i, System.nanoTime())
     if (preferred.compareAndSet(i, to) && to != i)
+      logger.info(s"FROST: leader is now ${endpoints(to)} (was ${endpoints(i)}); leader order ${leaderOrder(to)}")
+  }
+
+  /** The endpoint `i` just said it lacks the key, and its demotion is held back: what a later
+    * [[demoteHeld]] needs, taken now — the lead as it is and the time. */
+  private def hold(i: Int): Held = Held(i, preferred.state, System.nanoTime())
+
+  /** Demote an endpoint whose demotion was held back. `to` takes the lead: the endpoint that served
+    * the call, or for a sign that ended otherwise the one the lead would have reached
+    * (`holdOnlyIfAll`) — not the next in the ring, which may be one that failed later in the walk.
+    *
+    * The demotion is as old as the endpoint's answer, and is applied as such:
+    *   - the lead moves only if it was on that endpoint when it answered and has not moved since.
+    *     A lead that another call has moved meanwhile, also onto this endpoint, is newer than the
+    *     answer and stays;
+    *   - the time recorded is the time of the answer, unless the endpoint lost the lead again
+    *     later. */
+  private def demoteHeld(held: Held, to: Int): Unit = {
+    val i = held.index
+    // Before the lead moves, as in demote.
+    demotedAt.updateAndGet(i, (last: Long) => if (last == 0L || held.at - last > 0L) held.at else last)
+    if (preferred.moveIfUnmoved(held.lead, i, to) && to != i)
       logger.info(s"FROST: leader is now ${endpoints(to)} (was ${endpoints(i)}); leader order ${leaderOrder(to)}")
   }
 
@@ -699,8 +717,8 @@ class FrostBackend(
     // With `holdOnlyIfAll`: the call ends, and not with every endpoint held back. The endpoints
     // in `held` (latest first) lose the lead to `to`, where it would be had each been demoted as
     // it failed.
-    def release(held: List[Int], to: Int): Unit =
-      if (holdOnlyIfAll) held.reverse.foreach(j => demote(j, to))
+    def release(held: List[Held], to: Int): Unit =
+      if (holdOnlyIfAll) held.reverse.foreach(h => demoteHeld(h, to))
     // One attempt in flight at a time: the next cosigner is asked only once this attempt has failed
     // or hit its deadline, which cancels it (the RPC is reset). Each attempt's deadline is capped
     // by what is left of the budget, and no attempt starts once less than MinAttempt is left.
@@ -734,7 +752,7 @@ class FrostBackend(
           // The cluster has the key: the endpoints that said they lack it lose the lead now, to
           // the endpoint that served — not to the next one in the ring, which may be one that
           // failed later in this walk.
-          seen.lackedKeyAt.reverse.foreach(j => demote(j, i))
+          seen.lackedKeyAt.reverse.foreach(h => demoteHeld(h, i))
           preferred.compareAndSet(observed, i)
           answer
         case Left(failure) =>
@@ -771,7 +789,7 @@ class FrostBackend(
           }
           // Held back only while the walk goes on: a failure that ends the call costs the lead now.
           val held: Boolean = deferred && retry
-          val seenNow: Seen = if (held) counted.copy(lackedKeyAt = i :: counted.lackedKeyAt) else counted
+          val seenNow: Seen = if (held) counted.copy(lackedKeyAt = hold(i) :: counted.lackedKeyAt) else counted
           // A failure that is thrown at once ends the call here: the lead goes to this endpoint,
           // which keeps it or passes it on in the next line.
           if (!retry) release(seen.lackedKeyAt, i)
@@ -1044,8 +1062,8 @@ class FrostBackend(
         stales: Int,
         unreachable: Option[(String, StatusRuntimeException)],
         sick: Option[StatusRuntimeException],
-        // Endpoint indices that gave a stale answer, latest first: demoted only if the call is served.
-        staleAt: List[Int],
+        // The endpoints that gave a stale answer, latest first: demoted only if the call is served.
+        staleAt: List[Held],
     ): A = {
       val i = (start + k) % n
       val outcome: Either[StatusRuntimeException, A] =
@@ -1094,13 +1112,13 @@ class FrostBackend(
               val note = if (knownEc) "ec-failover" else "failover"
               logger.warn(s"FROST: $what via ${endpoints(i)} answered $reason for $key — $meaning; asking $to")
               notes.add(s"$note=${endpoints(i)}→$to reason=$reason")
-              attempt(k + 1, Some(first), staleNow, unreachable, sick, i :: staleAt)
+              attempt(k + 1, Some(first), staleNow, unreachable, sick, hold(i) :: staleAt)
             case None => exhausted(Some(first), staleNow, unreachable, sick)
           }
         case Right(answer) =>
           // The cluster serves the key: the cosigners that answered stale lose the lead, to the
           // one that served (see withCheckedFailover).
-          staleAt.reverse.foreach(j => demote(j, i))
+          staleAt.reverse.foreach(h => demoteHeld(h, i))
           preferred.compareAndSet(start, i)
           answer
         case Left(e) =>
@@ -2673,9 +2691,43 @@ object FrostBackend {
       lastOwn: Option[(String, Exception)] = None,
       unreachable: Option[(String, StatusRuntimeException)] = None,
       other: Option[Exception] = None,
-      // Endpoint indices whose demotion is held back (they said they lack the key), latest first.
-      lackedKeyAt: List[Int] = Nil,
+      // The endpoints whose demotion is held back (they said they lack the key), latest first.
+      lackedKeyAt: List[Held] = Nil,
   )
+
+  /** An endpoint whose demotion is held back: its index, the lead as it was when the endpoint
+    * answered ([[Lead.state]]) and the time of the answer (System.nanoTime). */
+  private final case class Held(index: Int, lead: Long, at: Long)
+
+  /** The preferred leader and how many times the lead has moved, as one atomic value. A call that
+    * holds a demotion back keeps the value it saw ([[state]]) and may move the lead later only if
+    * nothing has moved it since ([[moveIfUnmoved]]); every other change is by endpoint index, as
+    * with a plain atomic integer. */
+  private final class Lead {
+    // The count of moves in the upper bits, the endpoint index in the lower 16.
+    private val packed = new java.util.concurrent.atomic.AtomicLong(0L)
+    private def indexOf(value: Long): Int = (value & 0xffffL).toInt
+    private def moved(value: Long, to: Int): Long = (((value >>> 16) + 1L) << 16) | to.toLong
+
+    /** The endpoint index of the preferred leader. */
+    def get: Int = indexOf(packed.get)
+
+    /** The lead as it is now, for a later [[moveIfUnmoved]]. */
+    def state: Long = packed.get
+
+    /** Move the lead from `from` to `to` if it is on `from`, whoever put it there. Giving the lead
+      * to the endpoint that has it changes nothing and counts as no move. */
+    @tailrec def compareAndSet(from: Int, to: Int): Boolean = {
+      val value = packed.get
+      if (indexOf(value) != from) false
+      else if (from == to || packed.compareAndSet(value, moved(value, to))) true
+      else compareAndSet(from, to)
+    }
+
+    /** Move the lead from `from` to `to` if it was on `from` in `seen` and has not moved since. */
+    def moveIfUnmoved(seen: Long, from: Int, to: Int): Boolean =
+      indexOf(seen) == from && (from == to || packed.compareAndSet(seen, moved(seen, to)))
+  }
 
   /** An answer the driver checked and refused to use (see `withCheckedFailover`): `code` names it
     * in the `failover=` note, `error` is what the call fails with when no cosigner is left. */
