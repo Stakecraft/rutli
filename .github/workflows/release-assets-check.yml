@@ -44,9 +44,10 @@ jobs:
         with:
           persist-credentials: false
 
-      # The sbt launcher, sbt itself and the driver's dependencies come from a cache (as in ci.yml):
-      # Maven Central rate-limits the shared runner addresses (HTTP 429), and a check that downloads
-      # all of it on every run fails for that reason, not for the change it checks.
+      # sbt and the driver's dependencies (~/.sbt, ~/.ivy2/cache, ~/.cache/coursier) come from a cache
+      # when one matches, as in ci.yml: Maven Central rate-limits the shared runner addresses (HTTP 429).
+      # A cache miss still downloads, and can still meet a 429; then re-run. This check does not prove
+      # a clean download of the dependencies; the release build, which uses no cache, does.
       - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
