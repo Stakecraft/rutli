@@ -278,7 +278,7 @@ footer .status-line { font-family: var(--mono); font-size: 12.5px; flex-basis: 1
     </div>
     <ol class="steps panel" id="steps" style="padding:8px">
       <li><div><strong>Canton asks the driver to sign</strong><span>The participant hands <code>rutli-driver.jar</code> a 34-byte digest through Canton's KMS Driver SPI. The node itself is unmodified.</span></div></li>
-      <li><div><strong>The driver sends a signed request to one cosigner</strong><span>That cosigner leads this signing session. If it can't be reached, the driver fails over to the next one in the roster.</span></div></li>
+      <li><div><strong>The driver sends a signed request to one cosigner</strong><span>That cosigner leads this signing session. If it can't be reached, the driver fails over to the next one in the roster. The preferred cosigner leads every signature until it fails. From 0.5.0, <code>frost.sign-leader = rotate</code> is an opt-in that spreads the lead over the cosigners in turn.</span></div></li>
       <li><div><strong>Every cosigner checks the request</strong><span>Each one verifies the driver's signed intent and applies its own policy and rate limits, so one bad cosigner can't use the others as a signing oracle.</span></div></li>
       <li><div><strong>Round 1: nonce commitments</strong><span>The leader collects commitments from enough cosigners to reach the threshold. Each nonce is marked used on disk before any share goes out, so a crash can't reuse it.</span></div></li>
       <li><div><strong>Round 2: signature shares</strong><span>Each of those cosigners returns a signature share. No share reveals the key.</span></div></li>
@@ -326,7 +326,7 @@ footer .status-line { font-family: var(--mono); font-size: 12.5px; flex-basis: 1
             <td><div class="mark crit">Keys copied</div></td>
             <td><div class="mark crit">Attacker can sign with every key while access lasts</div></td>
             <td><div class="mark crit">Attacker can sign with every key while access lasts</div></td>
-            <td class="us"><div class="mark warn">One share: can't sign. The encryption key is exposed, since it's held whole until 2.0</div></td>
+            <td class="us"><div class="mark warn">One share: can't sign. The encryption key is exposed, since it's held whole until threshold encryption arrives (planned for 1.0)</div></td>
           </tr>
           <tr>
             <th scope="row">One administrator goes rogue</th>
@@ -359,11 +359,11 @@ footer .status-line { font-family: var(--mono); font-size: 12.5px; flex-basis: 1
     <div class="section-head">
       <div class="eyebrow">Moving an existing validator in</div>
       <h2>Same node, same namespace, same party IDs</h2>
-      <p>Canton has no supported switch from database keys to a KMS. This is the in-place path we rehearsed on a Splice 0.9.0 / Canton 3.6.1 validator on DevNet.</p>
+      <p>Canton has no supported switch from database keys to a KMS. This is the in-place path we rehearsed on a Splice 0.9.0 / Canton 3.6.1 validator on DevNet. On the main branch the same procedure is tested end to end in CI on Canton 3.6.1 and on Canton 3.7.2.</p>
     </div>
     <ol class="migrate" style="margin-top:18px">
       <li class="panel"><h3>Export</h3><p>Each key is exported from the running node with <code>keys.secret.download_to</code>, protected by a password.</p></li>
-      <li class="panel"><h3>Split offline</h3><p>The namespace and signing keys are split into FROST shares on an offline machine, checked against their Canton fingerprints, then refreshed so the dealt shares are useless (required in production, skipped in the DevNet drill). The encryption key is imported whole.</p></li>
+      <li class="panel"><h3>Split offline</h3><p>The namespace and signing keys are split into FROST shares on an offline machine, checked against their Canton fingerprints, then refreshed so the dealt shares no longer combine with the live ones (required in production, skipped in the DevNet drill). The encryption key is imported whole.</p></li>
       <li class="panel"><h3>Switch</h3><p>The same participant restarts on the Rütli driver, registers each key by id and comes back with identical fingerprints. On DevNet the wallet was down about 20 minutes, and nobody had to re-onboard.</p></li>
       <li class="panel"><h3>Clean up</h3><p>Both keys were rotated onto keys born in the cluster. After 11 clean days the old database rows were deleted and every old copy destroyed, and the node restarted with no private key in its database. A key that once existed whole stays as exposed as any copy you missed.</p></li>
     </ol>
@@ -377,8 +377,9 @@ footer .status-line { font-family: var(--mono); font-size: 12.5px; flex-basis: 1
     <ul class="simplify">
       <li><b>Breached</b> here means the attacker controls the host and its seal secret. A stolen disk alone gives only a sealed share.</li>
       <li><b>The encryption key isn't threshold-shared yet.</b> It is sealed and replicated on every cosigner. Threshold encryption is planned for 1.0.</li>
+      <li><b>A refresh erases nothing.</b> A share in an old backup or snapshot, together with the key that sealed it, still combines with shares of the same epoch. <a href="https://github.com/Stakecraft/rutli/blob/main/docs/key-material-handling.md">Key material at rest</a> says how to close that.</li>
       <li><b>A breached cosigner can refuse to sign.</b> The driver fails over around it, as it does for an offline one.</li>
-      <li><b>Evidence so far is DevNet.</b> Rütli is at v0.4.0-rc.6 and not yet externally audited; the independent audit is the next step.</li>
+      <li><b>Evidence so far is DevNet.</b> The latest release is v0.4.1, and v0.5.0-rc.1 is being prepared. Rütli is not yet externally audited; the independent audit is the next step.</li>
     </ul>
   </section>
 
@@ -386,7 +387,7 @@ footer .status-line { font-family: var(--mono); font-size: 12.5px; flex-basis: 1
     <a href="https://github.com/Stakecraft/rutli">Repository (Apache-2.0)</a>
     <a href="https://github.com/Stakecraft/rutli/blob/main/docs/disaster-recovery.md">Disaster recovery and loss matrix</a>
     <a href="https://github.com/Stakecraft/rutli/blob/main/docs/runbook-migration-inplace.md">In-place migration runbook</a>
-    <span class="status-line">Built by Stakecraft · v0.4.0-rc.6 · Splice DevNet validator on Rütli since 2026-10-07</span>
+    <span class="status-line">Built by StakeCraft · v0.4.1 · Splice DevNet validator on Rütli since 2026-10-07</span>
   </footer>
 </div>
 
@@ -498,7 +499,7 @@ footer .status-line { font-family: var(--mono); font-size: 12.5px; flex-basis: 1
     if (comp >= t) {
       setRow("sec", "crit", "Exposed", "An attacker controls " + comp + " shares, enough to sign as this node. The namespace key can't be rotated, so the node's identity has to be abandoned.");
     } else if (comp > 0) {
-      setRow("sec", "warn", "Safe, act now", "An attacker holds " + plural(comp, "share", "shares") + ", fewer than " + t + ", which reveals nothing about the key. Run a share refresh: it replaces every share without changing the key, so the stolen one becomes useless.");
+      setRow("sec", "warn", "Safe, act now", "An attacker holds " + plural(comp, "share", "shares") + ", fewer than " + t + ", which reveals nothing about the key. Run a share refresh: it replaces every share without changing the key, so the stolen one no longer combines with the new ones.");
     } else {
       setRow("sec", "ok", "Safe", "No one holds " + t + " shares. The whole key never exists on any machine.");
     }
