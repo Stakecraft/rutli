@@ -288,24 +288,38 @@ class Suite(base.Runner):
         # The script's local work dir (the export, the dealer's output) is made here, so that this
         # side can remove it even when the script was killed before its own cleanup.
         scratch = tempfile.mkdtemp(prefix="rutli-e2e-migration-k8s.")
+        # The ceremony and key ids, as the script makes them (docs/migration.md §2), so that this side
+        # can abort an import the script left half done.
+        with open(os.path.join(HERE, "..", "..", "frost", "canton-key", "testdata", "vectors", "manifest.json")) as f:
+            ns_fp = next(k["fingerprint"] for k in json.load(f)["keys"] if k["name"] == "namespace")
+        key_id, ceremony = f"{prefix}frost-import-{ns_fp[4:12]}", f"{prefix}e2e-migration"
+        passed = {"script": False}
 
         def remove_leftovers():
             """Whatever happened to the script, once: the local work dir, the ceremony's files in the
             cosigners' /tmp (bundles, founding backups), the dealer pod (and the memory-backed work
             dir it holds), then its NetworkPolicy once the API confirms the pod is gone. Each call in
-            a session of its own, so that a signal to this process group cannot cut it short."""
+            a session of its own, so that a signal to this process group cannot cut it short. When the
+            script did not pass, the import is also aborted on every node (the sealed one-time
+            recipient secret; abort-import never removes an installed share)."""
             shutil.rmtree(scratch, ignore_errors=True)
+            if os.path.exists(scratch):
+                log(f"  WARNING: the local work dir {scratch} could not be removed. Remove it by hand.")
             argv = ["kubectl", "-n", self.cluster.ns]
-            for n in NODES:
-                try:
-                    rm = subprocess.run(argv + ["exec", self.cluster.pod(n), "-c", "cosigner", "--", "sh", "-c",
-                                                "rm -rf /tmp/r[0-9].json /tmp/share-*.json /tmp/backup-founding-node*"],
-                                        capture_output=True, timeout=60, start_new_session=True, check=False)
-                    removed = rm.returncode == 0
-                except subprocess.TimeoutExpired:
-                    removed = False
-                if not removed:
-                    log(f"  WARNING: the ceremony's files in {n}'s /tmp could not be removed. Remove them by hand.")
+            for i, n in enumerate(NODES, start=1):
+                steps = [["sh", "-c", "rm -rf /tmp/r[0-9].json /tmp/share-*.json /tmp/backup-founding-node*"]]
+                if not passed["script"]:
+                    steps.append(["env", "RUST_LOG=off", "rutli-cosigner", "--config", f"/config/cosigner-{i}.json",
+                                  "abort-import", "--key-id", key_id, "--ceremony-id", ceremony])
+                for step in steps:
+                    try:
+                        done = subprocess.run(argv + ["exec", self.cluster.pod(n), "-c", "cosigner", "--"] + step,
+                                              capture_output=True, timeout=60, start_new_session=True,
+                                              check=False).returncode == 0
+                    except subprocess.TimeoutExpired:
+                        done = False
+                    if not done and step[0] == "sh":
+                        log(f"  WARNING: the ceremony's files in {n}'s /tmp could not be removed. Remove them by hand.")
             try:
                 subprocess.run(argv + ["delete", "pod", DEALER_POD, "--wait=true", "--timeout=120s",
                                        "--ignore-not-found"], capture_output=True, timeout=180, start_new_session=True, check=False)
@@ -323,7 +337,8 @@ class Suite(base.Runner):
         def body():
             env = dict(os.environ, E2E_ENV="k8s", E2E_STAGES="ceremony", E2E_PREFIX=prefix,
                        RUTLI_NAMESPACE=self.cluster.ns, E2E_CERTS=os.path.join(a.work, "certs"),
-                       E2E_DEALER_IMAGE=image, E2E_RESULT=result_path, E2E_SCRATCH=scratch)
+                       E2E_DEALER_IMAGE=image, E2E_RESULT=result_path, E2E_SCRATCH=scratch,
+                       E2E_CEREMONY=ceremony)
             # Set either way: an inherited E2E_ALLOW_UNISOLATED_DEALER must not decide it, nor an
             # inherited KEEP keep the export on disk.
             env["E2E_ALLOW_UNISOLATED_DEALER"] = "1" if a.allow_unisolated_dealer else "0"
@@ -335,6 +350,7 @@ class Suite(base.Runner):
             try:
                 stdout, stderr = proc.communicate(timeout=1800)
                 out = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+                passed["script"] = proc.returncode == 0
             except BaseException as e:
                 # A timeout, Ctrl-C or any other error: SIGTERM to the script's group, so that its EXIT
                 # trap cleans up (work dir, dealer pod, the pods' files); SIGKILL after 5 minutes.

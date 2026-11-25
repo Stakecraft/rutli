@@ -94,7 +94,7 @@ PREFIX="${E2E_PREFIX:-mig1-}"
 OLD_ID="oldp" # = HINT, the Splice default (§3): the validator party is the old node's admin party
 NEW_ID_ROLLED_BACK="oldp-r1"
 NEW_ID="oldp-r2"
-CEREMONY="${PREFIX}e2e-migration-$(date +%s)"
+CEREMONY="${E2E_CEREMONY:-${PREFIX}e2e-migration-$(date +%s)}" # the cluster suite names it, to abort it
 
 BUNDLE=()           # the dealt bundle of each node, as that node reads it
 FOUNDING_BACKUPS=() # each node's founding backup, as that node sees it
