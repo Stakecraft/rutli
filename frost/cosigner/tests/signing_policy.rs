@@ -232,6 +232,17 @@ async fn cluster_with(
     policy: impl Fn(&Ids, u16) -> SigningPolicyConfig,
     refreshers: Option<Vec<String>>,
 ) -> Cluster {
+    cluster_serving(policy, refreshers, &["operator"], 0).await
+}
+
+/// [`cluster_with`], with the Signer services' operator role (`operators`) and their
+/// `CeremonySignTest` ceiling (`sign_tests_per_min`, 0 = none) chosen by the test.
+async fn cluster_serving(
+    policy: impl Fn(&Ids, u16) -> SigningPolicyConfig,
+    refreshers: Option<Vec<String>>,
+    operators: &[&str],
+    sign_tests_per_min: u32,
+) -> Cluster {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
     let ids = Ids::new(&root.join("certs"));
@@ -302,10 +313,14 @@ async fn cluster_with(
             node: nodes[i].clone(),
             peers,
             allowed_cns: Some(signer_cns.clone()),
-            operator_cns: Some(Arc::new(["operator".to_string()].into())),
+            operator_cns: Some(Arc::new(
+                operators.iter().map(|cn| (*cn).to_string()).collect(),
+            )),
             hosted_write_quorum: 2,
             decrypt_limiter: Arc::new(DecryptRateLimiter::new(0)),
-            ceremony_test_limiter: Arc::new(DecryptRateLimiter::new(0)),
+            ceremony_test_limiter: Arc::new(rutli_cosigner::service::ceremony_sign_test_limiter(
+                sign_tests_per_min,
+            )),
             sign_guard: nodes[i].sign_guard().cloned(),
             refresh_cns: refreshers
                 .as_ref()
@@ -2937,6 +2952,217 @@ async fn the_operator_certificate_reaches_only_the_operator_rpcs_and_every_signe
     assert!(!c.nodes[0].has_key(dkg_id));
     assert!((0..3).all(|i| c.journal(i).is_empty()));
     assert!(c.nodes.iter().all(|n| n.key_epoch(KEY).unwrap().epoch == 1));
+}
+
+// ── the key ACL on the status RPCs ────────────────────────────────────────────────────────────
+
+const OTHER_KEY: &str = "frost-participant2-namespace";
+
+/// `driver` may use `frost-participant1-…` (the cluster's `KEY`), `tenant` `frost-participant2-…`.
+fn two_tenants() -> SigningPolicyConfig {
+    SigningPolicyConfig {
+        require_intent: Some(true),
+        signer_acl_required: true,
+        signer_acl: BTreeMap::from([
+            (
+                "driver".to_string(),
+                vec!["frost-participant1-".to_string()],
+            ),
+            (
+                "tenant".to_string(),
+                vec!["frost-participant2-".to_string()],
+            ),
+        ]),
+        ..Default::default()
+    }
+}
+
+fn sign_test_of(key_id: &str) -> pb::CeremonySignTestRequest {
+    pb::CeremonySignTestRequest {
+        key_id: key_id.into(),
+        signers: vec![1, 2],
+    }
+}
+
+/// The three status RPCs for `key_id` as `who` at `node`, in the order `KeyStatus`,
+/// `HostedKeyStatus`, `CeremonySignTest`: each call's gRPC status, `None` for OK.
+async fn status_rpcs(
+    c: &Cluster,
+    who: &str,
+    node: usize,
+    key_id: &str,
+) -> [Option<tonic::Status>; 3] {
+    let mut client = c.signer(who, node).await;
+    let key = || key_id.to_string();
+    [
+        client
+            .key_status(pb::KeyStatusRequest { key_id: key() })
+            .await
+            .err(),
+        client
+            .hosted_key_status(pb::HostedKeyStatusRequest { key_id: key() })
+            .await
+            .err(),
+        client.ceremony_sign_test(sign_test_of(key_id)).await.err(),
+    ]
+}
+
+fn assert_refused_by_the_acl(who: &str, key_id: &str, results: &[Option<tonic::Status>; 3]) {
+    for (rpc, result) in ["KeyStatus", "HostedKeyStatus", "CeremonySignTest"]
+        .iter()
+        .zip(results)
+    {
+        let status = result
+            .as_ref()
+            .unwrap_or_else(|| panic!("{rpc} of {key_id} answered {who}"));
+        assert!(
+            status.code() == tonic::Code::PermissionDenied
+                && status.message().contains("signer_acl"),
+            "{rpc} of {key_id} as {who}: {status:?}"
+        );
+    }
+}
+
+/// Past authorization, each RPC does its own work on this cluster: the status of a key that
+/// exists; no hosted keys on these nodes; the sign test's refusal of a DKG key.
+fn assert_past_authorization(who: &str, results: &[Option<tonic::Status>; 3]) {
+    assert!(results[0].is_none(), "KeyStatus as {who}: {:?}", results[0]);
+    for (rpc, result) in ["HostedKeyStatus", "CeremonySignTest"]
+        .iter()
+        .zip(&results[1..])
+    {
+        assert_eq!(
+            result.as_ref().map(tonic::Status::code),
+            Some(tonic::Code::FailedPrecondition),
+            "{rpc} as {who}: {result:?}"
+        );
+    }
+}
+
+/// `KeyStatus`, `HostedKeyStatus` and `CeremonySignTest` hold a driver-role caller to its key ACL
+/// at every node, as `Sign` does. The operator role reads every key and the refresher role keeps
+/// `KeyStatus` for every key, as before.
+#[tokio::test]
+async fn a_driver_certificate_reaches_the_status_rpcs_only_for_keys_its_acl_covers() {
+    let c = cluster(|_| two_tenants(), Some(vec!["refresher".into()])).await;
+    for node in 0..N as usize {
+        let results = status_rpcs(&c, "tenant", node, KEY).await;
+        assert_refused_by_the_acl("tenant", KEY, &results);
+    }
+    assert_refused_by_the_acl(
+        "driver",
+        OTHER_KEY,
+        &status_rpcs(&c, "driver", 0, OTHER_KEY).await,
+    );
+
+    // Its own keys: the driver's exists, the tenant's prefix holds none — an answer from the key
+    // store (no such key; no hosted keys on these nodes), not from the ACL.
+    assert_past_authorization("driver", &status_rpcs(&c, "driver", 1, KEY).await);
+    let codes = status_rpcs(&c, "tenant", 2, OTHER_KEY)
+        .await
+        .map(|s| s.as_ref().map(tonic::Status::code));
+    assert_eq!(
+        codes,
+        [
+            Some(tonic::Code::NotFound),
+            Some(tonic::Code::FailedPrecondition),
+            Some(tonic::Code::NotFound)
+        ]
+    );
+
+    // The operator role is not key-scoped; the refresher role has KeyStatus for every key.
+    assert_past_authorization("operator", &status_rpcs(&c, "operator", 2, KEY).await);
+    let status = c
+        .signer("refresher", 0)
+        .await
+        .key_status(pb::KeyStatusRequest { key_id: KEY.into() })
+        .await
+        .unwrap();
+    assert_eq!(
+        status.into_inner().group_verifying_key,
+        c.group_key().to_vec()
+    );
+}
+
+/// The ACL is checked before the `CeremonySignTest` ceiling: calls it refuses take nothing from
+/// the key's budget and leave no nonce marker or journal entry, so the key's own callers still
+/// have the whole budget.
+#[tokio::test]
+async fn a_sign_test_the_acl_refuses_spends_no_budget_and_leaves_no_marker() {
+    let c = cluster_serving(|_, _| two_tenants(), None, &["operator"], 1).await;
+    let markers = |c: &Cluster| (0..N as usize).map(|i| c.markers(i)).collect::<Vec<_>>();
+    let before = markers(&c);
+    let sign_test = |who: &'static str| {
+        let c = &c;
+        async move {
+            c.signer(who, 0)
+                .await
+                .ceremony_sign_test(sign_test_of(KEY))
+                .await
+                .unwrap_err()
+        }
+    };
+    // More refusals than the budget of one a minute: none is the rate limiter's answer.
+    for _ in 0..3 {
+        let status = sign_test("tenant").await;
+        assert_eq!(status.code(), tonic::Code::PermissionDenied, "{status:?}");
+    }
+    assert_eq!(markers(&c), before);
+    assert!((0..3).all(|i| c.journal(i).is_empty()));
+
+    // The budget is whole: the driver's first call gets past the limiter to the sign test's own
+    // answer for a DKG key, and only its second is limited (the limiter is on).
+    let first = sign_test("driver").await;
+    assert!(
+        first.code() == tonic::Code::FailedPrecondition
+            && first.message().contains("split-ceremony"),
+        "{first:?}"
+    );
+    let second = sign_test("driver").await;
+    assert_eq!(second.code(), tonic::Code::ResourceExhausted, "{second:?}");
+}
+
+/// The status RPCs read `signer_acl_required` as the sign path does — a driver CN without an
+/// entry reads every key while it is off and none once it is on — and a CN that is in the driver
+/// role and in the operator or refresher role as well stays under its ACL.
+#[tokio::test]
+async fn the_status_rpcs_follow_signer_acl_required_and_the_driver_role_decides_for_a_cn_in_two_roles(
+) {
+    let only = |cn: &str, prefix: &str, required: bool| SigningPolicyConfig {
+        require_intent: Some(true),
+        signer_acl_required: required,
+        signer_acl: BTreeMap::from([(cn.to_string(), vec![prefix.to_string()])]),
+        ..Default::default()
+    };
+
+    // Not required: `driver` has no entry and reads the key. `tenant` has one, and is listed as
+    // an operator and as a refresher too — it is still refused a key outside its prefix.
+    let policy = only("tenant", "frost-participant2-", false);
+    let c = cluster_serving(
+        |_, _| policy.clone(),
+        Some(vec!["refresher".into(), "tenant".into()]),
+        &["operator", "tenant"],
+        0,
+    )
+    .await;
+    assert_past_authorization("driver", &status_rpcs(&c, "driver", 0, KEY).await);
+    for node in 0..N as usize {
+        let results = status_rpcs(&c, "tenant", node, KEY).await;
+        assert_refused_by_the_acl("tenant", KEY, &results);
+    }
+    assert_past_authorization("operator", &status_rpcs(&c, "operator", 1, KEY).await);
+
+    // Required: `tenant` has no entry and is refused every key, its own prefix included.
+    let policy = only("driver", "frost-participant1-", true);
+    let c = cluster(|_| policy.clone(), None).await;
+    let results = status_rpcs(&c, "tenant", 0, OTHER_KEY).await;
+    assert_refused_by_the_acl("tenant", OTHER_KEY, &results);
+    assert!(results.iter().all(|s| s
+        .as_ref()
+        .unwrap()
+        .message()
+        .contains("signer_acl_required")));
+    assert_past_authorization("driver", &status_rpcs(&c, "driver", 2, KEY).await);
 }
 
 /// Unset `require_intent` is on (with TLS, which every node here has): a round 1 without an

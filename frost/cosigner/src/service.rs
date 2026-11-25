@@ -30,7 +30,8 @@ pub struct SignerSvc {
     /// read-only `KeyStatus` and `HostedKeyStatus` and the fixed-message `CeremonySignTest` only —
     /// never `Sign`, DKG, refresh or any hosted-key operation — so verifying a split ceremony or an
     /// imported key needs no credential that can sign arbitrary digests with a namespace key or
-    /// decrypt. `None` = no operator role.
+    /// decrypt. It reads every key; the driver role calls the same three RPCs under its key ACL.
+    /// `None` = no operator role.
     pub operator_cns: Option<Arc<HashSet<String>>>,
     /// How many cosigners must hold a new hosted key before it is reported created, from
     /// `hosted_keys.write_quorum`. Carried here rather than read from a constant so the configured
@@ -81,25 +82,56 @@ impl SignerSvc {
         self.check_acl(caller.as_ref(), key_id(req.get_ref()))
     }
 
-    /// For the operator-role RPCs (`KeyStatus`, `CeremonySignTest`): the driver role or the
-    /// operator role.
-    fn authorize_operator<T>(&self, req: &Request<T>) -> Result<(), Status> {
+    /// For the operator-role RPCs (`KeyStatus`, `HostedKeyStatus`, `CeremonySignTest`) on
+    /// `key_id`: the driver role, held to its key ACL as on `Sign`, or the operator role, which
+    /// reads every key.
+    fn authorize_operator<T>(&self, req: &Request<T>, key_id: &str) -> Result<(), Status> {
         authorize_either(
             self.allowed_cns.as_deref(),
             self.operator_cns.as_deref(),
             req,
         )?;
-        self.check_pin(req).map(|_| ())
+        let caller = self.check_pin(req)?;
+        self.check_status_acl(caller.as_ref(), key_id)
     }
 
-    /// `KeyStatus`: the operator-role RPCs' callers or the refresher role.
-    fn authorize_status<T>(&self, req: &Request<T>) -> Result<(), Status> {
-        match self.authorize_operator(req) {
-            Err(refused) if self.refresh_cns.is_some() => {
+    /// `KeyStatus`: the operator-role RPCs' callers or the refresher role (every key, as on
+    /// `Refresh`).
+    fn authorize_status<T>(&self, req: &Request<T>, key_id: &str) -> Result<(), Status> {
+        match self.authorize_operator(req, key_id) {
+            // A driver-role caller's refusal (its pin, its key ACL) stands: only a CN that is not
+            // in the driver role is tried as a refresher.
+            Err(refused)
+                if self.refresh_cns.is_some() && !self.in_driver_role(caller_of(req).as_ref()) =>
+            {
                 authorize_cn(self.refresh_cns.as_deref(), req, "Signer").map_err(|_| refused)?;
                 self.check_pin(req).map(|_| ())
             }
             other => other,
+        }
+    }
+
+    /// Whether the caller's CN is on `signer_allowlist`. Without an allowlist (plaintext dev), or
+    /// without a certificate, the caller is treated as one, as on the sign path.
+    fn in_driver_role(&self, caller: Option<&crate::intent::Caller>) -> bool {
+        caller.is_none_or(|c| held_to_key_acl(self.allowed_cns.as_deref(), &c.cn))
+    }
+
+    /// The key ACL on a status RPC, for a caller its role check admitted. A CN on
+    /// `signer_allowlist` is a driver-role caller and is held to its `signer_acl`, with the
+    /// semantics of the sign path (`signer_acl_required` included). The rule for a CN in two
+    /// roles: the driver role decides — being on `operator_allowlist` or `refresh_allowlist` as
+    /// well does not lift the ACL. (A loaded config refuses such a CN; a service built by hand
+    /// gets the narrower answer.) A CN in the operator or refresher role only reads every key.
+    fn check_status_acl(
+        &self,
+        caller: Option<&crate::intent::Caller>,
+        key_id: &str,
+    ) -> Result<(), Status> {
+        if self.in_driver_role(caller) {
+            self.check_acl(caller, key_id)
+        } else {
+            Ok(())
         }
     }
 
@@ -246,6 +278,12 @@ fn authorize_either<T>(
     }
 }
 
+/// Whether the key ACL applies to `cn` on a status RPC: it does unless a driver allowlist is
+/// configured and `cn` is not on it (a caller admitted by the operator or refresher role alone).
+fn held_to_key_acl(drivers: Option<&HashSet<String>>, cn: &str) -> bool {
+    drivers.is_none_or(|d| d.contains(cn))
+}
+
 fn record_ceremony(kind: &'static str, ok: bool) {
     let result = if ok { "ok" } else { "error" };
     metrics::counter!(crate::metrics::CEREMONY_REQUESTS, "kind" => kind, "result" => result)
@@ -303,13 +341,14 @@ impl Signer for SignerSvc {
         }))
     }
 
-    // Read-only and public values only, but allowlisted (driver or operator role): nothing outside
-    // those identities needs to enumerate key provenance.
+    // Read-only and public values only, but allowlisted (driver, operator or refresher role):
+    // nothing outside those identities needs to enumerate key provenance, and a driver reads only
+    // the keys its ACL covers.
     async fn key_status(
         &self,
         req: Request<pb::KeyStatusRequest>,
     ) -> Result<Response<pb::KeyStatusReply>, Status> {
-        self.authorize_status(&req)?;
+        self.authorize_status(&req, &req.get_ref().key_id)?;
         self.refuse_if_keystore_down()?;
         let key_id = req.into_inner().key_id;
         let reply = self
@@ -326,7 +365,9 @@ impl Signer for SignerSvc {
         &self,
         req: Request<pb::CeremonySignTestRequest>,
     ) -> Result<Response<pb::CeremonySignTestReply>, Status> {
-        self.authorize_operator(&req)?;
+        // The driver role's key ACL is part of this, so a call it refuses spends none of the key's
+        // sign-test budget below and writes no nonce marker.
+        self.authorize_operator(&req, &req.get_ref().key_id)?;
         self.refuse_if_keystore_down()?;
         let r = req.into_inner();
         // Before any work: every call that gets through burns a durable nonce marker per signer.
@@ -475,12 +516,12 @@ impl Signer for SignerSvc {
     }
 
     // Read-only, public half only, and local: no read-repair, so `verify-hosted` sees which nodes
-    // really hold the key. Driver or operator role, like KeyStatus.
+    // really hold the key. Driver role (under its key ACL) or operator role, like KeyStatus.
     async fn hosted_key_status(
         &self,
         req: Request<pb::HostedKeyStatusRequest>,
     ) -> Result<Response<pb::HostedKeyStatusReply>, Status> {
-        self.authorize_operator(&req)?;
+        self.authorize_operator(&req, &req.get_ref().key_id)?;
         self.refuse_if_keystore_down()?;
         let key_id = req.into_inner().key_id;
         let reply = self
@@ -2114,5 +2155,21 @@ mod tests {
         assert!(super::authorize_either(Some(&driver), None, &req).is_err());
         // Plaintext dev (no driver allowlist) stays open, as every other Signer RPC.
         assert!(super::authorize_either(None, Some(&operator), &req).is_ok());
+    }
+
+    #[test]
+    fn a_status_rpc_holds_every_driver_role_cn_to_the_key_acl() {
+        use std::collections::HashSet;
+        let drivers: HashSet<String> = ["driver".to_string(), "both".to_string()]
+            .into_iter()
+            .collect();
+        // On signer_allowlist: the ACL applies — also to a CN some other role lists as well, since
+        // only the driver set is asked.
+        assert!(super::held_to_key_acl(Some(&drivers), "driver"));
+        assert!(super::held_to_key_acl(Some(&drivers), "both"));
+        // Admitted by the operator or refresher role alone: every key.
+        assert!(!super::held_to_key_acl(Some(&drivers), "operator"));
+        // No allowlist (plaintext dev): as on the sign path, the ACL is asked for whoever calls.
+        assert!(super::held_to_key_acl(None, "anyone"));
     }
 }
