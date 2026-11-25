@@ -32,6 +32,7 @@
 
 pub mod dealer;
 pub mod dkg;
+pub mod fsutil;
 pub mod nonce_store;
 pub mod refresh;
 pub mod repair;

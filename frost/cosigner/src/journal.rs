@@ -142,34 +142,6 @@ pub struct ReadReport {
     pub segments: usize,
 }
 
-/// Journal directories whose parent has been synced in this process.
-static PARENT_SYNCED: std::sync::OnceLock<Mutex<std::collections::HashSet<PathBuf>>> =
-    std::sync::OnceLock::new();
-
-/// fsync the parent of `dir` on the first open of `dir` in this process, whether or not `dir` was
-/// just created: an earlier process may have died, or its sync failed, before the entry reached
-/// disk. A failed sync is returned and not recorded, so the next open tries again. (A key's
-/// journal is reopened after an eviction, a directory's parent is still synced only once.)
-fn sync_parent_once(dir: &Path) -> std::io::Result<()> {
-    let set = PARENT_SYNCED.get_or_init(Default::default);
-    if set.lock().unwrap_or_else(|p| p.into_inner()).contains(dir) {
-        return Ok(());
-    }
-    if let Some(parent) = dir.parent() {
-        // A bare relative name has an empty parent: the current directory.
-        let parent = if parent.as_os_str().is_empty() {
-            Path::new(".")
-        } else {
-            parent
-        };
-        std::fs::File::open(parent)?.sync_all()?;
-    }
-    set.lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(dir.to_path_buf());
-    Ok(())
-}
-
 /// The sign journal of one node.
 pub struct SignJournal {
     dir: PathBuf,
@@ -227,8 +199,7 @@ impl SignJournal {
     /// a key is first used.
     pub fn open(dir: impl Into<PathBuf>, node: u16, retention: Retention) -> Result<Self> {
         let dir = dir.into();
-        std::fs::create_dir_all(&dir)?;
-        sync_parent_once(&dir)?;
+        rutli_frost_core::fsutil::open_dir_durably(&dir)?;
         Ok(Self {
             dir,
             node,
@@ -393,8 +364,7 @@ impl SignJournal {
 
 impl KeyJournal {
     fn open(dir: &Path, now_ms: u64, retention: Retention) -> Result<Self> {
-        std::fs::create_dir_all(dir)?;
-        sync_parent_once(dir)?;
+        rutli_frost_core::fsutil::open_dir_durably(dir)?;
         let mut segs = segments(dir)?;
         // A torn tail can only be in the last segment: truncate it (it was never fsynced, so no
         // share was released for it).
@@ -1470,8 +1440,39 @@ mod tests {
         }
     }
 
+    /// The opening error must be the denied directory open, not just some error.
+    fn assert_denied<T>(r: std::result::Result<T, DaemonError>, what: &str) {
+        match r {
+            Err(DaemonError::Io(e)) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "{what}: {e}"
+            ),
+            Err(e) => panic!("{what}: unexpected error {e}"),
+            Ok(_) => panic!("{what}: expected an error"),
+        }
+    }
+
+    /// Whether `dir` cannot be opened (file permissions are enforced). Running as root the mode is
+    /// ignored and the test would prove nothing: locally that is a skip; in CI it must be loud, so
+    /// that a job that starts running as root cannot silently drop the coverage.
+    fn permissions_enforced(dir: &Path) -> bool {
+        match std::fs::File::open(dir) {
+            Ok(_) => {
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "this test needs file permissions to be enforced, but the CI job runs as root"
+                );
+                eprintln!("skipped: permissions are not enforced here (running as root)");
+                false
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => true,
+            Err(e) => panic!("unexpected error opening the directory: {e}"),
+        }
+    }
+
     #[test]
-    fn a_new_key_directory_needs_its_parent_opened_for_the_sync_and_an_existing_one_does_not() {
+    fn a_new_key_directory_always_syncs_its_parent_and_a_fresh_open_of_a_cached_one_does_not() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("journal");
@@ -1479,49 +1480,40 @@ mod tests {
         // Write and search, but not read: the parent can be written into but not opened to sync.
         let _restore = RestoreMode(root.clone());
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).unwrap();
-        let enforced = match std::fs::File::open(&root) {
-            Ok(_) => false,
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => true,
-            Err(e) => panic!("unexpected error opening the parent: {e}"),
-        };
-        if !enforced {
-            // Running as root (or with CAP_DAC_OVERRIDE) the mode is ignored and this test would
-            // prove nothing. Locally that is a skip; in CI it must be loud, so that a job that
-            // starts running as root cannot silently drop the coverage.
-            assert!(
-                std::env::var_os("CI").is_none(),
-                "this test needs file permissions to be enforced, but the CI job runs as root"
-            );
-            eprintln!("skipped: permissions are not enforced here (running as root)");
+        if !permissions_enforced(&root) {
             return;
         }
-        let err = j
-            .append_charged(entry("k", &format!("{:032x}", 1)), UNLIMITED, T)
-            .expect_err(
-                "a new key directory must be synced into its parent, which cannot be opened",
-            );
-        assert!(
-            matches!(&err, DaemonError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
-            "{err}"
+        assert_denied(
+            j.append_charged(entry("k", &format!("{:032x}", 1)), UNLIMITED, T),
+            "a new key directory must be synced into its parent, which cannot be opened",
         );
         // The failed attempt did create the key directory before the parent could not be synced.
         // Remove it again: with the parent readable, a genuinely new key directory is created and
-        // synced into it.
+        // synced into it, although the same path was used before.
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::remove_dir_all(root.join("k")).unwrap();
         j.append_charged(entry("k", &format!("{:032x}", 2)), UNLIMITED, T)
             .unwrap();
-        // From here on it exists: opening it, even in a parent that cannot be opened, must not
-        // try to sync the parent again.
+        // From here on it exists and is cached. A FRESH journal has no key cache, so `KeyJournal::open`
+        // runs; in a parent that cannot be opened it must not try to sync the parent again.
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).unwrap();
         let again = SignJournal::open(&root, 1, FOREVER).unwrap();
         again
             .append_charged(entry("k", &format!("{:032x}", 3)), UNLIMITED, T + 1)
             .unwrap();
+        // A key directory recreated at a cached path is a new entry and syncs again.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::remove_dir_all(root.join("k")).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let fresh = SignJournal::open(&root, 1, FOREVER).unwrap();
+        assert_denied(
+            fresh.append_charged(entry("k", &format!("{:032x}", 4)), UNLIMITED, T + 2),
+            "a recreated key directory is synced although its path was cached",
+        );
     }
 
     #[test]
-    fn a_failed_parent_sync_is_retried_on_the_next_open() {
+    fn a_failed_key_parent_sync_is_retried_on_the_next_open() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("journal");
@@ -1530,28 +1522,52 @@ mod tests {
         std::fs::create_dir_all(root.join("k")).unwrap();
         let _restore = RestoreMode(root.clone());
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).unwrap();
-        if std::fs::File::open(&root).is_ok() {
-            assert!(
-                std::env::var_os("CI").is_none(),
-                "this test needs file permissions to be enforced, but the CI job runs as root"
-            );
-            eprintln!("skipped: permissions are not enforced here (running as root)");
+        if !permissions_enforced(&root) {
             return;
         }
         let j = SignJournal::open(&root, 1, FOREVER).unwrap();
-        assert!(j
-            .append_charged(entry("k", &format!("{:032x}", 1)), UNLIMITED, T)
-            .is_err());
+        assert_denied(
+            j.append_charged(entry("k", &format!("{:032x}", 1)), UNLIMITED, T),
+            "first attempt",
+        );
         // The failure was not recorded: the parent still cannot be synced, so it fails again.
-        assert!(j
-            .append_charged(entry("k", &format!("{:032x}", 2)), UNLIMITED, T + 1)
-            .is_err());
+        assert_denied(
+            j.append_charged(entry("k", &format!("{:032x}", 2)), UNLIMITED, T + 1),
+            "second attempt",
+        );
         // Once the parent can be opened, the retry succeeds, and later opens do not sync again.
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
         j.append_charged(entry("k", &format!("{:032x}", 3)), UNLIMITED, T + 2)
             .unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).unwrap();
-        j.append_charged(entry("k", &format!("{:032x}", 4)), UNLIMITED, T + 3)
+        let again = SignJournal::open(&root, 1, FOREVER).unwrap();
+        again
+            .append_charged(entry("k", &format!("{:032x}", 4)), UNLIMITED, T + 3)
             .unwrap();
+    }
+
+    #[test]
+    fn the_journal_directory_syncs_its_own_parent_on_the_first_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let root = data.join("journal");
+        std::fs::create_dir_all(&root).unwrap();
+        let _restore = RestoreMode(data.clone());
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o300)).unwrap();
+        if !permissions_enforced(&data) {
+            return;
+        }
+        assert_denied(
+            SignJournal::open(&root, 1, FOREVER),
+            "the parent of the journal directory cannot be opened",
+        );
+        // Not recorded: it fails again, and succeeds once the parent can be opened.
+        assert_denied(SignJournal::open(&root, 1, FOREVER), "second attempt");
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+        SignJournal::open(&root, 1, FOREVER).unwrap();
+        // Cached now: a later open does not need the parent to be readable.
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o300)).unwrap();
+        SignJournal::open(&root, 1, FOREVER).unwrap();
     }
 }

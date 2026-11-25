@@ -57,33 +57,6 @@ use crate::{CoreError, Result};
 /// metrics; the daemon passes one that records them.
 pub type ConsumeObserver = fn(Duration, bool);
 
-/// Store directories whose parent has been synced in this process.
-static PARENT_SYNCED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
-    std::sync::OnceLock::new();
-
-/// fsync the parent of `dir` on the first open of `dir` in this process, whether or not `dir` was
-/// just created: an earlier process may have died, or its sync failed, before the entry reached
-/// disk. A failed sync is returned and not recorded, so the next open tries again.
-fn sync_parent_once(dir: &Path) -> std::io::Result<()> {
-    let set = PARENT_SYNCED.get_or_init(Default::default);
-    if set.lock().unwrap_or_else(|p| p.into_inner()).contains(dir) {
-        return Ok(());
-    }
-    if let Some(parent) = dir.parent() {
-        // A bare relative name has an empty parent: the current directory.
-        let parent = if parent.as_os_str().is_empty() {
-            Path::new(".")
-        } else {
-            parent
-        };
-        File::open(parent)?.sync_all()?;
-    }
-    set.lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(dir.to_path_buf());
-    Ok(())
-}
-
 pub struct NonceStore {
     dir: PathBuf,
     observer: Option<ConsumeObserver>,
@@ -93,8 +66,7 @@ impl NonceStore {
     /// Open (creating if needed) a nonce store rooted at `dir`.
     pub fn open(dir: impl Into<PathBuf>) -> Result<Self> {
         let dir = dir.into();
-        fs::create_dir_all(&dir)?;
-        sync_parent_once(&dir)?;
+        crate::fsutil::open_dir_durably(&dir)?;
         Ok(Self {
             dir,
             observer: None,
@@ -335,12 +307,19 @@ mod tests {
         let _restore = RestoreMode(parent.clone());
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o300)).unwrap();
         if File::open(&parent).is_ok() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "this test needs file permissions to be enforced, but the CI job runs as root"
+            );
             eprintln!("skipped: permissions not enforced");
             return;
         }
+        let err = NonceStore::open(&dir)
+            .err()
+            .expect("the sync error is returned");
         assert!(
-            NonceStore::open(&dir).is_err(),
-            "the sync error is returned"
+            matches!(&err, CoreError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+            "{err}"
         );
         // The failure was not recorded: the next open tries again, and succeeds.
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
