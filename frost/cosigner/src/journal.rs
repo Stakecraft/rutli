@@ -199,7 +199,7 @@ impl SignJournal {
     /// a key is first used.
     pub fn open(dir: impl Into<PathBuf>, node: u16, retention: Retention) -> Result<Self> {
         let dir = dir.into();
-        std::fs::create_dir_all(&dir)?;
+        rutli_frost_core::fsutil::open_dir_durably(&dir)?;
         Ok(Self {
             dir,
             node,
@@ -364,13 +364,7 @@ impl SignJournal {
 
 impl KeyJournal {
     fn open(dir: &Path, now_ms: u64, retention: Retention) -> Result<Self> {
-        let created = !dir.exists();
-        std::fs::create_dir_all(dir)?;
-        if created {
-            if let Some(parent) = dir.parent() {
-                std::fs::File::open(parent)?.sync_all()?;
-            }
-        }
+        rutli_frost_core::fsutil::open_dir_durably(dir)?;
         let mut segs = segments(dir)?;
         // A torn tail can only be in the last segment: truncate it (it was never fsynced, so no
         // share was released for it).
@@ -1446,8 +1440,39 @@ mod tests {
         }
     }
 
+    /// The opening error must be the denied directory open, not just some error.
+    fn assert_denied<T>(r: std::result::Result<T, DaemonError>, what: &str) {
+        match r {
+            Err(DaemonError::Io(e)) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "{what}: {e}"
+            ),
+            Err(e) => panic!("{what}: unexpected error {e}"),
+            Ok(_) => panic!("{what}: expected an error"),
+        }
+    }
+
+    /// Whether `dir` cannot be opened (file permissions are enforced). Running as root the mode is
+    /// ignored and the test would prove nothing: locally that is a skip; in CI it must be loud, so
+    /// that a job that starts running as root cannot silently drop the coverage.
+    fn permissions_enforced(dir: &Path) -> bool {
+        match std::fs::File::open(dir) {
+            Ok(_) => {
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "this test needs file permissions to be enforced, but the CI job runs as root"
+                );
+                eprintln!("skipped: permissions are not enforced here (running as root)");
+                false
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => true,
+            Err(e) => panic!("unexpected error opening the directory: {e}"),
+        }
+    }
+
     #[test]
-    fn a_new_key_directory_needs_its_parent_opened_for_the_sync_and_an_existing_one_does_not() {
+    fn a_new_key_directory_syncs_its_parent_and_an_existing_one_does_not() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("journal");
@@ -1455,44 +1480,79 @@ mod tests {
         // Write and search, but not read: the parent can be written into but not opened to sync.
         let _restore = RestoreMode(root.clone());
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).unwrap();
-        let enforced = match std::fs::File::open(&root) {
-            Ok(_) => false,
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => true,
-            Err(e) => panic!("unexpected error opening the parent: {e}"),
-        };
-        if !enforced {
-            // Running as root (or with CAP_DAC_OVERRIDE) the mode is ignored and this test would
-            // prove nothing. Locally that is a skip; in CI it must be loud, so that a job that
-            // starts running as root cannot silently drop the coverage.
-            assert!(
-                std::env::var_os("CI").is_none(),
-                "this test needs file permissions to be enforced, but the CI job runs as root"
-            );
-            eprintln!("skipped: permissions are not enforced here (running as root)");
+        if !permissions_enforced(&root) {
             return;
         }
-        let err = j
-            .append_charged(entry("k", &format!("{:032x}", 1)), UNLIMITED, T)
-            .expect_err(
-                "a new key directory must be synced into its parent, which cannot be opened",
-            );
-        assert!(
-            matches!(&err, DaemonError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
-            "{err}"
+        assert_denied(
+            j.append_charged(entry("k", &format!("{:032x}", 1)), UNLIMITED, T),
+            "a new key directory must be synced into its parent, which cannot be opened",
         );
-        // The failed attempt did create the key directory before the parent could not be synced.
-        // Remove it again: with the parent readable, a genuinely new key directory is created and
-        // synced into it.
+        assert!(!root.join("k").exists(), "the new key directory is removed");
+        // With the parent readable, the key directory is created and synced.
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::remove_dir_all(root.join("k")).unwrap();
         j.append_charged(entry("k", &format!("{:032x}", 2)), UNLIMITED, T)
             .unwrap();
-        // From here on it exists: opening it, even in a parent that cannot be opened, must not
-        // try to sync the parent again.
+        // A fresh open of the now existing key directory does not sync: the parent need not be
+        // readable.
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).unwrap();
         let again = SignJournal::open(&root, 1, FOREVER).unwrap();
         again
             .append_charged(entry("k", &format!("{:032x}", 3)), UNLIMITED, T + 1)
             .unwrap();
+    }
+
+    #[test]
+    fn a_failed_key_parent_sync_removes_the_new_directory_and_the_next_attempt_syncs_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("journal");
+        std::fs::create_dir_all(&root).unwrap();
+        let _restore = RestoreMode(root.clone());
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).unwrap();
+        if !permissions_enforced(&root) {
+            return;
+        }
+        let j = SignJournal::open(&root, 1, FOREVER).unwrap();
+        assert_denied(
+            j.append_charged(entry("k", &format!("{:032x}", 1)), UNLIMITED, T),
+            "first attempt",
+        );
+        assert!(!root.join("k").exists(), "the new key directory is removed");
+        // Nothing was kept: the parent still cannot be synced, so it fails again.
+        assert_denied(
+            j.append_charged(entry("k", &format!("{:032x}", 2)), UNLIMITED, T + 1),
+            "second attempt",
+        );
+        // Once the parent can be opened, the retry creates, syncs and succeeds.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        j.append_charged(entry("k", &format!("{:032x}", 3)), UNLIMITED, T + 2)
+            .unwrap();
+        assert!(root.join("k").is_dir());
+    }
+
+    #[test]
+    fn the_journal_directory_syncs_its_parent_when_it_creates_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let root = data.join("journal");
+        std::fs::create_dir_all(&data).unwrap();
+        let _restore = RestoreMode(data.clone());
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o300)).unwrap();
+        if !permissions_enforced(&data) {
+            return;
+        }
+        assert_denied(
+            SignJournal::open(&root, 1, FOREVER),
+            "the parent of the journal directory cannot be opened",
+        );
+        assert!(!root.exists(), "the new journal directory is removed");
+        // It fails again, and succeeds once the parent can be opened.
+        assert_denied(SignJournal::open(&root, 1, FOREVER), "second attempt");
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+        SignJournal::open(&root, 1, FOREVER).unwrap();
+        // The directory exists now: a later open does not need the parent to be readable.
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o300)).unwrap();
+        SignJournal::open(&root, 1, FOREVER).unwrap();
     }
 }

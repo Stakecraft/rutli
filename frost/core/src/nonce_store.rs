@@ -66,7 +66,7 @@ impl NonceStore {
     /// Open (creating if needed) a nonce store rooted at `dir`.
     pub fn open(dir: impl Into<PathBuf>) -> Result<Self> {
         let dir = dir.into();
-        fs::create_dir_all(&dir)?;
+        crate::fsutil::open_dir_durably(&dir)?;
         Ok(Self {
             dir,
             observer: None,
@@ -286,6 +286,48 @@ mod tests {
             .open(store.dir.join(format!("{session}.used")))
             .unwrap();
         f.set_modified(SystemTime::now() - by).unwrap();
+    }
+
+    /// Restores a directory's permissions when dropped, so a failed assertion cannot leave a temp
+    /// directory the cleanup cannot remove.
+    struct RestoreMode(PathBuf);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    #[test]
+    fn a_failed_parent_sync_removes_the_new_directory_and_the_next_open_syncs_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("keys");
+        let dir = parent.join("k.nonces");
+        // The parent exists and can be written into but not opened to be synced.
+        fs::create_dir_all(&parent).unwrap();
+        let _restore = RestoreMode(parent.clone());
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o300)).unwrap();
+        if File::open(&parent).is_ok() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "this test needs file permissions to be enforced, but the CI job runs as root"
+            );
+            eprintln!("skipped: permissions not enforced");
+            return;
+        }
+        let err = NonceStore::open(&dir)
+            .err()
+            .expect("the sync error is returned");
+        assert!(
+            matches!(&err, CoreError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+            "{err}"
+        );
+        assert!(!dir.exists(), "the new directory is removed again");
+        // The next open creates and syncs it again, and succeeds.
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(NonceStore::open(&dir).is_ok());
+        // An existing directory is not synced: the parent need not be readable.
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o300)).unwrap();
+        assert!(NonceStore::open(&dir).is_ok());
     }
 
     #[test]
