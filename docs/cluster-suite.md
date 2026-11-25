@@ -139,7 +139,7 @@ in the result (`client_policy`), and runs under different policies are not compa
 the numbers should say what a driver would see, for example in `node-kill` and `partition-isolated`.
 
 `--sign-leader rotate|sticky` sets where a signature starts, as the driver's `frost.sign-leader`;
-`--driver-deadlines` implies `rotate`, the driver's default. Under `sticky`, every call starts at
+`--driver-deadlines` implies `rotate` (the driver's own default is `sticky`). Under `sticky`, every call starts at
 the client's leader and moves it on a failover. Under `rotate`, each signature starts at the next
 cosigner in turn that has not failed to serve in the last 60 s (`frost.leader-recovery`), or at
 the sticky leader when none qualifies. Failover then walks the ring as before; a signature never

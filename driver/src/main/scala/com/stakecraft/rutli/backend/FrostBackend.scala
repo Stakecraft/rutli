@@ -160,7 +160,8 @@ class FrostBackend(
     // first again; if it still fails it loses the lead again at the cost of one attempt).
     leaderRecovery: FiniteDuration = 60.seconds,
     // `frost.sign-leader`: true = rotate (each sign starts at the next healthy endpoint in turn),
-    // false = sticky (every sign starts at the preferred leader, as every other call does).
+    // false = sticky (every sign starts at the preferred leader, or at the next endpoint that has
+    // not answered another group key for that key).
     rotateSigns: Boolean = FrostBackend.DefaultRotateSigns,
     // `frost.pin-dir`: the durable group-key pins; None keeps them in memory only (a WARN).
     pinStore: Option[GroupKeyPinStore] = None,
@@ -2609,10 +2610,10 @@ object FrostBackend {
   private def isClusterRefusal(s: Status): Boolean =
     s.getCode == Status.Code.PERMISSION_DENIED && Option(s.getDescription).exists(_.contains("intent is for cluster"))
 
-  /** `frost.sign-leader`'s default, in one place: rotate. Whether it stays the 0.5.0 default
-    * depends on the stands' evidence before the freeze (docs/architecture.md); `sticky` is the
-    * alternative. */
-  val DefaultRotateSigns: Boolean = true
+  /** `frost.sign-leader`'s default, in one place: sticky. `rotate` is there to be switched on, and
+    * becomes the default in a later release, once it has run on the test stands for long enough
+    * (docs/architecture.md). */
+  val DefaultRotateSigns: Boolean = false
 
   /** No attempt starts with less of the call's budget left than this: it could not succeed. */
   private val MinAttempt: FiniteDuration = 50.millis
