@@ -332,6 +332,8 @@ signingPolicy:
   rate_limits:
     - { key_id_prefix: perf-limited, per_min: 120, per_day: 100000 }
     - { key_id_prefix: perf-frost-namespace, per_min: 10, per_day: 200 }
+    # The namespace key the migration suite imports (perf-mig<run>-frost-import-…).
+    - { key_id_prefix: perf-mig, per_min: 10, per_day: 200 }
     - { key_id_prefix: tenantb-frost-namespace, per_min: 10, per_day: 200 }
 EOF
 

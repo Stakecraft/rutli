@@ -52,13 +52,16 @@ Standard library only.
 """
 
 import argparse
+import contextlib
 import json
 import math
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -68,6 +71,7 @@ import diagnose  # noqa: E402  (the diagnostic pass's parsers and verdicts)
 import run as base  # noqa: E402  (the compose suite: Runner, scenarios, key names)
 
 NODES = base.NODES
+DEALER_POD = "rutli-perf-dealer"  # scripts/e2e-migration-env-k8s.sh: one suite run per namespace
 HERE = os.path.dirname(os.path.abspath(__file__))
 # The driver's deadlines (#196): 5 s a sign attempt, 10 s an attempt of any other call, 30 s a
 # call. The key-class spot checks use them whatever the run's own policy is.
@@ -245,6 +249,7 @@ class Suite(base.Runner):
         self.ramp = None
         self.keys = None
         self.spot_checks = []
+        self.imported_key = None
 
     # -- tenants and key classes ---------------------------------------------------------------
 
@@ -254,9 +259,147 @@ class Suite(base.Runner):
         return self.profile.get("tenants") or [{"name": "a", "cn": "driver", "prefix": "perf-"}]
 
     def class_keys(self, tenant):
-        """The tenant's namespace-class and hosted-class key ids (those the profile has)."""
+        """The tenant's namespace-class and hosted-class key ids (those the profile has). After the
+        migration suite, the first tenant's namespace-class key is the key it imported."""
         classes = self.profile.get("classes") or {}
-        return {c: tenant["prefix"] + classes[c]["key"] for c in ("namespace", "hosted") if c in classes}
+        keys = {c: tenant["prefix"] + classes[c]["key"] for c in ("namespace", "hosted") if c in classes}
+        imported = getattr(self, "imported_key", None)
+        if imported and tenant["name"] == self.tenants()[0]["name"] and "namespace" in keys:
+            keys["namespace"] = imported
+        return keys
+
+    # -- migration -----------------------------------------------------------------------------
+
+    def migration(self):
+        """docs/migration.md's cosigner half on this cluster, first: an existing Canton namespace key
+        (B1's Canton 3.6.1 test export) brought in by the split ceremony, as scripts/e2e-migration.sh
+        runs it (E2E_ENV=k8s E2E_STAGES=ceremony: recipient requests and SAS, the dealer in a pod of
+        its own, dry run, install, verify-key --sign-test, refresh with the refresher, founding
+        backups, the destruction checks). The imported key then is the first tenant's
+        namespace-class key for every later suite. A new key prefix per run: imported ids are never
+        deleted."""
+        a = self.args
+        image = a.dealer_image or self.cluster.kubectl(
+            "get", "pod", "rutli-perf-loadgen", "-o", "jsonpath={.spec.containers[0].image}").stdout.strip()
+        prefix = f"perf-mig{int(time.time())}-"
+        result_path = os.path.join(a.work, f"migration-{prefix.rstrip('-')}.json")
+        stage = {}
+
+        # The script's local work dir (the export, the dealer's output) is made here, so that this
+        # side can remove it even when the script was killed before its own cleanup.
+        scratch = tempfile.mkdtemp(prefix="rutli-e2e-migration-k8s.")
+        # The ceremony and key ids, as the script makes them (docs/migration.md §2), so that this side
+        # can abort an import the script left half done.
+        with open(os.path.join(HERE, "..", "..", "frost", "canton-key", "testdata", "vectors", "manifest.json")) as f:
+            ns_fp = next(k["fingerprint"] for k in json.load(f)["keys"] if k["name"] == "namespace")
+        key_id, ceremony = f"{prefix}frost-import-{ns_fp[4:12]}", f"{prefix}e2e-migration"
+        passed = {"script": False}
+
+        def remove_leftovers():
+            """Whatever happened to the script, once: the local work dir, the ceremony's files in the
+            cosigners' /tmp (bundles, founding backups), the dealer pod (and the memory-backed work
+            dir it holds), then its NetworkPolicy once the API confirms the pod is gone. Each call in
+            a session of its own, so that a signal to this process group cannot cut it short. When the
+            script did not pass, the import is also aborted on every node (the sealed one-time
+            recipient secret; abort-import never removes an installed share)."""
+            shutil.rmtree(scratch, ignore_errors=True)
+            if os.path.exists(scratch):
+                log(f"  WARNING: the local work dir {scratch} could not be removed. Remove it by hand.")
+            argv = ["kubectl", "-n", self.cluster.ns]
+            for i, n in enumerate(NODES, start=1):
+                steps = [["sh", "-c", "rm -rf /tmp/r[0-9].json /tmp/share-*.json /tmp/backup-founding-node*"]]
+                if not passed["script"]:
+                    steps.append(["env", "RUST_LOG=off", "rutli-cosigner", "--config", f"/config/cosigner-{i}.json",
+                                  "abort-import", "--key-id", key_id, "--ceremony-id", ceremony])
+                for step in steps:
+                    try:
+                        done = subprocess.run(argv + ["exec", self.cluster.pod(n), "-c", "cosigner", "--"] + step,
+                                              capture_output=True, timeout=60, start_new_session=True,
+                                              check=False).returncode == 0
+                    except subprocess.TimeoutExpired:
+                        done = False
+                    if not done and step[0] == "sh":
+                        log(f"  WARNING: the ceremony's files in {n}'s /tmp could not be removed. Remove them by hand.")
+                    elif not done:
+                        log(f"  WARNING: abort-import on {n} failed: its sealed recipient secret for {key_id} may "
+                            f"remain. Run abort-import --key-id {key_id} --ceremony-id {ceremony} there by hand.")
+            try:
+                subprocess.run(argv + ["delete", "pod", DEALER_POD, "--wait=true", "--timeout=120s",
+                                       "--ignore-not-found"], capture_output=True, timeout=180, start_new_session=True, check=False)
+                left = subprocess.run(argv + ["get", "pod", DEALER_POD, "--ignore-not-found", "-o", "name"],
+                                      capture_output=True, text=True, timeout=60, start_new_session=True, check=False)
+                if left.returncode == 0 and not left.stdout.strip():
+                    subprocess.run(argv + ["delete", "networkpolicy", DEALER_POD, "--ignore-not-found"],
+                                   capture_output=True, timeout=60, start_new_session=True, check=False)
+                    return
+            except subprocess.TimeoutExpired:
+                pass
+            log(f"  WARNING: the dealer pod {DEALER_POD} may still be there (it stops at its 30-minute deadline). "
+                "Delete it and its NetworkPolicy by hand.")
+
+        def body():
+            env = dict(os.environ, E2E_ENV="k8s", E2E_STAGES="ceremony", E2E_PREFIX=prefix,
+                       RUTLI_NAMESPACE=self.cluster.ns, E2E_CERTS=os.path.join(a.work, "certs"),
+                       E2E_DEALER_IMAGE=image, E2E_RESULT=result_path, E2E_SCRATCH=scratch,
+                       E2E_CEREMONY=ceremony)
+            # Set either way: an inherited E2E_ALLOW_UNISOLATED_DEALER must not decide it, nor an
+            # inherited KEEP keep the export on disk.
+            env["E2E_ALLOW_UNISOLATED_DEALER"] = "1" if a.allow_unisolated_dealer else "0"
+            env["KEEP"] = "0"
+            started = time.time()
+            proc = subprocess.Popen(["bash", os.path.join(HERE, "..", "e2e-migration.sh")], env=env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                    start_new_session=True)
+            try:
+                stdout, stderr = proc.communicate(timeout=1800)
+                out = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+                passed["script"] = proc.returncode == 0
+            except BaseException as e:
+                # A timeout, Ctrl-C or any other error: SIGTERM to the script's group, so that its EXIT
+                # trap cleans up (work dir, dealer pod, the pods' files); SIGKILL after 5 minutes.
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                    proc.communicate(timeout=300)
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    proc.communicate()
+                except ProcessLookupError:
+                    pass
+                if not isinstance(e, subprocess.TimeoutExpired):
+                    raise
+                return [{"failed": "the split ceremony on the cluster did not finish within 30 minutes"}]
+            finally:
+                remove_leftovers()
+            stage.update({"seconds": round(time.time() - started, 1), "dealer_image": image,
+                          "steps": [line[4:] for line in out.stdout.splitlines() if line.startswith("==> ")]})
+            for line in out.stdout.splitlines():
+                if line.startswith("==> "):
+                    log(f"  {line[4:]}")
+            if out.returncode != 0:
+                # The step it failed in and its exit code, never the script's output: nothing a
+                # command printed reaches cluster.json or the log. To see it, run the script by hand
+                # (docs/cluster-suite.md).
+                last = stage["steps"][-1] if stage["steps"] else "before the first step"
+                return [{"failed": f"the split ceremony on the cluster failed in: {last} (exit {out.returncode})"}]
+            with open(result_path) as f:
+                stage.update(json.load(f))
+            self.imported_key = stage["key_id"]
+            # The Signer API with the imported key, under the driver's deadlines: the key-class spot
+            # checks when the profile has classes (the imported key is the first tenant's namespace
+            # key now), else one signature with it.
+            loads = self.spots("migration")
+            if not any(load.get("name", "").startswith("namespace-") for load in loads):
+                loads.append(self.loadgen(["sign", "--key", stage["key_id"], "--name", "migration-sign", "--count", "1",
+                                           "--clients", "1"], timeout_secs=10, wall_timeout=300, flags=DRIVER_DEADLINES))
+            return loads
+
+        r, _ = self.scenario("migration", body)
+        r["migration"] = stage
+        if stage.get("key_id"):
+            log(f"  imported {stage['key_id']} (fingerprint {stage.get('fingerprint')}); "
+                f"the first tenant's namespace-class key from here on")
+        self.close(r)
 
     def setup_classes(self):
         """Every tenant's keys besides the suite's own: its namespace-class FROST key and its
@@ -1045,13 +1188,27 @@ class Diagnosis:
         return out
 
 
+def terminated(signum, _frame):
+    """SIGTERM as an exception, so that a stopped run still runs its `finally` blocks (the
+    migration stops its ceremony and removes the dealer pod)."""
+    raise SystemExit(128 + signum)
+
+
 def main():
+    signal.signal(signal.SIGTERM, terminated)
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--namespace", default="rutli-perf")
     p.add_argument("--profile", required=True, help="the load profile (scripts/perf/profiles/)")
     p.add_argument("--out", required=True)
     # Disruption last: whatever it leaves behind cannot skew the measurements of the others.
-    p.add_argument("--suites", default="upgrade,scenarios,connect,keys,ramp,disrupt")
+    p.add_argument("--suites", default="migration,upgrade,scenarios,connect,keys,ramp,disrupt")
+    p.add_argument("--allow-unisolated-dealer", action="store_true",
+                   help="migration suite: go on when the dealer pod reaches the network (a cluster whose network "
+                        "plugin enforces no NetworkPolicy, such as kind's default); otherwise that is a failure")
+    p.add_argument("--dealer-image", default="",
+                   help="migration suite: the dealer's image (rutli-dealer of the cosigners' release). Default: the load "
+                        "generator's image; with the upgrade suite, whose cosigners start on the previous release, one "
+                        "built from that release (frost/Dockerfile.dealer) is required, else the migration is skipped")
     p.add_argument("--diagnose", action="store_true",
                    help="run the diagnostic pass instead of the suites (what limits the throughput; profile 'diagnose')")
     p.add_argument("--env-name", default="k8s",
@@ -1096,9 +1253,22 @@ def main():
     args.rate = args.rate or int(steady.get("sign_per_sec", 20))
     args.max_rss_mib = args.max_rss_mib or int(profile.get("max_rss_mib", 256))
     suites = ["diagnose"] if args.diagnose else [s.strip() for s in args.suites.split(",") if s.strip()]
-    unknown = set(suites) - {"upgrade", "scenarios", "connect", "disrupt", "keys", "ramp", "diagnose"}
+    if len(set(suites)) != len(suites):
+        p.error(f"a suite is listed twice: {suites}")
+    unknown = set(suites) - {"migration", "upgrade", "scenarios", "connect", "disrupt", "keys", "ramp", "diagnose"}
     if unknown:
         p.error(f"unknown suites: {sorted(unknown)}")
+    # The dealer and the cosigners of a ceremony are one release (docs/split-ceremony.md): with the
+    # upgrade suite the cosigners start on the previous release, so the default dealer (this build's)
+    # does not fit, and the migration is skipped rather than run against the rule.
+    args.migration_skip = None
+    if "migration" in suites and not args.work:
+        args.migration_skip = "needs --work (the installation's certificates)"
+    elif "migration" in suites and "upgrade" in suites and suites.index("upgrade") < suites.index("migration"):
+        p.error("migration must run before upgrade: its dealer is a dealer of the cosigners' release")
+    elif "migration" in suites and "upgrade" in suites and not args.dealer_image:
+        args.migration_skip = ("the cosigners start on the previous release: --dealer-image must be a dealer of that "
+                               "release (frost/Dockerfile.dealer)")
     if "upgrade" in suites and not (args.upgrade_image and args.work):
         p.error("the upgrade suite needs --upgrade-image and --work (or leave it out of --suites)")
     if args.load_path == "canton" and not os.environ.get("CANTON_LOAD_CMD"):
@@ -1145,8 +1315,12 @@ def main():
             if name == "diagnose":
                 diagnosis = Diagnosis(suite).run()
                 continue
-            {"upgrade": suite.upgrade, "scenarios": suite.run, "connect": suite.connect_burst,
-             "disrupt": suite.disrupt, "keys": suite.key_count, "ramp": suite.scale_ramp}[name]()
+            if name == "migration" and args.migration_skip:
+                suite.skip("migration", args.migration_skip)
+                continue
+            {"migration": suite.migration, "upgrade": suite.upgrade, "scenarios": suite.run,
+             "connect": suite.connect_burst, "disrupt": suite.disrupt, "keys": suite.key_count,
+             "ramp": suite.scale_ramp}[name]()
         if not args.diagnose and suite.profile.get("classes"):
             # At the end: its rate-limit burst empties the namespace key's bucket for a minute.
             suite.key_classes()
