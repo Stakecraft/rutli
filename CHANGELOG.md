@@ -7,7 +7,7 @@ Upgrading a 0.4.x cluster to 0.5.0: [docs/upgrading-to-0.5.md](docs/upgrading-to
 
 ## [Unreleased]
 
-## [0.5.0-rc.1] — 2026-11-24
+## [0.5.0-rc.1] — 2026-11-25
 
 _First release candidate of 0.5.0, the release the external audit reviews. Pre-1.0 and not yet externally audited: for soak and review, not for production key custody. **Several defaults change and some settings are required before a node starts** (peer TLS key pins, the production profile, signing intents, a minimum interval between refreshes): read "Changed (operators must act)" and "Changed (breaking default)" below, and follow [docs/upgrading-to-0.5.md](docs/upgrading-to-0.5.md) in order: the driver first, then the cosigners one at a time, and no hosted-key creation while the cluster runs mixed versions._
 
@@ -42,6 +42,23 @@ _First release candidate of 0.5.0, the release the external audit reviews. Pre-1
   `--request-timeout-secs`): a deadline per attempt, 5 s for signatures and 10 s for ECDH, with
   failover to the next cosigner, within a budget per call, so that
   disruption numbers say what a driver would see.
+
+- **Signs can rotate over the healthy cosigners (`frost.sign-leader`, default `sticky`).** Every
+  sign starts at one preferred leader (or at the next cosigner that has not answered another group
+  key for that key): while it is healthy, that cosigner leads every signature, and the other two
+  run their leader path only when a failover needs it. That stays the default.
+  With `frost.sign-leader = rotate` each sign starts at the next cosigner in turn, among those not
+  demoted within `frost.leader-recovery` and not answering another group key for that key. With
+  the cosigners' choice of the second member, each node then leads about 1/3 of the signs and takes
+  part in about 2/3. One call still has one attempt in flight, one signing intent and the same
+  deadlines. Ceremonies and hosted-key calls stay on the preferred leader in both modes.
+  - **Per-node sign rate limits:** under `rotate` the two cosigners that used to follow the leader
+    take part in about 2/3 of a key's signatures instead of 1/2. A limit sized for the key's whole
+    rate is unaffected. A limit sized for a non-leading node's old share needs raising before
+    `rotate` is switched on.
+  - **The default:** `sticky` in this release. Leaving the setting unset keeps the policy of
+    earlier releases and does not switch rotation on. `rotate` has not yet run on the test stands
+    for the two weeks asked of a default; it becomes the default in a later release.
 
 - **`rutli-cosigner keyfile prove` records that an epoch of a FROST key is proven.** A refresh commit shows that the nodes agreed, not that the shares sign together; `verify-key --sign-test` shows that, but only on the workstation that ran it. `keyfile prove --key-id K --epoch E --report verify.json` takes the report of `verify-key --sign-test --json`, checks it against this node's own live epoch, sharing, group key, roster and threshold, and writes a clear marker `keys/.proven/<key>.<epoch>.json` (with the report's SHA-256 and the node's clock). A node whose live epoch differs cannot stamp. The report is the operator's statement; the node cannot check who produced it. New gauges `rutli_key_epoch_proven{key}` and `rutli_key_epoch_age_seconds{key}`, and a warning alert `RutliKeyEpochUnproven` (unproven, key file older than three days). **Upgrade note:** after upgrading, every key alerts until `keyfile prove` has been run for its live epoch on each node (`docs/ceremonies.md`, "Proving an epoch"). Backup retention (a later change) will keep older epochs until the newer one is proven.
 
@@ -328,21 +345,6 @@ _First release candidate of 0.5.0, the release the external audit reviews. Pre-1
   `RutliSignUnknownSessions` (`deploy/monitoring`, warning) fires at more than 3 in 15 minutes
   on a node, so a single such request no longer alerts, and neither do the one or two a restart
   or a refresh leaves behind.
-
-- **Signs rotate over the healthy cosigners (`frost.sign-leader`, default `rotate`).** Until now
-  every sign started at one preferred leader. That cosigner led every signature, and the other
-  two ran their leader path only when a failover needed it. Now each sign starts at the next
-  cosigner in turn, among those not demoted within `frost.leader-recovery` and not answering
-  another group key for that key. With the cosigners' choice of the second member, each node
-  then leads about 1/3 of the signs and takes part in about 2/3. One call still has one attempt in
-  flight, one signing intent and the same deadlines. Ceremonies and hosted-key calls stay on the
-  preferred leader. `frost.sign-leader = sticky` keeps the old behaviour.
-  - **Per-node sign rate limits:** under `rotate` the two cosigners that used to follow the leader
-    take part in about 2/3 of a key's signatures instead of 1/2. A limit sized for the key's whole
-    rate is unaffected. A limit sized for a non-leading node's old share needs raising.
-  - **The default:** `rotate` stays the default in this release only if it has run on the test
-    stands for at least two weeks before the freeze without a finding. Otherwise the default for
-    this release is `sticky`, and `rotate` becomes the default in 0.6.
 
 - **Helm chart: the cosigner's `/tmp` and the backup sidecar's work directory are memory-backed and size-limited** (`tmp.sizeLimit`, default `64Mi`; `backup.workSizeLimit`, default `128Mi`), in both topologies, so what ceremonies and backup runs put there never reaches the Kubernetes node's disk. They count against the container memory limits, which grow with them: cosigner `320Mi` (was `256Mi`), backup sidecar `192Mi` (was `64Mi`). The sidecar links the key files into its work directory instead of copying them; the archive is unchanged, and a run that does not fit logs `BACKUP_FAILED reason=work-dir-full`. `scripts/check-deploy-policy.sh` refuses a disk-backed or unbounded `emptyDir` on a cosigner pod. Upgrade note: the pod templates change, so roll the cosigners one at a time (`scripts/upgrade-cosigners.sh`); a restore extracts the backup with `--exclude=./journal` (`docs/disaster-recovery.md`).
 
@@ -725,7 +727,8 @@ _First release candidate of 0.5.0, the release the external audit reviews. Pre-1
   lead at once; for a wrong or deleted key id that was all of them, and with
   `frost.sign-leader = rotate` the signs then went to one cosigner for `leader-recovery`. A cosigner
   that says it lacks a key now loses the lead only when another cosigner serves the call, and the
-  lead goes to that one. Applies to hosted-key calls and to `keyExistsAndIsActive` for a FROST key.
+  lead goes to that one. Applies to hosted-key calls and to `keyExistsAndIsActive` for a pinned
+  FROST key.
   (Unreleased behaviour; no configuration change.)
 
 - **The nonce store makes its "this key has signed here" sentinel durable before pruning.** Before a
@@ -744,6 +747,18 @@ _First release candidate of 0.5.0, the release the external audit reviews. Pre-1
   cosigner answers so. Nothing else changes: such a leader loses the lead as before when another
   leader signs or fails in another way, when the request budget is spent, or when a later leader's
   refusal ends the sign. (Unreleased behaviour; no configuration change.)
+
+- **One cosigner's reply no longer changes what the driver knows a hosted key to be.** The driver
+  remembers the spec of each hosted key it has seen (RSA, AES, EC); a key id is never used twice,
+  so the spec of an id does not change. A `getPublicKey` or `keyExistsAndIsActive` reply under
+  another spec replaced the remembered one. Such a reply is now passed over like "not found": the
+  next cosigner is asked (audit note `reason=OTHER_SPEC`), and the one that answered so loses the
+  lead when another serves the key. The driver then asks every cosigner what it holds, and the
+  remembered spec changes only when all but one of them, and at least two, hold the key under one
+  other spec (audit note `hosted-spec=<old>→<new>`). Also: a hop of such a read past a cosigner
+  that lacks a key known to be EC is noted `ec-failover=` again, and the retryable "not a final
+  answer" error keeps the gRPC trailers of the cosigner's status. (Unreleased behaviour; no
+  configuration change.)
 
 ### Security
 
@@ -1054,6 +1069,27 @@ _First release candidate of 0.5.0, the release the external audit reviews. Pre-1
   p99.9, the deadline, the share of calls that finished within a third of it (read at the bucket
   edge there), and whether the 3× margin rule holds (at least 99.9 % within a third). This is the
   readout that decides whether a peer-call deadline stays a constant or becomes a bounded setting.
+
+- **The driver jar and the dealer binary are built, signed and attested by the release.** New
+  workflow `release-assets.yml` (on a `v*` tag, hosted runners, behind the `release` environment)
+  builds `rutli-driver-<version>.jar` and `rutli-dealer-<version>-linux-x86_64` / `-linux-aarch64`
+  from the tag, writes an SPDX SBOM for each, a `SHA256SUMS`, a keyless cosign signature (a
+  `.sigstore.json` bundle) for every file and a GitHub build provenance attestation, checks them
+  as a user would, and attaches them to the release (a missing release is created as a draft). The
+  `sign` job (`id-token: write`, `attestations: write`) reads each build artifact from its own
+  directory, checks that they are exactly the expected files and that each has the digest its
+  producing job stated as a job output (the SBOMs come from a job without
+  a signing identity, a release that already has `SHA256SUMS` is refused before anything is built); the `publish` job (`contents: write`) only attaches the signed set;
+  `publish-image.yml` is unchanged. The new workflow "Release assets check" runs the same `scripts/release-assets.sh`
+  steps on pull requests and on every push to main with a throwaway key. The driver jar keeps
+  `META-INF/maven` (the dependencies' `pom.properties`) so scanners can identify its contents. Verification commands: `docs/releasing.md`, "Verify the release assets".
+  The quality ratchet now prints the `shfmt -d` diff of every file it counts as unformatted.
+
+- **The generated-stubs check no longer fails on a rate-limited download.** Maven Central answered
+  HTTP 429 to the `protoc` download on a shared runner and the "Generated code" check failed without
+  comparing anything. `scripts/gen-grpc-java.sh` now retries the download, the workflow caches the two
+  binaries by their pinned sha256 (checked again after a restore), and a download that still fails
+  stops with exit 3 and "this is not a difference in the stubs".
 
 ### Documentation
 
