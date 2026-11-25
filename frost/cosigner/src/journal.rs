@@ -431,6 +431,9 @@ impl KeyJournal {
         // directory sync failed may have left a segment this open takes as the current one.
         sync_dir(dir)?;
         let current = segs.last().expect("one segment").clone();
+        // The head this open builds on is made durable first: an earlier instance may have written
+        // a line whose sync failed, and the next entry links to it.
+        std::fs::File::open(&current)?.sync_all()?;
         let current_len = std::fs::metadata(&current)?.len();
         let mut k = Self {
             dir: dir.to_path_buf(),
@@ -695,7 +698,7 @@ impl Segment {
         let md = std::fs::metadata(&path)?;
         Ok(Self {
             len: md.len(),
-            modified: md.modified().ok(),
+            modified: Some(md.modified()?),
             path,
         })
     }
