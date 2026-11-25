@@ -379,9 +379,10 @@ fn namespace_rule_advisory(p: &SigningPolicyConfig, out: &mut Vec<Finding>) {
     }
 }
 
-/// The advisory row for a journal size cap smaller than one day's journal at the highest daily
-/// sign limit: the size cap keeps the last day's entries, so such a journal grows past the cap.
-/// Estimated at [`TYPICAL_ENTRY_BYTES`] a sign, one share each, plus two segments.
+/// The advisory row for a journal size cap smaller than an estimate of one day's journal at the
+/// highest daily sign limit: retention keeps the last day's entries, so such a journal grows past
+/// the cap. The estimate is one share per charge at [`TYPICAL_ENTRY_BYTES`], plus two segments; it
+/// is not a bound on disk use (replayed intents, sign tests and gated keys write more).
 fn journal_cap_advisory(p: &SigningPolicyConfig, out: &mut Vec<Finding>) {
     const MIB: u64 = 1 << 20;
     let per_day = p
@@ -404,8 +405,9 @@ fn journal_cap_advisory(p: &SigningPolicyConfig, out: &mut Vec<Finding>) {
                 p.journal_max_mib_per_key,
                 day.div_ceil(MIB)
             ),
-            required: "room for one day's journal at the daily sign limit (about 600 bytes a sign, \
-                       plus two segments); the journal keeps the last day's entries above a smaller cap",
+            required: "at least the estimate of one day's journal at the daily sign limit (one share \
+                       per charge, 600 bytes each, plus two segments); retention keeps the last day's \
+                       entries above a smaller cap",
         });
     }
 }

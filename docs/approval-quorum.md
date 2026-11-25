@@ -146,11 +146,12 @@ All per node, in `signing_policy`. The defaults are in brackets.
 | `sign_rate_limit_per_min` / `_per_day` [300 / 20 000] | Per key, per node. Charged once per intent request id: retries, t-subsets and leader failovers of one driver call share a single charge. Rebuilt from the journal after a restart. `rate_limits: [{key_id_prefix, per_min, per_day}]` overrides by prefix. Put a tight rule on namespace keys, e.g. 10/min and 200/day |
 | `max_shares_per_request` [8] | The most shares one request id gets from this node |
 | `intent_max_lifetime_secs` / `clock_skew_secs` [300 / 120] | The driver's intents live 180 s. A node whose clock is off by more than the skew refuses every intent: fail closed, so watch NTP |
-| `journal_retention_days` / `journal_max_mib_per_key` [90 / 64] | Sign journal retention (`data_dir/journal`), bounded for 1 Gi volumes. The size cap never deletes entries of the last 24 h, so a key that writes more than the cap in a day stays above it until they age out (`rutli_sign_journal_over_cap_total`); `check-config` warns when the cap is below about 600 bytes × the daily sign limit + 8 MiB |
+| `journal_retention_days` / `journal_max_mib_per_key` [90 / 64] | Sign journal retention (`data_dir/journal`), bounded for 1 Gi volumes. Retention never deletes a segment with entries of the last 24 h, so a key that writes more than the cap in a day stays above it until they age out (`rutli_sign_journal_over_cap_total`). `check-config` reports an advisory finding when the cap is below an estimate of one day's journal at the daily sign limit, one share per charge (600 bytes each, plus 8 MiB); it is not a bound on disk use |
 
 New metrics: `rutli_sign_intent_absent_total`, `rutli_sign_policy_refusals_total{reason}`,
 `rutli_sign_rate_limited_total`, `rutli_signer_acl_absent_total`, `rutli_sign_journal_entries_total`,
-`rutli_sign_journal_errors_total`, for ceremony intents `rutli_ceremony_intent_absent_total`
+`rutli_sign_journal_errors_total`, `rutli_sign_journal_over_cap_total`,
+`rutli_sign_journal_chain_restarts_total`, for ceremony intents `rutli_ceremony_intent_absent_total`
 and `rutli_ceremony_intent_refusals_total{reason}`, and for the refresh interval
 `rutli_refresh_interval_refusals_total`, `rutli_refresh_interval_waived_total` and
 `rutli_refreshes_6d{key}` (`docs/observability.md`), with alerts in

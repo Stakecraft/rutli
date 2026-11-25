@@ -13,25 +13,37 @@
 //! **Layout.** `data_dir/journal/<key_id>/<first seq, 20 digits>.jsonl`, one JSON object per line,
 //! hash-chained: `hash = SHA-256("rutli-journal-v1\n" ‖ JSON of the entry without `hash`)`, and each
 //! entry's `prev` is the hash before it (64 zeros for the very first). Segments rotate at
-//! [`SEGMENT_BYTES`]; a segment file is always created new (`create_new`), never over an existing
-//! one. Whole segments are deleted, oldest first, past `signing_policy.journal_retention_days` (by
-//! the file's modification time) or beyond `journal_max_mib_per_key`. Neither rule ever deletes
-//! the current segment or the newest segment that holds entries, and the size rule never deletes a
-//! segment whose newest entry is less than a day old: the rate-limit ledger is rebuilt from the
-//! last day's entries after a restart. A key that writes more than the cap in a day therefore
-//! stays above it until those entries age out (logged, `rutli_sign_journal_over_cap_total`). The
-//! sweep runs on open and after the first entry of a new segment is durable, never between a
-//! rotation and that entry. A deleted prefix only moves the start of the chain; what remains still
-//! verifies.
+//! [`SEGMENT_BYTES`]. A segment file is always created new (`create_new`), never over an existing
+//! one, and named after the sequence number of its first entry, or after the current file's name
+//! when that is higher (a segment that restarted the chain), so names always sort in writing order.
 //!
-//! **Crashes.** Appends are `write_all` + `sync_data`, and a new segment's directory entry is
-//! fsynced. A torn final line (a crash mid-append, never fsynced, so no share left for it) is
+//! **Retention.** Whole segments are deleted, oldest first, past
+//! `signing_policy.journal_retention_days` (by the file's modification time) or beyond
+//! `journal_max_mib_per_key`. Neither rule deletes the current segment, the newest segment that
+//! holds entries, a segment whose newest entry is less than a day old (the rate-limit ledger is
+//! rebuilt from the last day's entries when the journal is opened), or a segment whose newest
+//! entry cannot be read. A key that writes more than the cap in a day therefore stays above it
+//! until those entries age out (logged, `rutli_sign_journal_over_cap_total`). Retention runs only
+//! right after this process appended and synced an entry itself — the first append after the
+//! journal is opened and the first one in each new segment — never on open and never on a head
+//! taken over from disk. The directory is synced after each deletion; a failed sync, or a segment
+//! whose size cannot be read, stops retention. A deleted prefix only moves the start of the chain;
+//! what remains still verifies.
+//!
+//! **Time.** The last day is judged per segment by its newest entry, so segments are taken to be
+//! written in clock order: a wall clock that steps back by more than [`CLOCK_MARGIN_MS`] across a
+//! rotation can make an older segment look out of the window. Inside a segment the order does not
+//! matter. The margin pads which segments are read back and kept; each charge still counts for
+//! exactly 24 h.
+//!
+//! **Crashes.** Appends are `write_all` + `sync_data`, a new segment's directory entry is fsynced,
+//! and so is the key directory each time the journal is opened. A torn final line (a crash mid-append, never fsynced, so no share left for it) is
 //! truncated on open with a warning; any other malformed line or chain break makes the key's
 //! journal refuse to open, and with it this node's signing for that key (fail closed — other
-//! nodes keep the cluster signing). A segment that starts the chain afresh (`prev` = genesis)
-//! without being the key's first segment is logged and counted
-//! (`rutli_sign_journal_chain_restarts_total`); the journal still opens, as its chain verifies from
-//! that entry on.
+//! nodes keep the cluster signing). Among the segments read on open, one whose first entry starts
+//! the chain afresh (`prev` = genesis) without being the key's first segment is logged and counted
+//! once the journal has opened (`rutli_sign_journal_chain_restarts_total`); the journal still
+//! opens, as its chain verifies from that entry on.
 //!
 //! **I/O errors.** An append that fails anywhere after the segment is opened (a partial write, an
 //! fsync error on a hung volume) is rolled back to the last acknowledged length (`set_len`, best
@@ -70,6 +82,9 @@ pub const SEGMENT_BYTES: u64 = 4 * 1024 * 1024;
 /// sizing `journal_max_mib_per_key` against the daily sign limit. Gated keys write more.
 pub const TYPICAL_ENTRY_BYTES: u64 = 600;
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+/// Added to the day when choosing which segments to read back and which to keep: the largest
+/// `signing_policy.clock_skew_secs` accepted.
+pub const CLOCK_MARGIN_MS: u64 = crate::config::MAX_CLOCK_SKEW_SECS * 1000;
 const MINUTE_MS: u64 = 60 * 1000;
 
 /// Why a share was released: a client's intent, the split ceremony's sign test, or a sign without
@@ -179,6 +194,8 @@ enum Fault {
     SyncAndRollbackFail,
     /// A partial write whose rollback fails too: a torn tail stays on disk.
     PartialWriteNoRollback,
+    /// A rotation creates the new segment, then the directory sync fails.
+    RotationDirSyncFails,
 }
 
 #[cfg(test)]
@@ -205,6 +222,8 @@ struct KeyJournal {
     /// How long the last append's `sync_data` took, taken by [`SignJournal::append_charged`] and
     /// recorded once the key's lock is released.
     fsync: Option<std::time::Duration>,
+    /// Retention runs after the next append this instance syncs itself: set on open and rotation.
+    sweep_due: bool,
 }
 
 impl SignJournal {
@@ -236,7 +255,6 @@ impl SignJournal {
         let k = Arc::new(Mutex::new(KeyJournal::open(
             &self.dir.join(key_id),
             now_ms,
-            self.retention,
         )?));
         keys.insert(key_id.to_string(), k.clone());
         Ok(k)
@@ -336,7 +354,7 @@ impl SignJournal {
                         .charges
                         .iter()
                         .rev()
-                        .take_while(|(t, _)| *t + MINUTE_MS > now_ms)
+                        .take_while(|(t, _)| t.saturating_add(MINUTE_MS) > now_ms)
                         .count();
                     if limits.per_min > 0 && last_min >= limits.per_min as usize {
                         return Err(DaemonError::RateLimited(format!(
@@ -376,12 +394,14 @@ impl SignJournal {
 }
 
 impl KeyJournal {
-    fn open(dir: &Path, now_ms: u64, retention: Retention) -> Result<Self> {
+    /// Open one key's journal and rebuild its rate-limit ledger. Retention is not applied here (see
+    /// the module doc).
+    fn open(dir: &Path, now_ms: u64) -> Result<Self> {
         let created = !dir.exists();
         std::fs::create_dir_all(dir)?;
         if created {
             if let Some(parent) = dir.parent() {
-                std::fs::File::open(parent)?.sync_all()?;
+                sync_dir(parent)?;
             }
         }
         let mut segs = segments(dir)?;
@@ -401,59 +421,34 @@ impl KeyJournal {
                 f.sync_all()?;
             }
         }
-        // Read back far enough for the rate-limit window (newest segments first), verifying the
-        // chain of what is read.
-        let mut recent: Vec<JournalEntry> = Vec::new();
-        let mut seq = 0;
-        let mut head = GENESIS.to_string();
-        let mut next_prev: Option<String> = None;
-        for seg in segs.iter().rev() {
-            let (entries, torn) = read_segment(seg)?;
-            if torn > 0 {
-                return Err(corrupt(seg, "a torn line in a closed segment"));
-            }
-            verify_entries(&entries, seg)?;
-            note_chain_restart(seg, entries.first());
-            if let (Some(last), Some(want)) = (entries.last(), &next_prev) {
-                if &last.hash != want {
-                    return Err(corrupt(seg, "the next segment does not continue its chain"));
-                }
-            }
-            // The head is the newest entry of the newest non-empty segment (a rotation that
-            // crashed before its first append leaves an empty newest segment).
-            if seq == 0 {
-                if let Some(last) = entries.last() {
-                    seq = last.seq;
-                    head = last.hash.clone();
-                }
-            }
-            next_prev = entries.first().map(|e| e.prev.clone());
-            let older = entries.first().is_some_and(|e| e.ts_ms + DAY_MS <= now_ms);
-            recent.splice(0..0, entries);
-            if older {
-                break;
-            }
-        }
+        let back = read_back(&segs, now_ms)?;
         if segs.is_empty() {
             let first = dir.join(segment_name(1));
             create_segment(&first)?;
-            std::fs::File::open(dir)?.sync_all()?;
             segs.push(first);
         }
+        // Every name in the directory is durable before anything is appended: a rotation whose
+        // directory sync failed may have left a segment this open takes as the current one.
+        sync_dir(dir)?;
         let current = segs.last().expect("one segment").clone();
         let current_len = std::fs::metadata(&current)?.len();
         let mut k = Self {
             dir: dir.to_path_buf(),
             current,
             current_len,
-            seq,
-            head,
+            seq: back.seq,
+            head: back.head,
             charges: VecDeque::new(),
             shares: HashMap::new(),
             broken: false,
             fsync: None,
+            sweep_due: true,
         };
-        for e in recent.iter().filter(|e| e.ts_ms + DAY_MS > now_ms) {
+        for e in back
+            .recent
+            .iter()
+            .filter(|e| e.ts_ms.saturating_add(DAY_MS) > now_ms)
+        {
             if let Some(id) = e.charge_id() {
                 let n = k.shares.entry(id.clone()).or_insert(0);
                 if *n == 0 {
@@ -462,13 +457,15 @@ impl KeyJournal {
                 *n += 1;
             }
         }
-        k.sweep(retention, now_ms);
+        for (seg, seq) in &back.restarts {
+            note_chain_restart(seg, *seq);
+        }
         Ok(k)
     }
 
     fn prune(&mut self, now_ms: u64) {
         while let Some((t, id)) = self.charges.front() {
-            if t + DAY_MS > now_ms {
+            if t.saturating_add(DAY_MS) > now_ms {
                 break;
             }
             self.shares.remove(id);
@@ -487,10 +484,8 @@ impl KeyJournal {
         #[allow(unused_variables)] fault: Option<FaultArg>,
     ) -> Result<JournalEntry> {
         if self.current_len >= SEGMENT_BYTES {
-            self.rotate()?;
+            self.rotate(fault)?;
         }
-        // The first entry of a segment: a rotation here, or one whose first write failed earlier.
-        let first_in_segment = self.current_len == 0;
         entry.seq = self.seq + 1;
         entry.prev = self.head.clone();
         entry.hash = entry.compute_hash();
@@ -546,21 +541,42 @@ impl KeyJournal {
         self.seq = entry.seq;
         self.head = entry.hash.clone();
         metrics::counter!(crate::metrics::SIGN_JOURNAL_ENTRIES).increment(1);
-        // Only now that the new segment holds a durable entry may retention look at the closed
-        // ones: before it, the newest entries live in the segment just closed.
-        if first_in_segment {
+        // The head is now an entry this instance wrote and synced, in the current segment.
+        if std::mem::take(&mut self.sweep_due) {
             self.sweep(retention, now_ms);
         }
         Ok(entry)
     }
 
-    /// Start the next segment, named by the sequence number its first entry will carry. The file
-    /// is created new: an existing file of that name is an error, never truncated. Any failure
-    /// marks this instance broken, so the next use reopens the journal from what is on disk (an
-    /// empty segment left behind becomes the current one there).
-    fn rotate(&mut self) -> Result<()> {
-        let next = self.dir.join(segment_name(self.seq + 1));
-        let created = create_segment(&next).and_then(|()| sync_dir(&self.dir));
+    /// Start the next segment. It is named after the sequence number its first entry will carry,
+    /// or after the current file's name if that is higher, so it always sorts after the current
+    /// file; a name past the largest one is refused. The file is created new: an existing file of
+    /// that name is an error, never truncated. Any failure marks this instance broken, so the next
+    /// use reopens the journal from what is on disk (an empty segment left behind becomes the
+    /// current one there).
+    fn rotate(&mut self, #[allow(unused_variables)] fault: Option<FaultArg>) -> Result<()> {
+        let after_current = segment_number(&self.current).and_then(|n| n.checked_add(1));
+        let Some(first) = self
+            .seq
+            .checked_add(1)
+            .zip(after_current)
+            .map(|(a, b)| a.max(b))
+        else {
+            self.broken = true;
+            return Err(DaemonError::Journal(format!(
+                "sign journal {} has no segment name left after {}",
+                self.dir.display(),
+                self.current.display()
+            )));
+        };
+        let next = self.dir.join(segment_name(first));
+        let created = create_segment(&next).and_then(|()| {
+            #[cfg(test)]
+            if fault == Some(Fault::RotationDirSyncFails) {
+                return Err(std::io::Error::other("injected: directory fsync failed").into());
+            }
+            sync_dir(&self.dir)
+        });
         if let Err(e) = created {
             self.broken = true;
             tracing::error!(
@@ -572,43 +588,39 @@ impl KeyJournal {
         }
         self.current = next;
         self.current_len = 0;
+        self.sweep_due = true;
         Ok(())
     }
 
-    /// Delete closed segments past the retention age or the size cap, oldest first (see the module
-    /// doc for what is never deleted). Best effort: a failure is logged and the sweep stops.
+    /// Delete closed segments past the retention age or the size cap, oldest first, up to the
+    /// current segment (see the module doc for what is never deleted). Best effort: a failure is
+    /// logged and the sweep stops.
     fn sweep(&mut self, retention: Retention, now_ms: u64) {
-        let segs = match segments(&self.dir) {
-            Ok(segs) => segs,
+        let candidates = match self.sweep_candidates() {
+            Ok(c) => c,
             Err(e) => {
-                tracing::warn!(dir = %self.dir.display(), error = %e, "could not list the sign journal segments for retention");
+                tracing::warn!(dir = %self.dir.display(), error = %e, "sign journal retention skipped: the segments could not be listed or read");
                 return;
             }
         };
-        let mut sized: VecDeque<Segment> = segs.into_iter().map(Segment::stat).collect();
-        let mut total: u64 = sized.iter().map(|s| s.len).sum();
-        // The current segment and the newest one with entries stay, whatever their age or size.
-        let removable = sized
-            .iter()
-            .rposition(|s| s.len > 0)
-            .unwrap_or(sized.len().saturating_sub(1));
-        sized.truncate(removable);
+        let (mut total, candidates) = candidates;
         let max_age = std::time::Duration::from_millis(u64::from(retention.days) * DAY_MS);
         let now = std::time::UNIX_EPOCH + std::time::Duration::from_millis(now_ms);
-        let mut removed = false;
-        let mut kept_young = None;
-        while let Some(seg) = sized.front() {
+        let mut blocked = None;
+        for seg in &candidates {
             let too_old = seg
                 .modified
                 .is_some_and(|m| now.duration_since(m).is_ok_and(|age| age > max_age));
-            if !too_old {
-                if total <= retention.max_bytes {
-                    break;
+            let over_cap = total > retention.max_bytes;
+            if !too_old && !over_cap {
+                break;
+            }
+            let kept = seg.last_day(now_ms);
+            if kept != LastDay::Past {
+                if over_cap {
+                    blocked = Some((seg.path.clone(), kept));
                 }
-                if seg.holds_last_day(now_ms) {
-                    kept_young = Some(seg.path.clone());
-                    break;
-                }
+                break;
             }
             if let Err(e) = std::fs::remove_file(&seg.path) {
                 tracing::warn!(file = %seg.path.display(), error = %e, "could not delete an old sign journal segment");
@@ -616,64 +628,181 @@ impl KeyJournal {
             }
             tracing::info!(file = %seg.path.display(), "deleted an old sign journal segment (retention)");
             total = total.saturating_sub(seg.len);
-            removed = true;
-            sized.pop_front();
+            if let Err(e) = sync_dir(&self.dir) {
+                tracing::warn!(dir = %self.dir.display(), error = %e, "could not sync the sign journal directory after a deletion — retention stops");
+                break;
+            }
         }
-        if removed {
-            let _ = std::fs::File::open(&self.dir).and_then(|d| d.sync_all());
-        }
-        if let Some(oldest) = kept_young {
+        if let Some((oldest, kept)) = blocked {
             metrics::counter!(crate::metrics::SIGN_JOURNAL_OVER_CAP).increment(1);
+            let why = match kept {
+                LastDay::Unreadable => "its oldest segment's newest entry cannot be read",
+                _ => "its oldest segment holds entries younger than a day",
+            };
             tracing::warn!(
                 dir = %self.dir.display(),
                 oldest = %oldest.display(),
                 bytes = total,
                 max_bytes = retention.max_bytes,
-                "sign journal is above signing_policy.journal_max_mib_per_key: its oldest segment holds entries of the last 24 h, which the size cap keeps (raise the cap for this key's daily volume)"
+                "sign journal is above signing_policy.journal_max_mib_per_key and retention stops: {why} (raise the cap for this key's daily volume, or inspect the segment)"
             );
         }
     }
+
+    /// The total size of the key's segments and the ones retention may delete, oldest first: those
+    /// before the current segment and before the newest one that holds entries.
+    fn sweep_candidates(&self) -> Result<(u64, Vec<Segment>)> {
+        let mut all = segments(&self.dir)?
+            .into_iter()
+            .map(Segment::stat)
+            .collect::<Result<Vec<_>>>()?;
+        let total = all.iter().map(|s| s.len).sum();
+        let Some(current) = all.iter().position(|s| s.path == self.current) else {
+            return Err(DaemonError::Journal(format!(
+                "the current segment {} is not in the listing",
+                self.current.display()
+            )));
+        };
+        all.truncate(current + 1);
+        let keep_from = all.iter().rposition(|s| s.len > 0).unwrap_or(current);
+        all.truncate(keep_from);
+        Ok((total, all))
+    }
+}
+
+/// What a segment's newest entry says about the last day.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LastDay {
+    /// Older than the day and the margin, or no entries: retention may delete it.
+    Past,
+    /// Inside the day (plus the margin).
+    Recent,
+    /// The last line cannot be read, parsed or verified: kept.
+    Unreadable,
 }
 
 /// One segment file as retention sees it.
 struct Segment {
     path: PathBuf,
-    /// 0 when the size cannot be read.
     len: u64,
     modified: Option<std::time::SystemTime>,
 }
 
 impl Segment {
-    fn stat(path: PathBuf) -> Self {
-        let md = std::fs::metadata(&path).ok();
-        Self {
-            len: md.as_ref().map_or(0, |m| m.len()),
-            modified: md.and_then(|m| m.modified().ok()),
+    /// The segment's size and modification time; an error when they cannot be read (such a
+    /// segment stops retention instead of passing for an empty one).
+    fn stat(path: PathBuf) -> Result<Self> {
+        let md = std::fs::metadata(&path)?;
+        Ok(Self {
+            len: md.len(),
+            modified: md.modified().ok(),
             path,
-        }
+        })
     }
 
-    /// Whether the segment may hold an entry of the last 24 h, by the time stamp of its newest
-    /// entry: the same field and the same window the rate-limit ledger is rebuilt from on open. A
-    /// segment whose newest entry cannot be read counts as recent.
-    fn holds_last_day(&self, now_ms: u64) -> bool {
-        self.len > 0
-            && newest_entry_ms(&self.path).is_none_or(|t| t.saturating_add(DAY_MS) > now_ms)
+    /// The segment against the last day, by the time stamp of its newest entry: the field the
+    /// rate-limit ledger is rebuilt from on open.
+    fn last_day(&self, now_ms: u64) -> LastDay {
+        if self.len == 0 {
+            return LastDay::Past;
+        }
+        match newest_entry_ms(&self.path) {
+            None => LastDay::Unreadable,
+            Some(t) if within_day(t, now_ms) => LastDay::Recent,
+            Some(_) => LastDay::Past,
+        }
     }
 }
 
-/// The time stamp of the last entry of a segment, `None` when it cannot be read.
-fn newest_entry_ms(path: &Path) -> Option<u64> {
-    #[derive(Deserialize)]
-    struct Stamp {
-        ts_ms: u64,
+/// Whether time stamp `t` is inside the last day plus [`CLOCK_MARGIN_MS`] at `now_ms`.
+fn within_day(t: u64, now_ms: u64) -> bool {
+    t.saturating_add(DAY_MS).saturating_add(CLOCK_MARGIN_MS) > now_ms
+}
+
+/// What [`KeyJournal::open`] reads back from the newest segments.
+struct ReadBack {
+    seq: u64,
+    head: String,
+    /// The entries of the segments read, oldest first.
+    recent: Vec<JournalEntry>,
+    /// Segments that start the chain afresh without being the key's first: (path, first seq).
+    restarts: Vec<(PathBuf, u64)>,
+}
+
+/// Read back, newest first, every segment whose newest entry is inside the last day (plus the
+/// margin), and the one before them; verify each and the links between them, across empty
+/// segments too (a rotation that crashed before its first append leaves an empty newest segment).
+fn read_back(segs: &[PathBuf], now_ms: u64) -> Result<ReadBack> {
+    let mut back = ReadBack {
+        seq: 0,
+        head: GENESIS.to_string(),
+        recent: Vec::new(),
+        restarts: Vec::new(),
+    };
+    // The `prev` and `seq` the newest entry of the next older non-empty segment must carry.
+    let mut expected: Option<(String, u64)> = None;
+    for (i, seg) in segs.iter().enumerate().rev() {
+        let (entries, torn) = read_segment(seg)?;
+        if torn > 0 {
+            return Err(corrupt(seg, "a torn line in a closed segment"));
+        }
+        verify_entries(&entries, seg)?;
+        let (Some(first), Some(last)) = (entries.first(), entries.last()) else {
+            continue;
+        };
+        if let Some((prev, seq)) = &expected {
+            if &last.hash != prev || last.seq.checked_add(1) != Some(*seq) {
+                return Err(corrupt(seg, "the next segment does not continue its chain"));
+            }
+        }
+        if back.seq == 0 {
+            back.seq = last.seq;
+            back.head = last.hash.clone();
+        }
+        let first_name = seg
+            .file_name()
+            .is_some_and(|n| n.to_str() == Some(segment_name(1).as_str()));
+        if first.prev == GENESIS && (i > 0 || first.seq != 1 || !first_name) {
+            back.restarts.push((seg.clone(), first.seq));
+        }
+        expected = Some((first.prev.clone(), first.seq));
+        let newest = entries.iter().map(|e| e.ts_ms).max().unwrap_or(0);
+        back.recent.splice(0..0, entries);
+        if !within_day(newest, now_ms) {
+            break;
+        }
     }
-    let bytes = std::fs::read(path).ok()?;
-    let body = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
-    let start = body.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
-    serde_json::from_slice::<Stamp>(body.get(start..)?)
-        .ok()
-        .map(|s| s.ts_ms)
+    Ok(back)
+}
+
+/// The time stamp of the last entry of a segment, `None` when that line cannot be read, parsed or
+/// verified. Reads only the end of the file.
+fn newest_entry_ms(path: &Path) -> Option<u64> {
+    let line = last_line(path).ok()??;
+    let e: JournalEntry = serde_json::from_slice(&line).ok()?;
+    (e.hash == e.compute_hash()).then_some(e.ts_ms)
+}
+
+/// The last line of a file (without its newline), read backwards in growing chunks.
+fn last_line(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    let mut chunk: u64 = 4096;
+    loop {
+        let start = len.saturating_sub(chunk);
+        f.seek(SeekFrom::Start(start))?;
+        let mut buf = Vec::new();
+        (&mut f).take(len - start).read_to_end(&mut buf)?;
+        let body = buf.strip_suffix(b"\n").unwrap_or(&buf);
+        if let Some(cut) = body.iter().rposition(|&b| b == b'\n') {
+            return Ok(body.get(cut + 1..).map(<[u8]>::to_vec));
+        }
+        if start == 0 {
+            return Ok((!body.is_empty()).then(|| body.to_vec()));
+        }
+        chunk = chunk.saturating_mul(4);
+    }
 }
 
 /// Create a new, empty segment file and sync it. An existing file of that name is an error.
@@ -692,25 +821,22 @@ fn sync_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Log and count a segment whose first entry starts the chain afresh although the segment is not
-/// the key's first one (its name, or the entry's sequence number, is not 1). Such a segment can
-/// only come from an earlier release or from a hand-edited directory; the chain from it on still
-/// verifies, so the journal opens.
-fn note_chain_restart(seg: &Path, first: Option<&JournalEntry>) {
-    let Some(first) = first else {
-        return;
-    };
-    let first_name = seg
-        .file_name()
-        .is_some_and(|n| n.to_str() == Some(segment_name(1).as_str()));
-    if first.prev == GENESIS && (first.seq != 1 || !first_name) {
-        metrics::counter!(crate::metrics::SIGN_JOURNAL_CHAIN_RESTARTS).increment(1);
-        tracing::warn!(
-            file = %seg.display(),
-            seq = first.seq,
-            "sign journal segment starts the hash chain afresh although it is not the key's first segment — entries before it are not linked to it; check the key's journal with `rutli-cosigner audit-cross-check`"
-        );
-    }
+/// Log and count a segment, read on an open that succeeded, whose first entry starts the chain
+/// afresh although the segment is not the key's first one (older segments exist, or its name or
+/// the entry's sequence number is not 1). Such a segment can only come from an earlier release or
+/// from a hand-edited directory; the chain from it on verifies, so the journal opens.
+fn note_chain_restart(seg: &Path, first_seq: u64) {
+    metrics::counter!(crate::metrics::SIGN_JOURNAL_CHAIN_RESTARTS).increment(1);
+    tracing::warn!(
+        file = %seg.display(),
+        seq = first_seq,
+        "sign journal segment starts the hash chain afresh although it is not the key's first segment — entries before it are not linked to it; check the key's journal with `rutli-cosigner audit-cross-check`"
+    );
+}
+
+/// The number a segment file is named by.
+fn segment_number(p: &Path) -> Option<u64> {
+    p.file_stem()?.to_str()?.parse().ok()
 }
 
 fn segment_name(first_seq: u64) -> String {
@@ -1405,28 +1531,37 @@ mod tests {
             .collect()
     }
 
+    /// Open the key journal in `dir` at `now_ms` and apply `retention` to it.
+    fn swept(dir: &Path, now_ms: u64, retention: Retention) -> KeyJournal {
+        let mut k = KeyJournal::open(dir, now_ms).unwrap();
+        k.sweep(retention, now_ms);
+        k
+    }
+
     #[test]
     fn the_rate_limit_ledger_is_read_back_from_the_segments_inside_the_last_day_only() {
         let tmp = tempfile::tempdir().unwrap();
         let (min, hour) = (MINUTE_MS, 60 * MINUTE_MS);
-        // Entries 1 and 2 are ten days old, 3 two days, 4 and 5 are inside the last day.
+        // Entries 1 and 2 are ten days old, 3 three days, 4 two days, 5 and 6 are inside the day.
         let dir = journal_with_entries(
             tmp.path(),
             &[
                 T - 10 * DAY_MS,
                 T - 10 * DAY_MS,
+                T - 3 * DAY_MS,
                 T - 2 * DAY_MS,
                 T - hour,
                 T - 10 * min,
             ],
         );
-        let segs = split_segment(&dir, &[2, 2, 1]);
-        // The oldest segment is not read at all: the one after it starts more than a day back, so
-        // nothing before that can be in the window. Breaking it proves that.
+        let segs = split_segment(&dir, &[1, 2, 2, 1]);
+        // The third segment starts two days back but its newest entry is inside the day, so the
+        // one before it is read too; that one's newest entry is three days old, so nothing older
+        // is read. Breaking the oldest proves that.
         std::fs::write(&segs[0], "not a journal\n").unwrap();
-        let k = KeyJournal::open(&dir, T, FOREVER).unwrap();
-        assert_eq!(k.seq, 5);
-        assert_eq!(k.charges.len(), 2, "only entries 4 and 5 are in the window");
+        let k = KeyJournal::open(&dir, T).unwrap();
+        assert_eq!(k.seq, 6);
+        assert_eq!(k.charges.len(), 2, "only entries 5 and 6 are in the window");
         assert_eq!(k.charges[0].0, T - hour);
         assert_eq!(k.charges[1].0, T - 10 * min);
         // Each of them is one share of its own charge; the entries outside the window left none.
@@ -1438,7 +1573,7 @@ mod tests {
     fn an_entry_exactly_a_day_old_is_outside_the_window_and_a_millisecond_less_is_inside() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = journal_with_entries(tmp.path(), &[T]);
-        let charges_at = |now| KeyJournal::open(&dir, now, FOREVER).unwrap().charges.len();
+        let charges_at = |now| KeyJournal::open(&dir, now).unwrap().charges.len();
         assert_eq!(charges_at(T + DAY_MS - 1), 1);
         assert_eq!(charges_at(T + DAY_MS), 0);
     }
@@ -1448,11 +1583,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = journal_with_entries(tmp.path(), &[T, T + 1, T + 2, T + 3]);
         let segs = split_segment(&dir, &[2, 2]);
-        KeyJournal::open(&dir, T + 4, FOREVER).unwrap();
+        KeyJournal::open(&dir, T + 4).unwrap();
         let mut closed = std::fs::read(&segs[0]).unwrap();
         closed.extend_from_slice(b"{\"seq\":3,\"ts_ms\":");
         std::fs::write(&segs[0], closed).unwrap();
-        let err = KeyJournal::open(&dir, T + 4, FOREVER).err().unwrap();
+        let err = KeyJournal::open(&dir, T + 4).err().unwrap();
         assert!(
             matches!(&err, DaemonError::Journal(m) if m.contains("torn line in a closed segment")),
             "{err}"
@@ -1464,10 +1599,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = journal_with_entries(tmp.path(), &[T, T + 1, T + 2, T + 3, T + 4]);
         let segs = split_segment(&dir, &[2, 2, 1]);
-        KeyJournal::open(&dir, T + 5, FOREVER).unwrap();
+        KeyJournal::open(&dir, T + 5).unwrap();
         // The middle segment gone: each remaining segment is intact on its own.
         std::fs::remove_file(&segs[1]).unwrap();
-        let err = KeyJournal::open(&dir, T + 5, FOREVER).err().unwrap();
+        let err = KeyJournal::open(&dir, T + 5).err().unwrap();
         assert!(
             matches!(&err, DaemonError::Journal(m) if m.contains("does not continue its chain")),
             "{err}"
@@ -1477,9 +1612,10 @@ mod tests {
     #[test]
     fn retention_by_age_deletes_the_closed_segments_older_than_the_days_and_no_others() {
         let tmp = tempfile::tempdir().unwrap();
+        // Every entry is past the last day: only the files' ages decide.
         let dir = journal_with_entries(tmp.path(), &[T, T + 1, T + 2, T + 3, T + 4]);
         let segs = split_segment(&dir, &[2, 2, 1]);
-        let now = T + 5;
+        let now = T + 2 * DAY_MS;
         set_age(&segs[0], now, 3 * DAY_MS);
         set_age(&segs[1], now, DAY_MS + DAY_MS / 2);
         set_age(&segs[2], now, 0);
@@ -1487,7 +1623,7 @@ mod tests {
             days: 2,
             max_bytes: u64::MAX,
         };
-        KeyJournal::open(&dir, now, two_days).unwrap();
+        swept(&dir, now, two_days);
         // Three days old: gone. A day and a half: inside the two days. The newest is brand new.
         assert_eq!(names(&dir), [segment_name(3), segment_name(5)]);
     }
@@ -1498,7 +1634,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = journal_with_entries(tmp.path(), &[T, T + 1, T + 2, T + 3, T + 4]);
         let segs = split_segment(&dir, &[2, 2, 1]);
-        let now = T + 5;
+        let now = T + 2 * DAY_MS;
         for (i, seg) in segs.iter().enumerate() {
             set_age(seg, now, (10 - i as u64) * DAY_MS);
         }
@@ -1506,11 +1642,11 @@ mod tests {
             days: 1,
             max_bytes: u64::MAX,
         };
-        KeyJournal::open(&dir, now, by_age).unwrap();
+        swept(&dir, now, by_age);
         assert_eq!(names(&dir), [segment_name(5)]);
         // Size alone: no file is old, the cap is smaller than any one segment, and every entry is
         // past the last day (the size cap keeps that day's entries).
-        let later = now + DAY_MS;
+        let later = now + 1;
         let tmp = tempfile::tempdir().unwrap();
         let dir = journal_with_entries(tmp.path(), &[T, T + 1, T + 2, T + 3, T + 4]);
         for seg in split_segment(&dir, &[2, 2, 1]) {
@@ -1520,7 +1656,7 @@ mod tests {
             days: 100_000,
             max_bytes: 1,
         };
-        KeyJournal::open(&dir, later, by_size).unwrap();
+        swept(&dir, later, by_size);
         assert_eq!(names(&dir), [segment_name(5)]);
     }
 
@@ -1538,7 +1674,7 @@ mod tests {
         assert!(sizes.iter().all(|s| *s == one), "equal entries: {sizes:?}");
         // Every file is as new as "now" and every entry a day old: only the size can delete
         // anything here.
-        let now = T + 4 + DAY_MS;
+        let now = T + 4 + 2 * DAY_MS;
         for seg in segments(&dir).unwrap() {
             set_age(&seg, now, 0);
         }
@@ -1547,10 +1683,10 @@ mod tests {
             days: 100_000,
             max_bytes: one * 5 / 2,
         };
-        KeyJournal::open(&dir, now, cap).unwrap();
+        swept(&dir, now, cap);
         assert_eq!(names(&dir), [segment_name(3), segment_name(4)]);
         // Already within the cap: nothing more goes.
-        KeyJournal::open(&dir, now, cap).unwrap();
+        swept(&dir, now, cap);
         assert_eq!(names(&dir), [segment_name(3), segment_name(4)]);
     }
 
@@ -1700,9 +1836,9 @@ mod tests {
         ));
         drop(j);
 
-        // A day later the same entries are past the window, and the cap removes the oldest.
-        let later = T + u64::from(per_day) + DAY_MS;
-        KeyJournal::open(&dir, later, cap).unwrap();
+        // Two days later the same entries are past the window, and the cap removes the oldest.
+        let later = T + 2 * DAY_MS;
+        swept(&dir, later, cap);
         let left = read_key_dir(&dir).unwrap();
         assert!(left.entries.first().unwrap().seq > 1, "the oldest went");
         assert_eq!(left.entries.last().unwrap().seq, u64::from(per_day));
@@ -1714,8 +1850,8 @@ mod tests {
         assert!(total <= cap.max_bytes, "within the cap again: {total}");
     }
 
-    /// Retention runs only after the first entry of a new segment is durable, and never removes the
-    /// newest segment that holds entries. Here the closed segment is old enough for both rules to
+    /// Retention runs only after an entry of this instance is durable, and never removes the newest
+    /// segment that holds entries. Here the closed segment is old enough for both rules to
     /// remove it; the first write into the new segment fails: the closed segment stays, and the
     /// journal continues its sequence and chain from it, in memory and after a reopen.
     #[test]
@@ -1754,7 +1890,7 @@ mod tests {
     /// The newest segment with entries also stays when the current one is empty (a rotation whose
     /// first write never happened), whatever retention says.
     #[test]
-    fn retention_on_open_keeps_the_newest_segment_with_entries_behind_an_empty_one() {
+    fn retention_keeps_the_newest_segment_with_entries_behind_an_empty_one() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = journal_with_entries(tmp.path(), &[T, T + 1, T + 2]);
         let segs = split_segment(&dir, &[2, 1]);
@@ -1768,7 +1904,7 @@ mod tests {
             days: 1,
             max_bytes: 1,
         };
-        let k = KeyJournal::open(&dir, now, strict).unwrap();
+        let k = swept(&dir, now, strict);
         assert_eq!(names(&dir), [segment_name(3), segment_name(4)]);
         assert_eq!(k.seq, 3);
         assert_eq!(k.current, empty);
@@ -1808,8 +1944,9 @@ mod tests {
         ));
     }
 
-    /// A segment that is not the key's first one but starts the chain afresh is logged and counted;
-    /// the journal still opens and continues after it. A first segment is not counted.
+    /// A segment that is not the key's first one but starts the chain afresh is logged and counted
+    /// once the journal has opened; the journal continues after it. A first segment is not counted,
+    /// and neither is one in a journal that refuses to open.
     #[test]
     fn a_segment_that_restarts_the_chain_is_counted_and_the_journal_opens() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1817,9 +1954,7 @@ mod tests {
         let open_counting = |dir: &Path| {
             let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
             let handle = recorder.handle();
-            let k = metrics::with_local_recorder(&recorder, || {
-                KeyJournal::open(dir, T + 2, FOREVER).unwrap()
-            });
+            let k = metrics::with_local_recorder(&recorder, || KeyJournal::open(dir, T + 2));
             let n = counter_value(
                 &handle.render(),
                 crate::metrics::SIGN_JOURNAL_CHAIN_RESTARTS,
@@ -1827,16 +1962,313 @@ mod tests {
             (k, n)
         };
         let (k, n) = open_counting(&dir);
-        assert_eq!((k.seq, n), (2, 0));
+        assert_eq!((k.unwrap().seq, n), (2, 0));
         std::fs::rename(dir.join(segment_name(1)), dir.join(segment_name(257))).unwrap();
         let (k, n) = open_counting(&dir);
-        assert_eq!((k.seq, n), (2, 1));
-        drop(k);
+        assert_eq!((k.unwrap().seq, n), (2, 1));
         let j = SignJournal::open(tmp.path(), 1, FOREVER).unwrap();
         let e = j
             .append_charged(entry("k", "next"), UNLIMITED, T + 3)
             .unwrap();
         assert_eq!(e.seq, 3);
+        drop(j);
+        // An older segment that the restarted one does not continue: the journal refuses to open,
+        // and nothing is counted.
+        let other = tempfile::tempdir().unwrap();
+        let dir = journal_with_entries(other.path(), &[T, T + 1, T + 2, T + 3]);
+        split_segment(&dir, &[2, 2]);
+        std::fs::rename(dir.join(segment_name(1)), dir.join(segment_name(257))).unwrap();
+        let (k, n) = open_counting(&dir);
+        assert!(matches!(k, Err(DaemonError::Journal(_))));
+        assert_eq!(n, 0);
+    }
+
+    /// A rotation after a segment that restarted the chain names the new segment after the current
+    /// file when that is higher than the next sequence number, so names keep sorting in writing
+    /// order; the journal reopens and continues either way.
+    #[test]
+    fn a_rotation_after_a_restarted_segment_sorts_after_the_current_file() {
+        for name in [257u64, 1_000] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join("k");
+            let j = SignJournal::open(tmp.path(), 1, FOREVER).unwrap();
+            let next = fill_one_segment(&j, &dir, 0, UNLIMITED, T);
+            drop(j);
+            std::fs::rename(dir.join(segment_name(1)), dir.join(segment_name(name))).unwrap();
+            let last = read_key_dir(&dir).unwrap().entries.last().unwrap().seq;
+            let j = SignJournal::open(tmp.path(), 1, FOREVER).unwrap();
+            let e = j.append_charged(fat(next), UNLIMITED, T + next).unwrap();
+            assert_eq!(e.seq, last + 1);
+            let expected = (last + 1).max(name + 1);
+            assert_eq!(
+                names(&dir),
+                [segment_name(name), segment_name(expected)],
+                "{name}"
+            );
+            drop(j);
+            let j = SignJournal::open(tmp.path(), 1, FOREVER).unwrap();
+            let e = j
+                .append_charged(fat(next + 1), UNLIMITED, T + next + 1)
+                .unwrap();
+            assert_eq!(e.seq, last + 2, "{name}");
+            assert_eq!(read_key_dir(&dir).unwrap().entries.len() as u64, last + 2);
+        }
+    }
+
+    /// A first segment file whose entries start after seq 1 (the older segments were deleted, and
+    /// the file renamed) rotates into the name after its last entry.
+    #[test]
+    fn a_segment_one_whose_first_entry_is_not_seq_one_rotates_after_its_last_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("k");
+        let j = SignJournal::open(tmp.path(), 1, FOREVER).unwrap();
+        let mut i = fill_one_segment(&j, &dir, 0, UNLIMITED, T);
+        j.append_charged(fat(i), UNLIMITED, T + i).unwrap();
+        i += 1;
+        drop(j);
+        let [old, newer] = segments(&dir).unwrap().try_into().unwrap();
+        std::fs::remove_file(&old).unwrap();
+        std::fs::rename(&newer, dir.join(segment_name(1))).unwrap();
+        let j = SignJournal::open(tmp.path(), 1, FOREVER).unwrap();
+        let i = fill_one_segment(&j, &dir, i, UNLIMITED, T);
+        let last = read_key_dir(&dir).unwrap().entries.last().unwrap().seq;
+        let e = j.append_charged(fat(i), UNLIMITED, T + i).unwrap();
+        assert_eq!(e.seq, last + 1);
+        assert_eq!(names(&dir), [segment_name(1), segment_name(last + 1)]);
+    }
+
+    /// Opening a journal never applies retention, and neither does taking over from disk a line
+    /// whose sync failed: here the first write into a new segment is complete but its sync and the
+    /// rollback fail. Only this instance's next synced append lets retention remove the old segment.
+    #[test]
+    fn retention_waits_for_an_append_this_instance_synced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("k");
+        let cap = Retention {
+            days: 1,
+            max_bytes: MIN_CAP,
+        };
+        let j = SignJournal::open(tmp.path(), 1, cap).unwrap();
+        let next = fill_one_segment(&j, &dir, 0, UNLIMITED, T - 2 * DAY_MS);
+        set_age(&dir.join(segment_name(1)), T, 2 * DAY_MS);
+        let last = read_key_dir(&dir).unwrap().entries.last().unwrap().seq;
+        j.faults
+            .lock()
+            .unwrap()
+            .push_back(Fault::SyncAndRollbackFail);
+        assert!(j.append_charged(fat(next), UNLIMITED, T).is_err());
+        let both = [segment_name(1), segment_name(last + 1)];
+        assert_eq!(names(&dir), both);
+        // A restart: the unacknowledged line is taken as the head; nothing is deleted.
+        let k = KeyJournal::open(&dir, T + 1).unwrap();
+        assert_eq!(k.seq, last + 1);
+        assert_eq!(names(&dir), both);
+        drop(k);
+        let e = j.append_charged(fat(next + 1), UNLIMITED, T + 2).unwrap();
+        assert_eq!(e.seq, last + 2);
+        assert_eq!(names(&dir), [segment_name(last + 1)]);
+    }
+
+    /// A rotation whose directory sync fails is refused; the next append takes up the new, empty
+    /// segment (the open syncs the directory first) and continues the chain in it.
+    #[test]
+    fn a_rotation_whose_directory_sync_fails_is_taken_up_by_the_next_append() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("k");
+        let j = SignJournal::open(tmp.path(), 1, FOREVER).unwrap();
+        let next = fill_one_segment(&j, &dir, 0, UNLIMITED, T);
+        let last = read_key_dir(&dir).unwrap().entries.last().unwrap().seq;
+        j.faults
+            .lock()
+            .unwrap()
+            .push_back(Fault::RotationDirSyncFails);
+        assert!(j.append_charged(fat(next), UNLIMITED, T + next).is_err());
+        let both = [segment_name(1), segment_name(last + 1)];
+        assert_eq!(names(&dir), both);
+        let e = j
+            .append_charged(fat(next), UNLIMITED, T + next + 1)
+            .unwrap();
+        assert_eq!(e.seq, last + 1);
+        assert_eq!(names(&dir), both);
+        let (entries, _) = read_segment(&dir.join(segment_name(last + 1))).unwrap();
+        assert_eq!(entries.len(), 1);
+    }
+
+    /// A key directory that cannot be listed refuses the append instead of passing for a new key.
+    #[test]
+    fn a_key_directory_that_cannot_be_listed_refuses_the_append() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = journal_with_entries(tmp.path(), &[T]);
+        let _restore = RestoreMode(dir.clone());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&dir).is_ok() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "this test needs file permissions to be enforced, but the CI job runs as root"
+            );
+            eprintln!("skipped: permissions are not enforced here (running as root)");
+            return;
+        }
+        let j = SignJournal::open(tmp.path(), 1, FOREVER).unwrap();
+        let err = j
+            .append_charged(entry("k", "next"), UNLIMITED, T + 1)
+            .unwrap_err();
+        assert!(
+            matches!(&err, DaemonError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+            "{err}"
+        );
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(read_key_dir(&dir).unwrap().entries.len(), 1);
+    }
+
+    /// The ledger is read back by each segment's newest entry, not its first: a segment whose first
+    /// entry was stamped by a clock that was two days behind still lets the segment before it,
+    /// which holds a charge of the last hour, count.
+    #[test]
+    fn a_segment_stamped_by_a_lagging_clock_does_not_hide_its_older_neighbour() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hour = 60 * MINUTE_MS;
+        let dir = journal_with_entries(
+            tmp.path(),
+            &[T - 3 * DAY_MS, T - hour, T - 2 * DAY_MS, T - 5 * MINUTE_MS],
+        );
+        split_segment(&dir, &[1, 1, 2]);
+        let k = KeyJournal::open(&dir, T).unwrap();
+        assert_eq!(k.seq, 4);
+        assert_eq!(
+            k.charges.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+            [T - hour, T - 5 * MINUTE_MS]
+        );
+    }
+
+    /// The share cap of one charge holds across rotations and a reopen, with the size cap below the
+    /// day's volume.
+    #[test]
+    fn the_share_cap_of_a_charge_holds_after_a_reopen_across_segments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("k");
+        let cap = Retention {
+            days: 90,
+            max_bytes: 2 * MIN_CAP,
+        };
+        let limits = Limits {
+            per_min: 0,
+            per_day: 10_000,
+            max_shares_per_charge: 3,
+        };
+        let j = SignJournal::open(tmp.path(), 1, cap).unwrap();
+        let replayed = fat(999_999);
+        j.append_charged(replayed.clone(), limits, T).unwrap();
+        j.append_charged(replayed.clone(), limits, T + 1).unwrap();
+        let mut i = 0;
+        while segments(&dir).unwrap().len() < 3 {
+            i = fill_one_segment(&j, &dir, i, limits, T + 10);
+            j.append_charged(fat(i), limits, T + 10 + i).unwrap();
+            i += 1;
+        }
+        drop(j);
+        let j = SignJournal::open(tmp.path(), 1, cap).unwrap();
+        j.append_charged(replayed.clone(), limits, T + 5_000)
+            .unwrap();
+        assert!(matches!(
+            j.append_charged(replayed, limits, T + 5_001),
+            Err(DaemonError::RateLimited(_))
+        ));
+    }
+
+    /// An empty segment between two others does not hide a broken link between them.
+    #[test]
+    fn an_empty_segment_does_not_hide_a_broken_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = journal_with_entries(tmp.path(), &[T, T + 1, T + 2, T + 3, T + 4]);
+        let segs = split_segment(&dir, &[2, 1, 2]);
+        KeyJournal::open(&dir, T + 5).unwrap();
+        // Entry 3 gone with its segment emptied: segment 4 no longer continues segment 1.
+        std::fs::write(&segs[1], b"").unwrap();
+        let err = KeyJournal::open(&dir, T + 5).err().unwrap();
+        assert!(
+            matches!(&err, DaemonError::Journal(m) if m.contains("does not continue its chain")),
+            "{err}"
+        );
+    }
+
+    /// The link between segments covers the sequence numbers too: a segment whose first entry
+    /// names the right `prev` but skips sequence numbers refuses to open.
+    #[test]
+    fn a_sequence_gap_between_segments_refuses_to_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = journal_with_entries(tmp.path(), &[T, T + 1, T + 2, T + 3]);
+        let segs = split_segment(&dir, &[2, 2]);
+        let (mut entries, _) = read_segment(&segs[1]).unwrap();
+        let mut prev = entries[0].prev.clone();
+        let mut body = String::new();
+        for e in &mut entries {
+            e.seq += 10;
+            e.prev = prev;
+            e.hash = e.compute_hash();
+            prev = e.hash.clone();
+            body.push_str(&serde_json::to_string(e).unwrap());
+            body.push('\n');
+        }
+        std::fs::write(&segs[1], body).unwrap();
+        let err = KeyJournal::open(&dir, T + 4).err().unwrap();
+        assert!(
+            matches!(&err, DaemonError::Journal(m) if m.contains("does not continue its chain")),
+            "{err}"
+        );
+    }
+
+    /// A segment whose size or time cannot be read stops retention: nothing is deleted.
+    #[test]
+    fn retention_stops_at_a_segment_it_cannot_stat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = journal_with_entries(tmp.path(), &[T, T + 1, T + 10 * DAY_MS]);
+        split_segment(&dir, &[2, 1]);
+        let now = T + 10 * DAY_MS + 1;
+        set_age(&dir.join(segment_name(1)), now, 5 * DAY_MS);
+        std::os::unix::fs::symlink(dir.join("absent"), dir.join(segment_name(0))).unwrap();
+        let strict = Retention {
+            days: 1,
+            max_bytes: 1,
+        };
+        swept(&dir, now, strict);
+        assert_eq!(
+            names(&dir),
+            [segment_name(0), segment_name(1), segment_name(3)]
+        );
+    }
+
+    /// A segment whose last line does not verify is kept by both rules, and a journal held above
+    /// the cap by it is counted.
+    #[test]
+    fn retention_keeps_a_segment_whose_last_line_cannot_be_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = journal_with_entries(tmp.path(), &[T, T + 1, T + 2, T + 10 * DAY_MS]);
+        let segs = split_segment(&dir, &[2, 1, 1]);
+        let now = T + 10 * DAY_MS + 1;
+        let text = std::fs::read_to_string(&segs[0]).unwrap();
+        let (first, second) = text.trim_end().split_once('\n').unwrap();
+        let altered = second.replacen(&"12".repeat(34), &"13".repeat(34), 1);
+        std::fs::write(&segs[0], format!("{first}\n{altered}\n")).unwrap();
+        for seg in &segs[..2] {
+            set_age(seg, now, 5 * DAY_MS);
+        }
+        let strict = Retention {
+            days: 1,
+            max_bytes: 1,
+        };
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || swept(&dir, now, strict));
+        assert_eq!(
+            names(&dir),
+            [segment_name(1), segment_name(3), segment_name(4)]
+        );
+        assert_eq!(
+            counter_value(&handle.render(), crate::metrics::SIGN_JOURNAL_OVER_CAP),
+            1
+        );
     }
 
     /// A key directory that cannot be listed is an error, never an empty journal.

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 /// Longest `signing_policy.intent_max_lifetime_secs` accepted (one hour).
 const MAX_INTENT_LIFETIME_SECS: u64 = 3600;
 /// Largest `signing_policy.clock_skew_secs` accepted (one hour).
-const MAX_CLOCK_SKEW_SECS: u64 = 3600;
+pub(crate) const MAX_CLOCK_SKEW_SECS: u64 = 3600;
 /// Milliseconds in one second.
 const MILLIS_PER_SECOND: u64 = 1000;
 /// Smallest `signing_policy.journal_max_mib_per_key` accepted.
@@ -404,8 +404,8 @@ pub struct SigningPolicyConfig {
     /// Sign journal (`data_dir/journal/<key_id>/`): segments older than this are deleted...
     #[serde(default = "default_journal_retention_days")]
     pub journal_retention_days: u32,
-    /// ...and so are the oldest segments of a key past this total size, except those that hold
-    /// entries of the last 24 h (the rate limit is rebuilt from them after a restart).
+    /// ...and so are the oldest segments of a key past this total size. Neither rule deletes a
+    /// segment that holds entries of the last 24 h (the rate limit is rebuilt from them).
     #[serde(default = "default_journal_max_mib_per_key")]
     pub journal_max_mib_per_key: u32,
     /// Approval rules, as the driver's `approval.rules` (key-id prefix, first match wins): a key a
