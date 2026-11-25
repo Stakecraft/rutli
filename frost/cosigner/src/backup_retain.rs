@@ -811,17 +811,31 @@ pub fn read_proofs(keys_dir: &Path, now_ms: u64) -> BTreeMap<(String, u64), Proo
     out
 }
 
-/// The proofs retention leans on that were recorded from a version 1 sign test: for each live key,
-/// its highest proven epoch, when that marker states message version 1. They still count in 0.5;
-/// the caller warns, so that the operator re-runs `verify-key --sign-test` and `keyfile prove` on
-/// 0.5 or later (version 1 goes in 0.6, issue #325). Pure: no I/O.
+/// The proofs retention leans on that were recorded from a version 1 sign test: for each live
+/// FROST key, its highest proof that the epoch rule could use (not above the live epoch, for a
+/// sharing the live key or a verified archive holds — as [`plan`] filters them, whatever their
+/// age), when that marker states message version 1. They still count in 0.5; the caller warns, so
+/// that the operator re-runs `verify-key --sign-test` and `keyfile prove` on 0.5 or later
+/// (version 1 goes in 0.6, issue #325). Pure: no I/O; give it the snapshot `plan` was given.
 pub fn version1_proofs(
+    archives: &[Archive],
     live: &BTreeMap<String, Option<KeyInfo>>,
     proofs: &BTreeMap<(String, u64), Proof>,
+    s: &Settings,
 ) -> Vec<(String, u64)> {
+    let mut sorted: Vec<&Archive> = archives.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    let live = live_key_infos(live);
     let mut highest: BTreeMap<&String, (u64, &Proof)> = BTreeMap::new();
     for ((key, epoch), proof) in proofs {
-        if live.contains_key(key) && highest.get(key).is_none_or(|(e, _)| epoch > e) {
+        let Some(l) = live.get(key) else { continue };
+        if !is_frost(l)
+            || *epoch > l.epoch
+            || !proof_digest_is_known(&sorted, s, key, *epoch, proof, l)
+        {
+            continue;
+        }
+        if highest.get(key).is_none_or(|(e, _)| epoch > e) {
             highest.insert(key, (*epoch, proof));
         }
     }
@@ -830,15 +844,6 @@ pub fn version1_proofs(
         .filter(|(_, (_, p))| p.message_version < crate::verify_key::SIGN_TEST_MESSAGE_VERSION)
         .map(|(k, (e, _))| (k.clone(), e))
         .collect()
-}
-
-/// [`version1_proofs`] of the live keys and markers on disk now; empty when the key directory
-/// cannot be listed (`run` reports that).
-pub fn read_version1_proofs(keys_dir: &Path, now_ms: u64) -> Vec<(String, u64)> {
-    let Ok(live) = read_live(keys_dir) else {
-        return Vec::new();
-    };
-    version1_proofs(&live, &read_proofs(keys_dir, now_ms))
 }
 
 /// Run retention on `dir`: read, plan, and (unless `dry_run`) delete. Returns the plan. Any error
@@ -850,10 +855,22 @@ pub fn run(
     now_ms: u64,
     dry_run: bool,
 ) -> Result<Plan, String> {
+    run_with_warnings(dir, keys_dir, s, now_ms, dry_run).map(|(plan, _)| plan)
+}
+
+/// [`run`], and the [`version1_proofs`] of the same snapshot of archives, live keys and proofs.
+pub fn run_with_warnings(
+    dir: &Path,
+    keys_dir: &Path,
+    s: &Settings,
+    now_ms: u64,
+    dry_run: bool,
+) -> Result<(Plan, Vec<(String, u64)>), String> {
     let archives = read_dir(dir, s.node)?;
     let live = read_live(keys_dir)?;
     let proofs = read_proofs(keys_dir, now_ms);
     let plan = plan(&archives, &live, &proofs, s);
+    let version1 = version1_proofs(&archives, &live, &proofs, s);
     if !dry_run {
         let mut done: Vec<&str> = Vec::new();
         for (name, verdict) in &plan.verdicts {
@@ -873,7 +890,7 @@ pub fn run(
             }
         }
     }
-    Ok(plan)
+    Ok((plan, version1))
 }
 
 #[cfg(test)]
@@ -1788,9 +1805,14 @@ mod tests {
             1,
             "it still counts"
         );
-        assert_eq!(read_version1_proofs(keys, now), vec![("k".to_string(), 3)]);
+        let live_now = read_live(keys).unwrap();
+        assert_eq!(
+            version1_proofs(&[], &live_now, &on_disk, &settings()),
+            vec![("k".to_string(), 3)]
+        );
 
-        // Pure: only a live key's highest proven epoch is named, and only when it is version 1.
+        // Pure: only a live key's highest usable proof is named, and only when it is version 1.
+        let (a, l, s) = (three(), live(&[("k", 3, "d3")]), settings());
         let mut p = proofs(&[
             ("k", 2, "d2", DAY),
             ("k", 3, "d3", DAY),
@@ -1799,12 +1821,16 @@ mod tests {
         for proof in p.values_mut() {
             proof.message_version = 1;
         }
-        let l = live(&[("k", 3, "d3")]);
-        assert_eq!(version1_proofs(&l, &p), vec![("k".to_string(), 3)]);
+        assert_eq!(version1_proofs(&a, &l, &p, &s), vec![("k".to_string(), 3)]);
         p.get_mut(&("k".to_string(), 3)).unwrap().message_version = 2;
         assert!(
-            version1_proofs(&l, &p).is_empty(),
-            "the newest proof is version 2"
+            version1_proofs(&a, &l, &p, &s).is_empty(),
+            "the newest usable proof is version 2"
         );
+        // A version 2 marker above the live epoch, or for a sharing nothing holds, is not one
+        // retention can use: the version 1 proof under them is still named.
+        let mut p = proofs(&[("k", 2, "d2", DAY), ("k", 3, "x", DAY), ("k", 4, "d4", DAY)]);
+        p.get_mut(&("k".to_string(), 2)).unwrap().message_version = 1;
+        assert_eq!(version1_proofs(&a, &l, &p, &s), vec![("k".to_string(), 2)]);
     }
 }

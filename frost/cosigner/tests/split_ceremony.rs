@@ -696,32 +696,67 @@ async fn a_version_1_answer_to_a_challenged_sign_test_fails_the_report() {
     }
     assert!(!report.ok && report.fingerprint.is_none());
     assert_eq!(report.sign_test_message_version, Some(2));
-    assert!(report.sign_test.iter().all(|s| !s.ok));
-    assert_eq!(
-        report.sign_test[0].error.as_deref(),
-        Some(rutli_cosigner::verify_key::VERSION_1_ANSWER)
-    );
+    // Every row records the same specific reason: an earlier failure masks none.
+    assert_eq!(report.sign_test.len(), 3);
+    for s in &report.sign_test {
+        assert_eq!(
+            s.error.as_deref(),
+            Some(rutli_cosigner::verify_key::VERSION_1_ANSWER),
+            "{s:?}"
+        );
+    }
+    assert_eq!(report.problems.len(), 3, "{:?}", report.problems);
     assert!(report
         .problems
         .iter()
-        .any(|p| p.ends_with(rutli_cosigner::verify_key::VERSION_1_ANSWER)));
+        .all(|p| p.ends_with(rutli_cosigner::verify_key::VERSION_1_ANSWER)));
+}
+
+/// The message a version 2 sign test of `KEY` signs, for a sharing, a quorum and a challenge.
+fn v2(epoch: u64, pkp: &[u8; 32], signers: &[u16], c: &[u8; 32]) -> [u8; 34] {
+    SignTestV2 {
+        ceremony_id: CEREMONY,
+        key_id: KEY,
+        epoch,
+        pkp_digest: pkp,
+        signers,
+        challenge: c,
+    }
+    .message()
+}
+
+/// A sign-test round 1 as a leader on `view` declares it.
+fn sign_test_ctx(
+    view: (u64, [u8; 32]),
+    message: [u8; 34],
+    signers: &[u16],
+    c: Option<[u8; 32]>,
+) -> rutli_cosigner::node::Round1Ctx {
+    rutli_cosigner::node::Round1Ctx {
+        leader_view: Some(view),
+        message: Some(message.to_vec()),
+        signers: Some(signers.to_vec()),
+        sign_test: true,
+        sign_test_challenge: c,
+        ..Default::default()
+    }
 }
 
 /// Each member recomputes the version 2 message from its own share and joins only a quorum of
-/// exactly `t` distinct cosigners that holds it; a round without a challenge still gets version 1.
+/// exactly `t` distinct cosigners of the key's roster that holds it — with or without a signing
+/// policy; a round without a challenge still gets version 1.
 #[tokio::test]
 async fn a_member_signs_a_version_2_sign_test_only_for_the_message_it_computes_itself() {
-    use rutli_cosigner::node::Round1Ctx;
     let tmp = tempfile::tempdir().unwrap();
     let (sites, _bundles, public, _fingerprint) = installed_ceremony(tmp.path());
-    let nodes: Vec<Arc<Node>> = sites.iter().map(Site::guarded_node).collect();
-    let peers = local_peers(&nodes);
+    let guarded: Vec<Arc<Node>> = sites.iter().map(Site::guarded_node).collect();
+    let peers = local_peers(&guarded);
     let challenge = fresh_challenge();
 
     // With the signing policy on every member, every quorum still signs.
     for (leader, signers) in sign_test_plan(&(1..=N).collect::<Vec<_>>(), T) {
         let (msg, sig) = ceremony_sign_test(
-            &nodes[usize::from(leader) - 1],
+            &guarded[usize::from(leader) - 1],
             &peers,
             KEY,
             &signers,
@@ -732,41 +767,16 @@ async fn a_member_signs_a_version_2_sign_test_only_for_the_message_it_computes_i
         assert!(verifies(&public, &msg, &sig));
     }
 
-    let view = nodes[0].signing_view(KEY).unwrap().view;
-    let v2 = |epoch: u64, pkp: &[u8; 32], signers: &[u16], c: &[u8; 32]| {
-        SignTestV2 {
-            ceremony_id: CEREMONY,
-            key_id: KEY,
-            epoch,
-            pkp_digest: pkp,
-            signers,
-            challenge: c,
-        }
-        .message()
-    };
-    let ctx = |message: [u8; 34], signers: &[u16], c: Option<[u8; 32]>| Round1Ctx {
-        leader_view: Some(view),
-        message: Some(message.to_vec()),
-        signers: Some(signers.to_vec()),
-        sign_test: true,
-        sign_test_challenge: c,
-        ..Default::default()
-    };
-    let mut session = 0;
-    let mut round1 = |node: &Arc<Node>, c: &Round1Ctx| {
-        session += 1;
-        node.sign_round1(KEY, &format!("member-{session}"), c)
-    };
+    let view = guarded[0].signing_view(KEY).unwrap().view;
+    let ctx = |message, signers: &[u16], c| sign_test_ctx(view, message, signers, c);
     let other_challenge = [0xa5; 32];
-    let refused: Vec<(&str, usize, Round1Ctx)> = vec![
+    let ok12 = v2(view.0, &view.1, &[1, 2], &challenge);
+    // Refused by the node itself, with or without a signing policy.
+    let v2_refused = vec![
         (
             "not in the signer set",
             2,
-            ctx(
-                v2(view.0, &view.1, &[1, 2], &challenge),
-                &[1, 2],
-                Some(challenge),
-            ),
+            ctx(ok12, &[1, 2], Some(challenge)),
         ),
         (
             "more than t signers",
@@ -781,6 +791,15 @@ async fn a_member_signs_a_version_2_sign_test_only_for_the_message_it_computes_i
             "fewer than t signers",
             0,
             ctx(v2(view.0, &view.1, &[1], &challenge), &[1], Some(challenge)),
+        ),
+        (
+            "a signer outside the key's roster",
+            0,
+            ctx(
+                v2(view.0, &view.1, &[1, 4], &challenge),
+                &[1, 4],
+                Some(challenge),
+            ),
         ),
         (
             "another epoch",
@@ -827,27 +846,47 @@ async fn a_member_signs_a_version_2_sign_test_only_for_the_message_it_computes_i
                 Some(challenge),
             ),
         ),
-        (
-            "a version 2 message without a challenge",
-            0,
-            ctx(v2(view.0, &view.1, &[1, 2], &challenge), &[1, 2], None),
-        ),
     ];
-    for (why, node, c) in &refused {
-        let err = round1(&nodes[*node], c).unwrap_err();
-        assert!(
-            matches!(err, DaemonError::PolicyRefused(_)),
-            "{why}: {err:?}"
-        );
+    let unguarded = nodes_of(&sites);
+    let mut session = 0;
+    let mut round1 = |node: &Arc<Node>, c: &rutli_cosigner::node::Round1Ctx| {
+        session += 1;
+        node.sign_round1(KEY, &format!("member-{session}"), c)
+    };
+    for nodes in [&guarded, &unguarded] {
+        for (why, node, c) in &v2_refused {
+            let err = round1(&nodes[*node], c).unwrap_err();
+            assert!(
+                matches!(err, DaemonError::PolicyRefused(_)),
+                "{why}: {err:?}"
+            );
+        }
+    }
+    // The version 1 path stays the signing policy's: a version 2 message without a challenge.
+    let err = round1(&guarded[0], &ctx(ok12, &[1, 2], None)).unwrap_err();
+    assert!(matches!(err, DaemonError::PolicyRefused(_)), "{err:?}");
+    // A sign-test round never carries a signing intent, with or without a challenge.
+    for c in [Some(challenge), None] {
+        for nodes in [&guarded, &unguarded] {
+            let with_intent = rutli_cosigner::node::Round1Ctx {
+                intent: Some(rutli_cosigner::pb::SignedIntent::default()),
+                ..ctx(ok12, &[1, 2], c)
+            };
+            let err = round1(&nodes[0], &with_intent).unwrap_err();
+            assert!(matches!(err, DaemonError::Core(_)), "{c:?}: {err:?}");
+        }
     }
     assert!(
-        nodes.iter().all(|n| n.pending_sign_count(KEY) == 0),
+        guarded
+            .iter()
+            .chain(&unguarded)
+            .all(|n| n.pending_sign_count(KEY) == 0),
         "a refused round opens no session"
     );
 
     // The same member accepts its own version 2 message, and (no challenge) the version 1 digest.
     round1(
-        &nodes[1],
+        &guarded[1],
         &ctx(
             v2(view.0, &view.1, &[2, 1], &challenge),
             &[1, 2],
@@ -856,7 +895,7 @@ async fn a_member_signs_a_version_2_sign_test_only_for_the_message_it_computes_i
     )
     .unwrap();
     round1(
-        &nodes[0],
+        &guarded[0],
         &ctx(
             rutli_cosigner::verify_key::verify_message(CEREMONY, KEY),
             &[1, 2],
@@ -864,6 +903,84 @@ async fn a_member_signs_a_version_2_sign_test_only_for_the_message_it_computes_i
         ),
     )
     .unwrap();
+}
+
+/// A member that joined a version 2 sign test for one quorum refuses a round 2 whose commitments
+/// come from another (a substituted signer), and signs nothing for that session.
+#[tokio::test]
+async fn a_member_refuses_a_sign_test_round_2_for_another_quorum_than_declared() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (sites, _bundles, _public, _fingerprint) = installed_ceremony(tmp.path());
+    let nodes: Vec<Arc<Node>> = sites.iter().map(Site::guarded_node).collect();
+    let _peers = local_peers(&nodes);
+    let challenge = fresh_challenge();
+    let view = nodes[0].signing_view(KEY).unwrap().view;
+    let m12 = v2(view.0, &view.1, &[1, 2], &challenge);
+    let m13 = v2(view.0, &view.1, &[1, 3], &challenge);
+    let c1 = nodes[0]
+        .sign_round1(
+            KEY,
+            "sub-1",
+            &sign_test_ctx(view, m12, &[1, 2], Some(challenge)),
+        )
+        .unwrap();
+    let c3 = nodes[2]
+        .sign_round1(
+            KEY,
+            "sub-3",
+            &sign_test_ctx(view, m13, &[1, 3], Some(challenge)),
+        )
+        .unwrap();
+    let substituted: BTreeMap<Identifier, SigningCommitments> =
+        [(nodes[0].identifier, c1), (nodes[2].identifier, c3)].into();
+    let err = nodes[0]
+        .sign_round2(KEY, "sub-1", &m12, &substituted)
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("another signer set than the leader declared"),
+        "{err:?}"
+    );
+    // The session is dropped, not left for a second try: nothing was signed for it.
+    assert_eq!(nodes[0].pending_sign_count(KEY), 0);
+    let again = nodes[0]
+        .sign_round2(KEY, "sub-1", &m13, &substituted)
+        .unwrap_err();
+    assert!(matches!(again, DaemonError::Core(_)), "{again:?}");
+}
+
+/// A member's Peer API accepts a version 2 sign-test round 1 with a 32-byte challenge.
+#[tokio::test]
+async fn a_member_peer_api_accepts_a_version_2_sign_test_round_1() {
+    use rutli_cosigner::pb::peer_server::Peer;
+    let tmp = tempfile::tempdir().unwrap();
+    let (sites, _bundles, _public, _fingerprint) = installed_ceremony(tmp.path());
+    let nodes: Vec<Arc<Node>> = sites.iter().map(Site::guarded_node).collect();
+    let _peers = local_peers(&nodes);
+    let challenge = fresh_challenge();
+    let view = nodes[1].signing_view(KEY).unwrap().view;
+    let member = rutli_cosigner::service::PeerSvc {
+        node: nodes[1].clone(),
+        allowed_cns: None,
+        peer_ids: None,
+        peer_pins: None,
+    };
+    let reply = member
+        .sign_round1(tonic::Request::new(rutli_cosigner::pb::SignRound1Request {
+            key_id: KEY.into(),
+            session_id: "wire-v2".into(),
+            epoch: view.0,
+            pkp_digest: view.1.to_vec(),
+            message: v2(view.0, &view.1, &[1, 2], &challenge).to_vec(),
+            signers: vec![1, 2],
+            purpose: "sign-test".into(),
+            sign_test_challenge: challenge.to_vec(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!reply.commitments.is_empty());
+    assert_eq!(nodes[1].pending_sign_count(KEY), 1);
 }
 
 /// A challenge is 32 bytes or absent, and only on a sign test: anything else is refused on the

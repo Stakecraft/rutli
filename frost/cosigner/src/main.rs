@@ -2630,7 +2630,7 @@ fn backup_retain_command(
         keep_count,
     };
     let node = cfg.identifier;
-    let plan = r::run(
+    let (plan, version1) = r::run_with_warnings(
         dir,
         &cfg.data_dir.join("keys"),
         &settings,
@@ -2674,8 +2674,7 @@ fn backup_retain_command(
         None => {}
     }
     // Version 1 proofs still count in 0.5; version 1 goes in 0.6 (issue #325).
-    let keys_dir = cfg.data_dir.join("keys");
-    for (key, epoch) in r::read_version1_proofs(&keys_dir, rutli_cosigner::intent::now_ms()) {
+    for (key, epoch) in version1 {
         println!(
             "BACKUP_RETENTION_WARNING node={node} key={key} epoch={epoch} proof=version-1 \
              note=\"the proof of this epoch was recorded from a version 1 sign test; re-run \

@@ -1622,24 +1622,46 @@ impl Node {
         .message())
     }
 
-    /// The sign-test message this node accepts in a round 1 of `key_id` with `ctx`: with a
-    /// challenge, the version 2 message from its own share (`cached`) — only when the declared
-    /// signer set is exactly `t` distinct cosigners and holds this node; without one, the version 1
-    /// test digest (kept for a 0.4.x `verify-key` until 0.6, issue #325).
-    fn own_sign_test_message(
+    /// A version 2 sign-test round 1 of `key_id` (one with a challenge), checked against this
+    /// node's own share (`cached`) whether or not a signing policy is configured: the declared
+    /// signer set is exactly `t` distinct cosigners of the key's roster and holds this node, and the
+    /// declared message is the version 2 message this node computes itself. Returns that message,
+    /// or `None` for a round without a challenge (the version 1 test digest, checked by the signing
+    /// policy; kept for a 0.4.x `verify-key` until 0.6, issue #325).
+    fn check_sign_test_v2(
         &self,
         key_id: &str,
         cached: &CachedKey,
         ctx: &Round1Ctx,
-    ) -> Result<[u8; 34]> {
+    ) -> Result<Option<[u8; 34]>> {
         let Some(challenge) = &ctx.sign_test_challenge else {
-            return self.ceremony_test_message(key_id);
+            return Ok(None);
         };
+        let refuse = |e: String| crate::intent::refused("sign-test", format!("{key_id}: {e}"));
         let signers = ctx.signers.as_deref().unwrap_or_default();
         let me = crate::hosted::identifier_index(self.identifier)?;
-        crate::verify_key::check_sign_test_quorum(me, signers, cached.cosigner.min_signers())
-            .map_err(|e| crate::intent::refused("sign-test", format!("{key_id}: {e}")))?;
-        self.ceremony_test_message_v2(key_id, cached.view, signers, challenge)
+        let roster = cached
+            .cosigner
+            .public_key_package()
+            .verifying_shares()
+            .keys()
+            .map(|id| crate::hosted::identifier_index(*id))
+            .collect::<Result<std::collections::BTreeSet<u16>>>()?;
+        crate::verify_key::check_sign_test_quorum(
+            me,
+            signers,
+            cached.cosigner.min_signers(),
+            &roster,
+        )
+        .map_err(refuse)?;
+        let mine = self.ceremony_test_message_v2(key_id, cached.view, signers, challenge)?;
+        if ctx.message.as_deref() != Some(mine.as_slice()) {
+            return Err(refuse(
+                "the declared message is not the version 2 sign-test message this node computes"
+                    .into(),
+            ));
+        }
+        Ok(Some(mine))
     }
 
     pub fn threshold_for(&self, key_id: &str) -> Result<u16> {
@@ -1727,10 +1749,13 @@ impl Node {
         }
         self.check_epoch(key_id, &cached, ctx)?;
         let mut binding = ctx.binding(key_id)?;
+        // A version 2 sign test, before any nonce exists and with or without a signing policy.
+        let sign_test_v2 = self.check_sign_test_v2(key_id, &cached, ctx)?;
         // The signing policy (audit C2), before any nonce exists: what authorizes this session.
         let auth = match &self.sign_guard {
-            Some(g) => Some(g.authorize_round1(key_id, ctx, || {
-                self.own_sign_test_message(key_id, &cached, ctx)
+            Some(g) => Some(g.authorize_round1(key_id, ctx, || match sign_test_v2 {
+                Some(mine) => Ok(mine),
+                None => self.ceremony_test_message(key_id),
             })?),
             None => None,
         };
@@ -3948,11 +3973,16 @@ impl Round1Ctx {
     /// The session binding this context declares for `key_id` (see
     /// [`rutli_frost_core::session::SessionBinding`]). Intents (audit C2) plug in here.
     fn binding(&self, key_id: &str) -> Result<SessionBinding> {
-        if self.sign_test_challenge.is_some() && !self.sign_test {
+        let conflict = if self.sign_test_challenge.is_some() && !self.sign_test {
+            Some("a sign-test challenge on a round that is not a sign test")
+        } else if self.intent.is_some() && (self.sign_test || self.sign_test_challenge.is_some()) {
+            Some("a sign-test round carries no signing intent")
+        } else {
+            None
+        };
+        if let Some(conflict) = conflict {
             return Err(DaemonError::Core(
-                rutli_frost_core::CoreError::InvalidBinding(
-                    "a sign-test challenge on a round that is not a sign test".into(),
-                ),
+                rutli_frost_core::CoreError::InvalidBinding(conflict.into()),
             ));
         }
         let mut b = SessionBinding::new(key_id);

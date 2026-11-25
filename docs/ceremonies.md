@@ -320,11 +320,19 @@ or sharing than this node's live ones, or when this node's live epoch is not the
 that missed the refresh cannot stamp it. **The report is the operator's statement**: the node cannot
 check who produced it, so the marker records the report's SHA-256 and this node's clock. A marker
 dated in the future is ignored (and replaced when stamped again); stamping again otherwise keeps the
-first time. The marker states the sign-test message version of its report (`message_version`): 2
-for a report of a 0.5 or later `verify-key`, 1 for an older one and for a marker written before
-the field existed. A version 1 marker still counts, and `backup-retain` prints a
-`BACKUP_RETENTION_WARNING … proof=version-1` line for it until the epoch is proven again on 0.5 or
-later (a version 2 report replaces a version 1 marker; never the reverse).
+first time. The marker records the sign-test message version the report declares
+(`message_version`; like the rest of the report, an operator's attestation): 2 for a report of a
+0.5 or later `verify-key`, accepted only when every sign-test row carries its own 32-byte
+challenge; 1 for an older report and for a marker written before the field existed. A marker of a
+version the node does not know is ignored (the epoch is not proven). A version 1 marker still
+counts, and `backup-retain` prints a `BACKUP_RETENTION_WARNING … proof=version-1` line for it until
+the epoch is proven again on 0.5 or later. A version 2 report replaces a version 1 marker with a
+fresh one, so the proof's age (and the wait before older backups go) starts again; a version 1
+report never replaces a version 2 marker of the same sharing, whatever the times; stamping again
+with the same version keeps the first time (unless that time is in the future). `keyfile prove`
+holds a lock on the marker (`<key>.<epoch>.lock` beside it) while it reads, compares and writes.
+A build from before marker versions rejects a marker that carries one: it counts the epoch as
+unproven and deletes no backups by epoch, so a rollback keeps backups.
 `rutli_key_epoch_proven{key}` is `1` while the live epoch has a marker for the live
 sharing; `RutliKeyEpochUnproven` fires when it is `0` and the live key file is more than three days old
 (the file's age is the time since the epoch was installed, or since the file was last re-sealed).

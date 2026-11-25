@@ -27,11 +27,12 @@
 //! `verify_strict` under the Canton key — the end-to-end proof that every quorum that may ever
 //! have to sign can. (A "first `t` responders" quorum would use the same `t` nodes every time and
 //! never touch the others' shares.) The message is the version 2 sign-test message
-//! ([`SignTestV2`]): `0x1220 ‖ SHA-256` over the domain tag `rutli-verify-key/v2` followed by the
+//! ([`SignTestV2`]): `0x1220 ‖ SHA-256` over the domain tag `rutli-verify-key-v2/` followed by the
 //! length-prefixed ceremony id, key id, epoch, PKP digest, sorted signer set and a 32-byte
 //! challenge that this command draws fresh for every call. The leader and every member compute it
 //! themselves from their own live share (the caller supplies only the quorum and the challenge),
-//! each member refuses a quorum it is not in or that is not exactly `t` distinct cosigners, and this
+//! each member refuses a quorum it is not in or that is not exactly `t` distinct cosigners of the
+//! key's roster, and this
 //! command recomputes it from the epoch and sharing every node reported: a signature that verifies
 //! is bound to that quorum, that sharing and this run. Only imported keys have one. It is
 //! Canton-shaped (the cosigners sign nothing else) and domain-separated from every hash Canton
@@ -65,7 +66,7 @@ pub const SIGN_TEST_MESSAGE_VERSION: u8 = 2;
 pub const SIGN_TEST_CHALLENGE_LEN: usize = 32;
 
 /// The domain tag that starts the preimage of a version 2 sign-test message.
-pub const SIGN_TEST_V2_DOMAIN: &[u8] = b"rutli-verify-key/v2";
+pub const SIGN_TEST_V2_DOMAIN: &[u8] = b"rutli-verify-key-v2/";
 
 /// Why a sign test fails when the cluster answered with the version 1 message.
 pub const VERSION_1_ANSWER: &str = "the cluster answered a version 1 sign test — run --sign-test \
@@ -142,12 +143,18 @@ pub struct VerifyReport {
     /// version 2 (`keyfile prove` reads it as version 1).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sign_test_message_version: Option<u8>,
+    /// Whether the nodes' views agreed ([`check_views`] found no problem). Unlike `ok`, a failed
+    /// sign-test row leaves it set, so every row is still checked under the agreed group key and
+    /// records its own reason.
+    #[serde(skip)]
+    pub views_ok: bool,
 }
 
 impl VerifyReport {
-    /// The group key, once [`check_views`] found every node agreeing on the expected one.
+    /// The group key, once [`check_views`] found every node agreeing on the expected one
+    /// (`views_ok`), whatever sign-test rows found since.
     pub fn agreed_group_key(&self) -> Option<[u8; 32]> {
-        if !self.ok {
+        if !self.views_ok {
             return None;
         }
         self.group_verifying_key
@@ -335,16 +342,22 @@ pub fn challenge_from_wire(
 }
 
 /// Whether `me` may join the version 2 sign-test quorum `signers`: exactly `threshold` distinct
-/// cosigners, `me` among them.
+/// cosigners of the key's `roster`, `me` among them.
 pub fn check_sign_test_quorum(
     me: u16,
     signers: &[u16],
     threshold: u16,
+    roster: &BTreeSet<u16>,
 ) -> std::result::Result<(), String> {
     let set: BTreeSet<u16> = signers.iter().copied().collect();
     if set.len() != signers.len() || set.len() != usize::from(threshold) {
         return Err(format!(
             "a sign-test quorum is exactly {threshold} distinct cosigners, got {signers:?}"
+        ));
+    }
+    if !set.is_subset(roster) {
+        return Err(format!(
+            "the sign-test quorum {signers:?} is not within the key's roster {roster:?}"
         ));
     }
     if !set.contains(&me) {
@@ -543,6 +556,7 @@ fn build_report(
             ),
             _ => (None, None, None, None, None),
         };
+    let views_ok = acc.problems.is_empty();
     let group_verifying_key = single_value(&acc.groups);
     let fingerprint = group_verifying_key
         .as_ref()
@@ -570,6 +584,7 @@ fn build_report(
         nodes: rows,
         sign_test: Vec::new(),
         sign_test_message_version: None,
+        views_ok,
     }
 }
 
@@ -892,7 +907,19 @@ mod tests {
             Ok((verify_message("other", KEY).to_vec(), vec![0u8; 64])),
         );
         assert!(!r.ok);
-        assert_eq!(r.sign_test.iter().filter(|s| !s.ok).count(), 3);
+        // Each row keeps its own reason: an earlier failure masks nothing.
+        let errors: Vec<&str> = r
+            .sign_test
+            .iter()
+            .map(|s| s.error.as_deref().unwrap_or("ok"))
+            .collect();
+        assert_eq!(errors[0], "UNAVAILABLE");
+        assert!(errors[1].contains("does not verify"), "{errors:?}");
+        assert!(
+            errors[2].contains("different message than the version 2"),
+            "{errors:?}"
+        );
+        assert_eq!(r.problems.len(), 3, "{:?}", r.problems);
         assert_eq!(r.sign_test[0].challenge, hex::encode(c));
         assert_eq!(&msg[..2], &[0x12, 0x20]);
         assert_ne!(verify_message("c", KEY), verify_message("d", KEY));
@@ -1044,6 +1071,7 @@ mod tests {
         };
         assert_ne!(empty_ceremony.message(), m);
         // The preimage is the domain tag, then each field length-prefixed (u64, big-endian).
+        assert_eq!(SIGN_TEST_V2_DOMAIN, b"rutli-verify-key-v2/");
         let mut preimage = SIGN_TEST_V2_DOMAIN.to_vec();
         let epoch = 4u64.to_be_bytes();
         let fields: [&[u8]; 6] = [
@@ -1060,6 +1088,8 @@ mod tests {
         }
         assert_eq!(m, rutli_frost_core::dealer::canton_test_message(&preimage));
         assert!(preimage.starts_with(b"rutl"));
+        // Not an extension of the version 1 tag.
+        assert!(!preimage.starts_with(b"rutli-verify-key/"));
     }
 
     #[test]
@@ -1074,14 +1104,17 @@ mod tests {
 
     #[test]
     fn a_member_joins_only_a_quorum_of_exactly_t_distinct_cosigners_that_holds_it() {
-        assert_eq!(check_sign_test_quorum(1, &[1, 2], 2), Ok(()));
-        assert_eq!(check_sign_test_quorum(2, &[2, 1], 2), Ok(()));
-        let not_in = check_sign_test_quorum(3, &[1, 2], 2).unwrap_err();
-        assert!(not_in.contains("not in"), "{not_in}");
+        let roster: BTreeSet<u16> = [1, 2, 3].into();
+        assert_eq!(check_sign_test_quorum(1, &[1, 2], 2, &roster), Ok(()));
+        assert_eq!(check_sign_test_quorum(2, &[2, 1], 2, &roster), Ok(()));
+        let not_in = check_sign_test_quorum(3, &[1, 2], 2, &roster).unwrap_err();
+        assert!(not_in.contains("not in the sign-test quorum"), "{not_in}");
         for bad in [&[1u16][..], &[1, 2, 3], &[1, 1], &[]] {
-            let err = check_sign_test_quorum(1, bad, 2).unwrap_err();
+            let err = check_sign_test_quorum(1, bad, 2, &roster).unwrap_err();
             assert!(err.contains("exactly 2 distinct"), "{bad:?}: {err}");
         }
+        let stranger = check_sign_test_quorum(1, &[1, 4], 2, &roster).unwrap_err();
+        assert!(stranger.contains("roster"), "{stranger}");
     }
 
     #[test]

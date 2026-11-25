@@ -19,14 +19,18 @@
 //! report later. A marker holds no secret and is not sealed. The marker's time is this node's clock
 //! at stamping; a marker dated in the future is ignored.
 //!
-//! Writing a marker takes no lock and touches nothing on the signing path: the key files are only
-//! read, the marker is one new file.
+//! Writing a marker touches nothing on the signing path: the key files are only read, the marker
+//! is one new file. The read, compare and write of one marker run under an exclusive lock on a
+//! lock file beside it (`<key id>.<epoch>.lock`), so two `keyfile prove` runs cannot interleave.
 //!
-//! A marker states the version of the sign-test message its report was checked against
-//! (`message_version`): 2 for a report of a 0.5 or later `verify-key`, whose signatures are bound
-//! to each quorum, the sharing and a fresh challenge; 1 for an older report, and for a marker
-//! written before the field existed. `backup-retain` warns about a version 1 marker it relies on;
-//! re-running `verify-key --sign-test` and `keyfile prove` on 0.5 or later replaces it.
+//! A marker records the sign-test message version its report declares (`message_version`; the
+//! report is the operator's attestation): 2 for a report of a 0.5 or later `verify-key`, whose
+//! signatures are bound to each quorum, the sharing and a fresh challenge — accepted only when
+//! every sign-test row carries its own well-formed challenge; 1 for an older report, and for a
+//! marker written before the field existed. A marker that states a version this release does not
+//! know reads as unreadable (the epoch is not proven). `backup-retain` warns about a version 1
+//! marker it relies on; re-running `verify-key --sign-test` and `keyfile prove` on 0.5 or later
+//! replaces it. A marker is never replaced by one of a lower version for the same sharing.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -128,6 +132,9 @@ struct ReportNode {
 struct ReportSign {
     signers: Vec<u16>,
     ok: bool,
+    /// Hex: the challenge of the call (version 2 reports).
+    #[serde(default)]
+    challenge: Option<String>,
 }
 
 fn refuse(msg: impl Into<String>) -> DaemonError {
@@ -264,6 +271,12 @@ pub fn prove(
              does not know"
         )));
     }
+    if message_version >= 2 && !distinct_challenges(&report.sign_test) {
+        return Err(refuse(
+            "the report is malformed: it states sign-test message version 2, but not every \
+             sign-test row carries its own 32-byte challenge",
+        ));
+    }
 
     let marker = Marker {
         v: MARKER_VERSION,
@@ -276,21 +289,56 @@ pub fn prove(
         statement: STATEMENT.to_string(),
         message_version,
     };
-    // An equal marker already there keeps its time: stamping again must not restart the clock that
-    // retention measures the epoch's age by. A report of a newer sign-test message version replaces
-    // it (a fresh marker, so its age starts again); an older one never replaces a newer one.
-    // A marker dated in the future proves nothing (see `proves`), so it is replaced, not kept.
+    let _lock = lock_marker(keys_dir, &live.key_id, live.epoch)?;
     if let Some(existing) = read_marker(keys_dir, &live.key_id, live.epoch) {
         if existing.group_key == marker.group_key
             && existing.pkp_digest == marker.pkp_digest
-            && existing.proven_ms <= now_ms
-            && existing.message_version >= marker.message_version
+            && keeps(&existing, &marker, now_ms)
         {
             return Ok((existing, false));
         }
     }
     write_marker(keys_dir, &marker)?;
     Ok((marker, true))
+}
+
+/// Whether the marker already there for the same sharing stays instead of `new`. A lower version
+/// never replaces a higher one, whatever the times. For the same version the existing marker keeps
+/// its time (stamping again must not restart the clock that retention measures the epoch's age
+/// by), unless it is dated in the future: it then proves nothing (see `proves`) and is replaced.
+/// A higher version replaces it with a fresh marker, so the epoch's age starts again.
+fn keeps(existing: &Marker, new: &Marker, now_ms: u64) -> bool {
+    match existing.message_version.cmp(&new.message_version) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Equal => existing.proven_ms <= now_ms,
+        std::cmp::Ordering::Less => false,
+    }
+}
+
+/// Whether every sign-test row carries a 32-byte challenge (hex) and no two rows share one.
+fn distinct_challenges(rows: &[ReportSign]) -> bool {
+    let mut seen = BTreeSet::new();
+    rows.iter().all(|r| {
+        r.challenge
+            .as_deref()
+            .and_then(|h| hex::decode(h).ok())
+            .filter(|c| c.len() == crate::verify_key::SIGN_TEST_CHALLENGE_LEN)
+            .is_some_and(|c| seen.insert(c))
+    })
+}
+
+/// An exclusive lock on the marker of `key_id` at `epoch` (a lock file beside it), held until the
+/// returned file is dropped.
+fn lock_marker(keys_dir: &Path, key_id: &str, epoch: u64) -> Result<std::fs::File> {
+    let dir = keys_dir.join(DIR);
+    std::fs::create_dir_all(&dir)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(format!("{key_id}.{epoch}.lock")))?;
+    file.lock()?;
+    Ok(file)
 }
 
 /// Write the marker: a temp file in the same directory, fsynced, renamed into place.
@@ -323,11 +371,13 @@ fn write_marker(keys_dir: &Path, marker: &Marker) -> Result<()> {
 }
 
 /// The marker of `key_id` at `epoch`, if there is a well-formed one for exactly that key and epoch.
-/// Anything else (absent, unreadable, malformed, another key or epoch inside) is `None`.
+/// Anything else (absent, unreadable, malformed, another key or epoch inside, a sign-test message
+/// version this release does not know) is `None`.
 pub fn read_marker(keys_dir: &Path, key_id: &str, epoch: u64) -> Option<Marker> {
     let bytes = std::fs::read(marker_path(keys_dir, key_id, epoch)).ok()?;
     let m: Marker = serde_json::from_slice(&bytes).ok()?;
-    (m.v == MARKER_VERSION && m.key_id == key_id && m.epoch == epoch).then_some(m)
+    let known = (1..=crate::verify_key::SIGN_TEST_MESSAGE_VERSION).contains(&m.message_version);
+    (m.v == MARKER_VERSION && known && m.key_id == key_id && m.epoch == epoch).then_some(m)
 }
 
 /// Whether `marker` proves the sharing with this PKP digest (hex) at `now_ms`: same sharing, and
@@ -668,11 +718,106 @@ mod tests {
         assert_eq!(m.pkp_digest, hex::encode([4u8; 32]));
     }
 
-    /// [`report`] as a 0.5 `verify-key` writes it: it states sign-test message version 2.
+    /// [`report`] as a 0.5 `verify-key` writes it: it states sign-test message version 2, and
+    /// every row carries its own challenge.
     fn report_v2() -> serde_json::Value {
         let mut r = report();
         r["sign_test_message_version"] = 2.into();
+        for (i, row) in r["sign_test"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .enumerate()
+        {
+            row["challenge"] = hex::encode([i as u8 + 1; 32]).into();
+        }
         r
+    }
+
+    #[test]
+    fn a_version_2_report_needs_a_distinct_well_formed_challenge_on_every_row() {
+        let mut cases: Vec<(&str, serde_json::Value)> = Vec::new();
+        let mut r = report_v2();
+        r["sign_test"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("challenge");
+        cases.push(("a row without one", r));
+        let mut r = report_v2();
+        r["sign_test"][2]["challenge"] = hex::encode([1u8; 31]).into();
+        cases.push(("31 bytes", r));
+        let mut r = report_v2();
+        r["sign_test"][2]["challenge"] = "zz".repeat(32).into();
+        cases.push(("not hex", r));
+        let mut r = report_v2();
+        r["sign_test"][2]["challenge"] = r["sign_test"][0]["challenge"].clone();
+        cases.push(("two rows share one", r));
+        for (why, r) in cases {
+            let d = tempfile::tempdir().unwrap();
+            let err = run(d.path(), &r, &live(), 1).unwrap_err();
+            assert!(err.to_string().contains("malformed"), "{why}: {err}");
+            assert!(!d.path().join(DIR).exists(), "{why}: nothing written");
+        }
+    }
+
+    #[test]
+    fn a_marker_of_a_version_this_release_does_not_know_reads_as_none() {
+        let d = tempfile::tempdir().unwrap();
+        let (m, _) = run(d.path(), &report_v2(), &live(), 1).unwrap();
+        for v in [0u8, 3] {
+            let unknown = Marker {
+                message_version: v,
+                ..m.clone()
+            };
+            std::fs::write(
+                marker_path(d.path(), KEY, 3),
+                serde_json::to_vec(&unknown).unwrap(),
+            )
+            .unwrap();
+            assert!(read_marker(d.path(), KEY, 3).is_none(), "version {v}");
+        }
+    }
+
+    #[test]
+    fn a_version_1_report_never_replaces_a_version_2_marker_whatever_the_times() {
+        let d = tempfile::tempdir().unwrap();
+        // A version 2 marker dated in the future (a clock set back since).
+        run(d.path(), &report_v2(), &live(), 9_000).unwrap();
+        let (kept, wrote) = run(d.path(), &report(), &live(), 1_000).unwrap();
+        assert!(!wrote);
+        assert_eq!((kept.message_version, kept.proven_ms), (2, 9_000));
+        // A version 2 report restamps it.
+        let (m, wrote) = run(d.path(), &report_v2(), &live(), 2_000).unwrap();
+        assert!(wrote);
+        assert_eq!((m.message_version, m.proven_ms), (2, 2_000));
+        // Restamping the same version keeps the first time.
+        let (again, wrote) = run(d.path(), &report_v2(), &live(), 5_000).unwrap();
+        assert!(!wrote);
+        assert_eq!(again.proven_ms, 2_000);
+    }
+
+    #[test]
+    fn prove_waits_for_the_markers_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let d = tempfile::tempdir().unwrap();
+        let held = lock_marker(d.path(), KEY, 3).unwrap();
+        let (done, finished) = mpsc::channel();
+        let dir = d.path().to_path_buf();
+        let writer = std::thread::spawn(move || {
+            let r = run(&dir, &report_v2(), &live(), 1);
+            done.send(()).unwrap();
+            r
+        });
+        assert!(
+            finished.recv_timeout(Duration::from_millis(300)).is_err(),
+            "prove ran while another holder had the marker's lock"
+        );
+        assert!(read_marker(d.path(), KEY, 3).is_none());
+        drop(held);
+        finished.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(writer.join().unwrap().unwrap().1);
+        assert_eq!(read_marker(d.path(), KEY, 3).unwrap().message_version, 2);
     }
 
     #[test]

@@ -256,10 +256,11 @@ then has the cluster sign with **every `t`-subset** of cosigners — `C(n,t)` si
 2-of-3, `{1,2}`, `{1,3}`, `{2,3}`, the leader rotating — through `CeremonySignTest`: the cosigners
 sign exactly that quorum, over the version 2 sign-test message. verify-key draws a fresh 32-byte
 challenge for every call; the message is `0x1220 ‖ SHA-256` over the domain tag
-`rutli-verify-key/v2` followed by the length-prefixed (u64, big-endian) CEREMONY, KEY_ID, epoch
+`rutli-verify-key-v2/` followed by the length-prefixed (u64, big-endian) CEREMONY, KEY_ID, epoch
 (u64), PKP digest, sorted signer identifiers (u16 each) and challenge. The leader and every member
 compute it themselves from their own live share; a member joins only a quorum of exactly `t`
-distinct cosigners that includes it. verify-key recomputes the message from the epoch and digest
+distinct cosigners of the key's roster that includes it, and checks this whether or not it has a
+signing policy. verify-key recomputes the message from the epoch and digest
 every node reported, and checks each signature with `verify_strict` under the Canton key, so each
 signature is bound to the quorum, the sharing and the challenge of this run. (The message is
 domain-separated from every hash Canton signs: Canton hashes `be_i32(HashPurpose.id) ‖ content`

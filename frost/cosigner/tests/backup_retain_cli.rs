@@ -241,6 +241,14 @@ fn old_epochs_go_only_after_the_new_one_is_proven_and_never_on_a_dry_run() {
     // The same epoch proven again from a 0.5 report (version 2): the warning is gone.
     let mut v2 = report;
     v2["sign_test_message_version"] = 2.into();
+    for (i, row) in v2["sign_test"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        row["challenge"] = hex::encode([i as u8 + 1; 32]).into();
+    }
     std::fs::write(&report_path, v2.to_string()).unwrap();
     let reproved = cosigner(
         &cfg,
