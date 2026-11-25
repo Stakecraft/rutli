@@ -254,13 +254,23 @@ each node's own verifying share is the package's; the package interpolates for `
 provenance. A public view can be perfect while a node's *secret* share is wrong, so `--sign-test`
 then has the cluster sign with **every `t`-subset** of cosigners — `C(n,t)` signatures, 3 for
 2-of-3, `{1,2}`, `{1,3}`, `{2,3}`, the leader rotating — through `CeremonySignTest`: the cosigners
-sign exactly that quorum, over a digest they compute themselves from the key's provenance,
-`0x1220 ‖ SHA-256("rutli-verify-key/" ‖ CEREMONY ‖ KEY_ID)`, and verify-key checks each with
-`verify_strict` under the Canton key. (That digest is domain-separated from every hash Canton signs:
-Canton hashes `be_i32(HashPurpose.id) ‖ content` (`HashBuilder.scala:192-205`), every purpose Canton
-3.6.1 defines is 1–68, or −1 for test hashes (`HashPurpose.scala:52-123`), and this preimage starts
-with the ASCII bytes `rutl`, which as a purpose would be 0x7275746C = 1 920 300 140; equal digests would take a
-SHA-256 collision. The operator role cannot ask for any other message, and cannot `Sign`.)
+sign exactly that quorum, over the version 2 sign-test message. verify-key draws a fresh 32-byte
+challenge for every call; the message is `0x1220 ‖ SHA-256` over the domain tag
+`rutli-verify-key/v2` followed by the length-prefixed (u64, big-endian) CEREMONY, KEY_ID, epoch
+(u64), PKP digest, sorted signer identifiers (u16 each) and challenge. The leader and every member
+compute it themselves from their own live share; a member joins only a quorum of exactly `t`
+distinct cosigners that includes it. verify-key recomputes the message from the epoch and digest
+every node reported, and checks each signature with `verify_strict` under the Canton key, so each
+signature is bound to the quorum, the sharing and the challenge of this run. (The message is
+domain-separated from every hash Canton signs: Canton hashes `be_i32(HashPurpose.id) ‖ content`
+(`HashBuilder.scala:192-205`), every purpose Canton 3.6.1 defines is 1–68, or −1 for test hashes
+(`HashPurpose.scala:52-123`), and this preimage starts with the ASCII bytes `rutl`, which as a
+purpose would be 0x7275746C = 1 920 300 140; equal digests would take a SHA-256 collision. The
+operator role chooses only the quorum and the challenge, never the message, and cannot `Sign`.)
+
+A request without a challenge (a 0.4.x verify-key) gets the version 1 message,
+`0x1220 ‖ SHA-256("rutli-verify-key/" ‖ CEREMONY ‖ KEY_ID)`, until 0.6 (issue #325). A 0.5
+verify-key accepts only version 2: run it after every cosigner runs 0.5 or later.
 
 **Gate B:** `OK`, refresh count 0, digest = `dealer-record.json`, every one of the `C(n,t)` quorums
 verified.

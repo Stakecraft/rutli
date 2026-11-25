@@ -320,7 +320,12 @@ or sharing than this node's live ones, or when this node's live epoch is not the
 that missed the refresh cannot stamp it. **The report is the operator's statement**: the node cannot
 check who produced it, so the marker records the report's SHA-256 and this node's clock. A marker
 dated in the future is ignored (and replaced when stamped again); stamping again otherwise keeps the
-first time. `rutli_key_epoch_proven{key}` is `1` while the live epoch has a marker for the live
+first time. The marker states the sign-test message version of its report (`message_version`): 2
+for a report of a 0.5 or later `verify-key`, 1 for an older one and for a marker written before
+the field existed. A version 1 marker still counts, and `backup-retain` prints a
+`BACKUP_RETENTION_WARNING … proof=version-1` line for it until the epoch is proven again on 0.5 or
+later (a version 2 report replaces a version 1 marker; never the reverse).
+`rutli_key_epoch_proven{key}` is `1` while the live epoch has a marker for the live
 sharing; `RutliKeyEpochUnproven` fires when it is `0` and the live key file is more than three days old
 (the file's age is the time since the epoch was installed, or since the file was last re-sealed).
 After upgrading to a release that has this command, every key whose file is older than three days

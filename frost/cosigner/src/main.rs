@@ -2116,6 +2116,9 @@ async fn run_sign_test(
         .map(|p| (p.identifier, (p.endpoint.as_str(), p.server_name())))
         .collect();
     for (leader, signers) in sign_test_plan(&roster, threshold) {
+        // A fresh challenge per call: each signature is bound to this run and this quorum.
+        let mut challenge = [0u8; rutli_cosigner::verify_key::SIGN_TEST_CHALLENGE_LEN];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut challenge);
         let (Some((endpoint, server_name)), Some(client)) =
             (endpoints.get(&leader), clients.get(&leader))
         else {
@@ -2123,33 +2126,48 @@ async fn run_sign_test(
             report.record_signature(
                 leader,
                 &signers,
+                &challenge,
                 Err("the leader is not in the roster".into()),
             );
             continue;
         };
-        let endpoint = *endpoint;
-        let result = sign_test_once(client, probe, endpoint, server_name, key_id, &signers).await;
-        report.record_signature(leader, &signers, result);
+        let call = SignTestCall {
+            endpoint,
+            server_name: server_name.as_str(),
+            key_id,
+            signers: &signers,
+            challenge: &challenge,
+        };
+        let result = sign_test_once(client, probe, &call).await;
+        report.record_signature(leader, &signers, &challenge, result);
     }
+}
+
+/// What one `CeremonySignTest` call asks of its leader.
+struct SignTestCall<'a> {
+    endpoint: &'a str,
+    server_name: &'a str,
+    key_id: &'a str,
+    signers: &'a [u16],
+    challenge: &'a [u8; rutli_cosigner::verify_key::SIGN_TEST_CHALLENGE_LEN],
 }
 
 /// One `CeremonySignTest` call to the leader: `(message, signature)`, or the explained error.
 async fn sign_test_once(
     client: &NodeClient,
     probe: Option<&rutli_cosigner::tls_probe::TlsProbe>,
-    endpoint: &str,
-    server_name: &str,
-    key_id: &str,
-    signers: &[u16],
+    call: &SignTestCall<'_>,
 ) -> std::result::Result<(Vec<u8>, Vec<u8>), String> {
     use rutli_cosigner::pb::CeremonySignTestRequest;
 
+    let (endpoint, server_name) = (call.endpoint, call.server_name);
     match client {
         Ok(c) => match c
             .clone()
             .ceremony_sign_test(CeremonySignTestRequest {
-                key_id: key_id.to_string(),
-                signers: signers.iter().map(|&s| u32::from(s)).collect(),
+                key_id: call.key_id.to_string(),
+                signers: call.signers.iter().map(|&s| u32::from(s)).collect(),
+                challenge: call.challenge.to_vec(),
             })
             .await
         {
@@ -2189,6 +2207,9 @@ fn print_verify_report(
             "  origin {origin} epoch {epoch} refreshes {refreshes} threshold {}",
             report.threshold
         );
+    }
+    if let Some(v) = report.sign_test_message_version {
+        println!("  sign test message version {v}");
     }
     for s in &report.sign_test {
         println!(
@@ -2651,6 +2672,15 @@ fn backup_retain_command(
             println!("BACKUP_RETENTION_SKIPPED node={node} mode=count-cap-only reason=\"{why}\"");
         }
         None => {}
+    }
+    // Version 1 proofs still count in 0.5; version 1 goes in 0.6 (issue #325).
+    let keys_dir = cfg.data_dir.join("keys");
+    for (key, epoch) in r::read_version1_proofs(&keys_dir, rutli_cosigner::intent::now_ms()) {
+        println!(
+            "BACKUP_RETENTION_WARNING node={node} key={key} epoch={epoch} proof=version-1 \
+             note=\"the proof of this epoch was recorded from a version 1 sign test; re-run \
+             verify-key --sign-test and keyfile prove on 0.5 or later\""
+        );
     }
     println!("BACKUP_RETENTION_DONE node={node} archives={} kept={kept} deleted={deleted} dry_run={dry_run}", plan.verdicts.len());
     Ok(())
@@ -3525,6 +3555,14 @@ fn keyfile_prove(
         marker.group_key,
         marker.report_sha256
     );
+    println!("sign-test message version {}", marker.message_version);
+    if marker.message_version < rutli_cosigner::verify_key::SIGN_TEST_MESSAGE_VERSION {
+        println!(
+            "WARNING: the report comes from a version 1 sign test (a verify-key older than 0.5). \
+             The proof counts, and backup-retain warns about it: re-run verify-key --sign-test \
+             and keyfile prove on 0.5 or later."
+        );
+    }
     println!(
         "NOTE: this marker is YOUR statement. This node checked that the report is consistent \
          and agrees with its own epoch, sharing and group key; it cannot check who produced the \

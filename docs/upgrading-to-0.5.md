@@ -191,10 +191,13 @@ nodes still pin its unchanged key. With the Helm chart, roll back the chart and 
 
 - Every node: `check-config` exits 0 under `production`; `rutli_peer_pins_unpinned` is 0.
 - `verify-key` for every key reports one epoch and no stale node.
+- Run `verify-key --sign-test` and `keyfile prove` only after every node runs 0.5. A 0.4.x node
+  answers only the version 1 sign test, which a 0.5 `verify-key` refuses.
 - Expect `RutliKeyEpochUnproven` for every key whose key file is more than three days old, until
   you prove its epoch: `verify-key --sign-test --json` from a workstation, then `keyfile prove` on
   every node ([ceremonies.md](ceremonies.md), "Proving an epoch"). Do it after the first refresh
-  on 0.5.0 too.
+  on 0.5.0 too. A proof recorded from an older `verify-key` report (sign-test message version 1)
+  still counts, and `backup-retain` warns about it until the epoch is proven again on 0.5.
 - Then, in your own time: key-file v2 and `accept_v1: false`, and per-node seal bundles if you still
   share one seal secret ([runbook-per-node-seal.md](runbook-per-node-seal.md)). Both are on the
   production list.

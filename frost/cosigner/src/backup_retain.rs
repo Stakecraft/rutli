@@ -97,6 +97,9 @@ pub struct Proof {
     pub digest: String,
     /// Age in milliseconds: the smaller of the recorded time's and the file's.
     pub age_ms: u64,
+    /// The sign-test message version the marker states ([`crate::proof::Marker::message_version`]).
+    /// A version 1 proof still counts in 0.5; [`version1_proofs`] names the ones retention leans on.
+    pub message_version: u8,
 }
 
 pub struct Settings {
@@ -801,10 +804,41 @@ pub fn read_proofs(keys_dir: &Path, now_ms: u64) -> BTreeMap<(String, u64), Proo
             Proof {
                 digest: marker.pkp_digest,
                 age_ms,
+                message_version: marker.message_version,
             },
         );
     }
     out
+}
+
+/// The proofs retention leans on that were recorded from a version 1 sign test: for each live key,
+/// its highest proven epoch, when that marker states message version 1. They still count in 0.5;
+/// the caller warns, so that the operator re-runs `verify-key --sign-test` and `keyfile prove` on
+/// 0.5 or later (version 1 goes in 0.6, issue #325). Pure: no I/O.
+pub fn version1_proofs(
+    live: &BTreeMap<String, Option<KeyInfo>>,
+    proofs: &BTreeMap<(String, u64), Proof>,
+) -> Vec<(String, u64)> {
+    let mut highest: BTreeMap<&String, (u64, &Proof)> = BTreeMap::new();
+    for ((key, epoch), proof) in proofs {
+        if live.contains_key(key) && highest.get(key).is_none_or(|(e, _)| epoch > e) {
+            highest.insert(key, (*epoch, proof));
+        }
+    }
+    highest
+        .into_iter()
+        .filter(|(_, (_, p))| p.message_version < crate::verify_key::SIGN_TEST_MESSAGE_VERSION)
+        .map(|(k, (e, _))| (k.clone(), e))
+        .collect()
+}
+
+/// [`version1_proofs`] of the live keys and markers on disk now; empty when the key directory
+/// cannot be listed (`run` reports that).
+pub fn read_version1_proofs(keys_dir: &Path, now_ms: u64) -> Vec<(String, u64)> {
+    let Ok(live) = read_live(keys_dir) else {
+        return Vec::new();
+    };
+    version1_proofs(&live, &read_proofs(keys_dir, now_ms))
 }
 
 /// Run retention on `dir`: read, plan, and (unless `dry_run`) delete. Returns the plan. Any error
@@ -896,6 +930,7 @@ mod tests {
                     Proof {
                         digest: d.to_string(),
                         age_ms: *age,
+                        message_version: 2,
                     },
                 )
             })
@@ -1640,6 +1675,7 @@ mod tests {
             proven_ms: now - 10 * DAY,
             report_sha256: "r".into(),
             statement: crate::proof::STATEMENT.into(),
+            message_version: 2,
         };
         std::fs::create_dir_all(keys.join(crate::proof::DIR)).unwrap();
         std::fs::write(
@@ -1709,6 +1745,7 @@ mod tests {
             proven_ms: now + DAY,
             report_sha256: "r".into(),
             statement: crate::proof::STATEMENT.into(),
+            message_version: 2,
         };
         std::fs::create_dir_all(keys.join(crate::proof::DIR)).unwrap();
         std::fs::write(
@@ -1728,6 +1765,46 @@ mod tests {
         assert!(
             proofs[&("k".to_string(), 3)].age_ms < DAY,
             "the file's age wins: {proofs:?}"
+        );
+    }
+
+    #[test]
+    fn a_version_1_proof_still_counts_and_is_named_for_a_warning() {
+        let d = tempfile::tempdir().unwrap();
+        let keys = d.path();
+        std::fs::write(keys.join("k.json"), v2_file("k", 3, "d3")).unwrap();
+        let now = crate::intent::now_ms();
+        // A marker as an earlier build wrote it: no message version, so version 1.
+        let marker = serde_json::json!({
+            "v": 1, "key_id": "k", "epoch": 3, "group_key": "g", "pkp_digest": "d3",
+            "proven_ms": now - DAY, "report_sha256": "r",
+            "statement": crate::proof::STATEMENT,
+        });
+        std::fs::create_dir_all(keys.join(crate::proof::DIR)).unwrap();
+        std::fs::write(crate::proof::marker_path(keys, "k", 3), marker.to_string()).unwrap();
+        let on_disk = read_proofs(keys, now);
+        assert_eq!(
+            on_disk[&("k".to_string(), 3)].message_version,
+            1,
+            "it still counts"
+        );
+        assert_eq!(read_version1_proofs(keys, now), vec![("k".to_string(), 3)]);
+
+        // Pure: only a live key's highest proven epoch is named, and only when it is version 1.
+        let mut p = proofs(&[
+            ("k", 2, "d2", DAY),
+            ("k", 3, "d3", DAY),
+            ("gone", 1, "d", DAY),
+        ]);
+        for proof in p.values_mut() {
+            proof.message_version = 1;
+        }
+        let l = live(&[("k", 3, "d3")]);
+        assert_eq!(version1_proofs(&l, &p), vec![("k".to_string(), 3)]);
+        p.get_mut(&("k".to_string(), 3)).unwrap().message_version = 2;
+        assert!(
+            version1_proofs(&l, &p).is_empty(),
+            "the newest proof is version 2"
         );
     }
 }

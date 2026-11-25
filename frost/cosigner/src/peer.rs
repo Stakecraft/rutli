@@ -1348,25 +1348,7 @@ impl PeerApi for GrpcPeer {
         ctx: &Round1Ctx,
         deadline: Duration,
     ) -> Result<SigningCommitments> {
-        let msg = pb::SignRound1Request {
-            key_id: key_id.into(),
-            session_id: session_id.into(),
-            epoch: ctx.leader_view.map(|v| v.0).unwrap_or(0),
-            pkp_digest: ctx.leader_view.map(|v| v.1.to_vec()).unwrap_or_default(),
-            message: ctx.message.clone().unwrap_or_default(),
-            signers: ctx
-                .signers
-                .iter()
-                .flatten()
-                .map(|&i| u32::from(i))
-                .collect(),
-            intent: ctx.intent.clone(),
-            purpose: if ctx.sign_test {
-                crate::intent::PURPOSE_SIGN_TEST.into()
-            } else {
-                String::new()
-            },
-        };
+        let msg = round1_request(key_id, session_id, ctx);
         let leader_view = ctx.leader_view;
         let reply = self
             .inner
@@ -2027,6 +2009,33 @@ fn to_group_key(bytes: Vec<u8>) -> Result<[u8; 32]> {
         .map_err(|_| crate::DaemonError::Disagreement("group key not 32 bytes".into()))
 }
 
+/// The `SignRound1Request` a leader sends a member for `ctx` (see the proto).
+fn round1_request(key_id: &str, session_id: &str, ctx: &Round1Ctx) -> pb::SignRound1Request {
+    pb::SignRound1Request {
+        key_id: key_id.into(),
+        session_id: session_id.into(),
+        epoch: ctx.leader_view.map(|v| v.0).unwrap_or(0),
+        pkp_digest: ctx.leader_view.map(|v| v.1.to_vec()).unwrap_or_default(),
+        message: ctx.message.clone().unwrap_or_default(),
+        signers: ctx
+            .signers
+            .iter()
+            .flatten()
+            .map(|&i| u32::from(i))
+            .collect(),
+        intent: ctx.intent.clone(),
+        purpose: if ctx.sign_test {
+            crate::intent::PURPOSE_SIGN_TEST.into()
+        } else {
+            String::new()
+        },
+        sign_test_challenge: ctx
+            .sign_test_challenge
+            .map(|c| c.to_vec())
+            .unwrap_or_default(),
+    }
+}
+
 #[cfg(test)]
 mod node_number_tests {
     use super::*;
@@ -2053,5 +2062,40 @@ mod node_number_tests {
         assert_eq!(from_pb_wrapped(wrapped(2)).unwrap().recipient, 2);
         assert!(from_pb_wrapped(wrapped(65538)).is_err());
         assert!(from_pb_wrapped(None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod round1_request_tests {
+    use super::*;
+
+    #[test]
+    fn a_sign_test_round_carries_its_challenge_and_other_rounds_none() {
+        let ctx = Round1Ctx {
+            leader_view: Some((4, [6; 32])),
+            message: Some(vec![1; 34]),
+            signers: Some(vec![1, 2]),
+            sign_test: true,
+            sign_test_challenge: Some([9; 32]),
+            ..Default::default()
+        };
+        let r = round1_request("k", "s", &ctx);
+        assert_eq!(r.purpose, crate::intent::PURPOSE_SIGN_TEST);
+        assert_eq!(r.sign_test_challenge, vec![9; 32]);
+        assert_eq!((r.epoch, r.pkp_digest), (4, vec![6; 32]));
+        assert_eq!(r.signers, vec![1, 2]);
+        // Version 1 sign test, and an ordinary sign: no challenge on the wire.
+        let v1 = Round1Ctx {
+            sign_test_challenge: None,
+            ..ctx.clone()
+        };
+        assert!(round1_request("k", "s", &v1).sign_test_challenge.is_empty());
+        let sign = Round1Ctx {
+            sign_test: false,
+            sign_test_challenge: None,
+            ..ctx
+        };
+        let r = round1_request("k", "s", &sign);
+        assert!(r.sign_test_challenge.is_empty() && r.purpose.is_empty());
     }
 }

@@ -188,6 +188,12 @@ message CeremonySignTestRequest {
   string key_id = 1;
   // Configured identifiers of the quorum; exactly `threshold` distinct roster members.
   repeated uint32 signers = 2;
+  // Since 0.5.0: 32 fresh random bytes from the caller. With one, the signed message is the version
+  // 2 sign-test message, 0x1220 ‖ SHA-256 over the key id, its ceremony, the sharing (epoch and PKP
+  // digest), this quorum and this challenge (docs/split-ceremony.md, step 5); every member
+  // recomputes it from its own share. Empty: the version 1 message (kept for 0.4.x clients until
+  // 0.6). Any other length is refused (INVALID_ARGUMENT).
+  bytes challenge = 3;
 }
 message CeremonySignTestReply {
   bytes message = 1;    // the 34-byte digest that was signed (server-computed)
@@ -314,6 +320,13 @@ message SignRound1Request {
   // CeremonySignTest, which carries no intent and is accepted only for the node's OWN test digest
   // of key_id (computed from the key's provenance) as `message`.
   string purpose = 6;
+  // purpose "sign-test" since 0.5.0: the caller's challenge (CeremonySignTestRequest.challenge),
+  // forwarded unchanged. The node then accepts only the version 2 sign-test message it computes
+  // from its own share (epoch, PKP digest), the declared signer set and this challenge, and only
+  // when that set has exactly `threshold` distinct members including this node. Empty: the version
+  // 1 test digest. Any other length, or a challenge on another purpose, is refused
+  // (INVALID_ARGUMENT).
+  bytes sign_test_challenge = 9;
 }
 message SignRound1Reply { bytes commitments = 1; } // json SigningCommitments
 

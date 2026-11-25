@@ -7,9 +7,10 @@
 //!
 //! * **round 1** ([`SignGuard::authorize_round1`]), before any nonce exists: a signing intent is
 //!   verified in full ([`crate::intent::IntentVerifier::verify`]) and the session is bound to it
-//!   (its digest and its message); the split ceremony's sign test is accepted only for this node's
-//!   own test digest of the key; a round without either is refused when `require_intent` is on,
-//!   else accepted and counted;
+//!   (its digest and its message); the split ceremony's sign test is accepted only for the
+//!   sign-test message this node computes itself (with a challenge, the version 2 message from its
+//!   own share, for a quorum of exactly `t` that holds it); a round without either is refused when
+//!   `require_intent` is on, else accepted and counted;
 //! * **round 2** ([`SignGuard::check_round2`]), before the core binding checks: the leader presents
 //!   the same intent digest, the message is the intent's, the intent is still valid;
 //! * **release** ([`SignGuard::journal_release`]), from inside
@@ -225,8 +226,9 @@ impl SignGuard {
         Ok(None)
     }
 
-    /// Round 1 for `key_id`: what authorizes this session, or a refusal. `own_test_message` is this
-    /// node's split-ceremony test digest of the key (only asked for a sign-test round).
+    /// Round 1 for `key_id`: what authorizes this session, or a refusal. `own_test_message` is the
+    /// sign-test message this node computes for the round, or its refusal (only asked for a
+    /// sign-test round).
     pub fn authorize_round1(
         &self,
         key_id: &str,
@@ -250,7 +252,7 @@ impl SignGuard {
             if ctx.message.as_deref() != Some(mine.as_slice()) {
                 return Err(refused(
                     "sign-test",
-                    format!("a sign-test round for {key_id} must sign this node's own test digest of the key"),
+                    format!("a sign-test round for {key_id} must sign the sign-test message this node computes itself"),
                 ));
             }
             self.sign_test_limiter.check(key_id).map_err(|limited| {

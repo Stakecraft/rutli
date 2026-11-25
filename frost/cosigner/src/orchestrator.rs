@@ -1295,10 +1295,15 @@ fn combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
     out
 }
 
-/// The split ceremony's sign test (`Signer.CeremonySignTest`): sign the key's fixed test digest
-/// ([`Node::ceremony_test_message`], computed here from the key's provenance, never supplied by the
-/// caller) with **exactly** the quorum `signers` — no substitution if one of them fails — so
-/// `verify-key` can prove that every `t`-subset of cosigners signs. Returns (message, signature).
+/// The split ceremony's sign test (`Signer.CeremonySignTest`): sign the key's sign-test message
+/// with **exactly** the quorum `signers` — no substitution if one of them fails — so `verify-key`
+/// can prove that every `t`-subset of cosigners signs. Returns (message, signature).
+///
+/// With a `challenge`, the message is the version 2 one
+/// ([`Node::ceremony_test_message_v2`]: this node's ceremony id, its live sharing, `signers` and
+/// `challenge`), and the challenge goes to every member, which recomputes the message from its own
+/// share. Without one, it is the version 1 test digest ([`Node::ceremony_test_message`]), kept for
+/// a 0.4.x `verify-key` until 0.6 (issue #325). Either way the caller never supplies the message.
 ///
 /// Deliberately separate from [`sign`]: the production path keeps its "first `t` responders"
 /// quorum selection untouched.
@@ -1307,11 +1312,20 @@ pub async fn ceremony_sign_test(
     peers: &Peers,
     key_id: &str,
     signers: &[u16],
+    challenge: Option<[u8; crate::verify_key::SIGN_TEST_CHALLENGE_LEN]>,
 ) -> Result<([u8; 34], [u8; 64])> {
     let (message, view) = {
         let key_id = key_id.to_owned();
-        node.blocking(move |n| Ok((n.ceremony_test_message(&key_id)?, n.signing_view(&key_id)?)))
-            .await?
+        let signers = signers.to_vec();
+        node.blocking(move |n| {
+            let view = n.signing_view(&key_id)?;
+            let message = match &challenge {
+                Some(c) => n.ceremony_test_message_v2(&key_id, view.view, &signers, c)?,
+                None => n.ceremony_test_message(&key_id)?,
+            };
+            Ok((message, view))
+        })
+        .await?
     };
     let threshold = view.threshold;
     let wanted: std::collections::BTreeSet<Identifier> = signers
@@ -1334,10 +1348,11 @@ pub async fn ceremony_sign_test(
     }
 
     // One attempt over exactly this quorum, with the leader's sharing like any sign. No intent: each
-    // member accepts a sign-test round only for its own test digest of the key.
+    // member accepts a sign-test round only for the sign-test message it computes itself.
     let ctx = crate::node::Round1Ctx {
         leader_view: Some(view.view),
         sign_test: true,
+        sign_test_challenge: challenge,
         ..Default::default()
     };
     let clock = SignClock::start(node.liveness(), None)?;

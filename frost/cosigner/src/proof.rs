@@ -21,6 +21,12 @@
 //!
 //! Writing a marker takes no lock and touches nothing on the signing path: the key files are only
 //! read, the marker is one new file.
+//!
+//! A marker states the version of the sign-test message its report was checked against
+//! (`message_version`): 2 for a report of a 0.5 or later `verify-key`, whose signatures are bound
+//! to each quorum, the sharing and a fresh challenge; 1 for an older report, and for a marker
+//! written before the field existed. `backup-retain` warns about a version 1 marker it relies on;
+//! re-running `verify-key --sign-test` and `keyfile prove` on 0.5 or later replaces it.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -40,6 +46,13 @@ pub const DIR: &str = ".proven";
 /// The version of the marker format.
 pub const MARKER_VERSION: u8 = 1;
 
+/// The sign-test message version of a report or marker that does not state one.
+pub const UNSTATED_MESSAGE_VERSION: u8 = 1;
+
+fn unstated_message_version() -> u8 {
+    UNSTATED_MESSAGE_VERSION
+}
+
 /// One marker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -57,6 +70,10 @@ pub struct Marker {
     pub report_sha256: String,
     /// Always [`STATEMENT`]: what the marker is and is not.
     pub statement: String,
+    /// The sign-test message version the report was checked against (see the module docs);
+    /// absent in a marker written before it was recorded, which reads as version 1.
+    #[serde(default = "unstated_message_version")]
+    pub message_version: u8,
 }
 
 /// What the marker says about itself.
@@ -91,6 +108,9 @@ struct Report {
     nodes: Vec<ReportNode>,
     #[serde(default)]
     sign_test: Vec<ReportSign>,
+    /// Absent in a report of a `verify-key` from before version 2: version 1.
+    #[serde(default)]
+    sign_test_message_version: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,6 +255,16 @@ pub fn prove(
         }
     }
 
+    let message_version = report
+        .sign_test_message_version
+        .unwrap_or(UNSTATED_MESSAGE_VERSION);
+    if !(1..=crate::verify_key::SIGN_TEST_MESSAGE_VERSION).contains(&message_version) {
+        return Err(refuse(format!(
+            "the report states sign-test message version {message_version}, which this release \
+             does not know"
+        )));
+    }
+
     let marker = Marker {
         v: MARKER_VERSION,
         key_id: live.key_id.clone(),
@@ -244,14 +274,17 @@ pub fn prove(
         proven_ms: now_ms,
         report_sha256: hex::encode(Sha256::digest(report_bytes)),
         statement: STATEMENT.to_string(),
+        message_version,
     };
     // An equal marker already there keeps its time: stamping again must not restart the clock that
-    // retention measures the epoch's age by.
+    // retention measures the epoch's age by. A report of a newer sign-test message version replaces
+    // it (a fresh marker, so its age starts again); an older one never replaces a newer one.
     // A marker dated in the future proves nothing (see `proves`), so it is replaced, not kept.
     if let Some(existing) = read_marker(keys_dir, &live.key_id, live.epoch) {
         if existing.group_key == marker.group_key
             && existing.pkp_digest == marker.pkp_digest
             && existing.proven_ms <= now_ms
+            && existing.message_version >= marker.message_version
         {
             return Ok((existing, false));
         }
@@ -633,5 +666,64 @@ mod tests {
         let (m, wrote) = run(d.path(), &r, &l, 2).unwrap();
         assert!(wrote);
         assert_eq!(m.pkp_digest, hex::encode([4u8; 32]));
+    }
+
+    /// [`report`] as a 0.5 `verify-key` writes it: it states sign-test message version 2.
+    fn report_v2() -> serde_json::Value {
+        let mut r = report();
+        r["sign_test_message_version"] = 2.into();
+        r
+    }
+
+    #[test]
+    fn every_marker_states_the_sign_test_message_version_of_its_report() {
+        let d = tempfile::tempdir().unwrap();
+        let (m, _) = run(d.path(), &report_v2(), &live(), 1).unwrap();
+        assert_eq!(m.message_version, 2);
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(marker_path(d.path(), KEY, 3)).unwrap()).unwrap();
+        assert_eq!(written["message_version"], 2);
+        // A report that states no version comes from an older verify-key: version 1.
+        let other = tempfile::tempdir().unwrap();
+        let (m, _) = run(other.path(), &report(), &live(), 1).unwrap();
+        assert_eq!(m.message_version, 1);
+        // A version this release does not know is refused.
+        let mut r = report();
+        r["sign_test_message_version"] = 3.into();
+        let third = tempfile::tempdir().unwrap();
+        assert!(run(third.path(), &r, &live(), 1).is_err());
+        assert!(!third.path().join(DIR).exists());
+    }
+
+    #[test]
+    fn a_marker_written_before_the_version_was_recorded_reads_as_version_1() {
+        let d = tempfile::tempdir().unwrap();
+        let (m, _) = run(d.path(), &report_v2(), &live(), 1).unwrap();
+        // The same marker without the field, as an earlier build wrote it.
+        let mut old = serde_json::to_value(&m).unwrap();
+        old.as_object_mut().unwrap().remove("message_version");
+        std::fs::write(marker_path(d.path(), KEY, 3), old.to_string()).unwrap();
+        let read = read_marker(d.path(), KEY, 3).unwrap();
+        assert_eq!(read.message_version, 1);
+        assert_eq!(
+            Marker {
+                message_version: 2,
+                ..read
+            },
+            m
+        );
+    }
+
+    #[test]
+    fn a_version_2_report_replaces_a_version_1_marker_and_never_the_reverse() {
+        let d = tempfile::tempdir().unwrap();
+        run(d.path(), &report(), &live(), 1_000).unwrap();
+        let (m, wrote) = run(d.path(), &report_v2(), &live(), 2_000).unwrap();
+        assert!(wrote);
+        assert_eq!((m.message_version, m.proven_ms), (2, 2_000));
+        let (kept, wrote) = run(d.path(), &report(), &live(), 3_000).unwrap();
+        assert!(!wrote);
+        assert_eq!((kept.message_version, kept.proven_ms), (2, 2_000));
+        assert_eq!(read_marker(d.path(), KEY, 3).unwrap().message_version, 2);
     }
 }

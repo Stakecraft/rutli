@@ -2754,6 +2754,7 @@ async fn the_operator_certificate_reaches_only_the_operator_rpcs_and_every_signe
             op.ceremony_sign_test(pb::CeremonySignTestRequest {
                 key_id: key(),
                 signers: vec![1, 2],
+                ..Default::default()
             })
             .await
             .map(drop),
