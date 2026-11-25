@@ -199,16 +199,6 @@ pub fn plan(
     let mut sorted: Vec<&Archive> = archives.iter().collect();
     sorted.sort_by(|a, b| a.name.cmp(&b.name));
     let names: Vec<String> = sorted.iter().map(|a| a.name.clone()).collect();
-    let keep_all = |why: Why| -> Vec<(String, Verdict)> {
-        names
-            .iter()
-            .map(|n| (n.clone(), Verdict::Keep(why)))
-            .collect()
-    };
-    let closed = |reason: &str| Plan {
-        skip: Some(Skip::Closed(reason.into())),
-        verdicts: keep_all(Why::Protected),
-    };
 
     if sorted.is_empty() {
         return Plan {
@@ -218,111 +208,49 @@ pub fn plan(
     }
 
     // 0. What the epoch rule needs to exist at all.
-    if s.cluster_uuid.is_none() {
-        return cap_only(
-            &names,
-            s,
-            "this node has no keyfile.cluster_uuid, so no key-file header can be tied to it",
-        );
+    if let Some(early) = epoch_rule_blocked(&names, live, s) {
+        return early;
     }
-    if live.is_empty() {
-        return closed("this node lists no key files");
-    }
-    if live.values().any(std::option::Option::is_none) {
-        return cap_only(
-            &names,
-            s,
-            "a live key file has no readable v2 header (migrate the node's key files to v2)",
-        );
-    }
-    let live: BTreeMap<&String, &KeyInfo> = live
-        .iter()
-        .filter_map(|(k, i)| i.as_ref().map(|i| (k, i)))
-        .collect();
+    let live = live_key_infos(live);
 
     // 1. Fail closed on anything that says this node or its newest backup is not in step.
     let newest = *sorted.last().expect("not empty");
-    if !verified(newest, s) {
-        return closed(
-            "the newest archive cannot be read or is not a complete v2 backup of this node",
-        );
-    }
-    // Any readable header at a higher epoch than the live one, verified archive or not.
-    for a in &sorted {
-        let Ok(files) = &a.files else { continue };
-        for (stem, i) in files {
-            let (Some(i), Some(l)) = (i, live.get(stem)) else {
-                continue;
-            };
-            if i.kind == l.kind && is_frost(i) && i.epoch > l.epoch {
-                return closed("this node's live epoch is behind an archive's (a missed refresh: its older archives are its way back)");
-            }
-        }
-    }
-    let newest_keys: BTreeSet<&String> = newest.files.as_ref().expect("verified").keys().collect();
-    let live_keys: BTreeSet<&String> = live.keys().copied().collect();
-    if newest_keys != live_keys {
-        return closed(
-            "the newest archive's key set is not the live key set (a backup is pending)",
-        );
-    }
-    for (stem, l) in &live {
-        let i = info(newest, stem).expect("same key set");
-        if i.kind != l.kind || i.epoch != l.epoch || i.digest != l.digest {
-            return closed(
-                "the newest archive is not at the live epoch and sharing (a backup is pending)",
-            );
-        }
+    if let Some(reason) = out_of_step_reason(&sorted, newest, &live, s) {
+        return plan_closed(&names, reason);
     }
 
+    // 2 to 4: the epoch rule, then the count cap.
+    let verdicts = epoch_rule_verdicts(&sorted, newest, live, proofs, s);
+
+    // Defensive: at least one verified archive is kept, always.
+    let kept_verified = verdicts.iter().any(|(n, v)| {
+        matches!(v, Verdict::Keep(_)) && sorted.iter().any(|a| &a.name == n && verified(a, s))
+    });
+    if !kept_verified {
+        return plan_closed(&names, "internal: the plan would leave no verified archive");
+    }
+    Plan {
+        skip: None,
+        verdicts,
+    }
+}
+
+/// Steps 2 to 4 of [`plan`]: the verdict of every archive from the epoch rule, then the count cap.
+fn epoch_rule_verdicts(
+    sorted: &[&Archive],
+    newest: &Archive,
+    live: BTreeMap<&String, &KeyInfo>,
+    proofs: &BTreeMap<(String, u64), Proof>,
+    s: &Settings,
+) -> Vec<(String, Verdict)> {
     // 2. P_k: the highest proven, old-enough epoch of each live FROST key whose digest is one we
     // hold. Other kinds (hosted keys, tombstones) have no epochs to prove.
-    let mut proven: BTreeMap<&String, (u64, &String)> = BTreeMap::new();
-    for ((key, epoch), proof) in proofs {
-        let Some(l) = live.get(key) else { continue };
-        if !is_frost(l) || proof.age_ms < s.min_proof_age_ms || *epoch > l.epoch {
-            continue;
-        }
-        let known = (*epoch == l.epoch && proof.digest == l.digest)
-            || sorted.iter().filter(|a| verified(a, s)).any(|a| {
-                info(a, key)
-                    .is_some_and(|i| is_frost(i) && i.epoch == *epoch && i.digest == proof.digest)
-            });
-        if !known {
-            continue;
-        }
-        if proven.get(key).is_none_or(|(e, _)| epoch > e) {
-            proven.insert(key, (*epoch, &proof.digest));
-        }
-    }
-    let frost_keys: Vec<&&String> = live
-        .iter()
-        .filter(|(_, l)| is_frost(l))
-        .map(|(k, _)| k)
-        .collect();
-    let all_proven = !frost_keys.is_empty() && frost_keys.iter().all(|k| proven.contains_key(**k));
+    let proven = proven_epochs(sorted, proofs, &live, s);
+    let all_proven = all_frost_keys_proven(&live, &proven);
 
     // 3. F: the newest verified archive that holds every live key as the proven sharing has it: FROST
     // keys at exactly their proven epoch and digest, every other key as it is live.
-    let holds_proven = |a: &Archive| -> bool {
-        verified(a, s)
-            && live.iter().all(|(k, l)| match proven.get(*k) {
-                Some((e, d)) => {
-                    info(a, k).is_some_and(|i| is_frost(i) && i.epoch == *e && &i.digest == *d)
-                }
-                None => {
-                    !is_frost(l)
-                        && info(a, k).is_some_and(|i| {
-                            i.kind == l.kind && i.epoch == l.epoch && i.digest == l.digest
-                        })
-                }
-            })
-    };
-    let proven_archive: Option<&Archive> = if all_proven {
-        sorted.iter().rev().copied().find(|a| holds_proven(a))
-    } else {
-        None
-    };
+    let proven_archive = find_proven_archive(sorted, &live, &proven, s, all_proven);
 
     // 4. Verdicts.
     let mut protected: BTreeSet<String> = BTreeSet::new();
@@ -330,71 +258,304 @@ pub fn plan(
     if let Some(f) = proven_archive {
         protected.insert(f.name.clone());
     }
-    // For keep_older_epochs: the distinct epochs below P_k that verified archives hold, per key.
-    let mut below: BTreeMap<&String, BTreeSet<u64>> = BTreeMap::new();
-    for a in sorted.iter().filter(|a| verified(a, s)) {
-        for (k, (p, _)) in &proven {
-            if let Some(i) = info(a, k) {
-                if i.epoch < *p {
-                    below.entry(k).or_default().insert(i.epoch);
-                }
-            }
-        }
-    }
-    let kept_older: BTreeMap<&String, BTreeSet<u64>> = below
-        .into_iter()
-        .map(|(k, set)| (k, set.into_iter().rev().take(s.keep_older_epochs).collect()))
-        .collect();
-
-    let mut verdicts: Vec<(String, Verdict)> = Vec::new();
-    for a in &sorted {
-        let verdict = if protected.contains(&a.name) {
-            Verdict::Keep(Why::Protected)
-        } else if !verified(a, s) {
-            Verdict::Keep(Why::EpochUnreadable)
-        } else {
-            let files = a.files.as_ref().expect("verified");
-            if files.keys().any(|k| !live.contains_key(k)) {
-                Verdict::Keep(Why::KeyNotLive)
-            } else if !all_proven {
-                Verdict::Keep(Why::UnprovenEpoch)
-            } else if let Some(f) = proven_archive {
-                classify(a, f, &live, &proven, &kept_older)
-            } else {
-                Verdict::Keep(Why::NoProvenArchive)
-            }
-        };
-        verdicts.push((a.name.clone(), verdict));
-    }
+    let kept_older = kept_older_epochs(sorted, &proven, s);
+    let rule = EpochRule {
+        live,
+        proven,
+        all_proven,
+        proven_archive,
+        kept_older,
+    };
+    let mut verdicts = epoch_verdicts(sorted, &protected, &rule, s);
 
     // The count cap, the hard bound on the directory. It only deletes an archive whose every key
     // state (key, kind, epoch, digest) another remaining archive holds as well, so it takes
     // duplicates and never the last copy of anything; and never the newest or the proven archive,
     // nor one it cannot read.
-    if s.keep_count > 0 {
-        let holders = |state: &(String, String, u64, String, String),
-                       verdicts: &[(String, Verdict)],
-                       except: &str|
-         -> bool {
-            sorted.iter().any(|b| {
-                b.name != except
-                    && verified(b, s)
-                    && verdicts
-                        .iter()
-                        .any(|(n, v)| *n == b.name && matches!(v, Verdict::Keep(_)))
-                    && info(b, &state.0).is_some_and(|i| {
-                        i.kind == state.1
-                            && i.epoch == state.2
-                            && i.digest == state.3
-                            && i.dek_id == state.4
+    apply_count_cap(&mut verdicts, sorted, &protected, s);
+    verdicts
+}
+
+/// What the epoch rule has worked out about the live keys and the archives, for the verdicts.
+struct EpochRule<'a> {
+    live: BTreeMap<&'a String, &'a KeyInfo>,
+    proven: BTreeMap<&'a String, (u64, &'a String)>,
+    all_proven: bool,
+    proven_archive: Option<&'a Archive>,
+    kept_older: BTreeMap<&'a String, BTreeSet<u64>>,
+}
+
+/// One key's state in an archive: key id, kind, epoch, digest and DEK id.
+type KeyState = (String, String, u64, String, String);
+
+/// A verdict of `Keep(why)` for every archive name.
+fn keep_all(names: &[String], why: Why) -> Vec<(String, Verdict)> {
+    names
+        .iter()
+        .map(|n| (n.clone(), Verdict::Keep(why)))
+        .collect()
+}
+
+/// A plan that keeps every archive and deletes nothing at all (fail closed).
+fn plan_closed(names: &[String], reason: &str) -> Plan {
+    Plan {
+        skip: Some(Skip::Closed(reason.into())),
+        verdicts: keep_all(names, Why::Protected),
+    }
+}
+
+/// The plan to return when the epoch rule cannot run at all: count cap only, or closed.
+fn epoch_rule_blocked(
+    names: &[String],
+    live: &BTreeMap<String, Option<KeyInfo>>,
+    s: &Settings,
+) -> Option<Plan> {
+    if s.cluster_uuid.is_none() {
+        return Some(cap_only(
+            names,
+            s,
+            "this node has no keyfile.cluster_uuid, so no key-file header can be tied to it",
+        ));
+    }
+    if live.is_empty() {
+        return Some(plan_closed(names, "this node lists no key files"));
+    }
+    if live.values().any(std::option::Option::is_none) {
+        return Some(cap_only(
+            names,
+            s,
+            "a live key file has no readable v2 header (migrate the node's key files to v2)",
+        ));
+    }
+    None
+}
+
+/// The live key files' headers by key id, once every one of them is known to be readable.
+fn live_key_infos(live: &BTreeMap<String, Option<KeyInfo>>) -> BTreeMap<&String, &KeyInfo> {
+    live.iter()
+        .filter_map(|(k, i)| i.as_ref().map(|i| (k, i)))
+        .collect()
+}
+
+/// Why to fail closed, if this node or its newest backup is not in step.
+fn out_of_step_reason(
+    sorted: &[&Archive],
+    newest: &Archive,
+    live: &BTreeMap<&String, &KeyInfo>,
+    s: &Settings,
+) -> Option<&'static str> {
+    if !verified(newest, s) {
+        return Some(
+            "the newest archive cannot be read or is not a complete v2 backup of this node",
+        );
+    }
+    if archive_ahead_of_live(sorted, live) {
+        return Some("this node's live epoch is behind an archive's (a missed refresh: its older archives are its way back)");
+    }
+    let newest_keys: BTreeSet<&String> = newest.files.as_ref().expect("verified").keys().collect();
+    let live_keys: BTreeSet<&String> = live.keys().copied().collect();
+    if newest_keys != live_keys {
+        return Some("the newest archive's key set is not the live key set (a backup is pending)");
+    }
+    for (stem, l) in live {
+        let i = info(newest, stem).expect("same key set");
+        if i.kind != l.kind || i.epoch != l.epoch || i.digest != l.digest {
+            return Some(
+                "the newest archive is not at the live epoch and sharing (a backup is pending)",
+            );
+        }
+    }
+    None
+}
+
+/// Whether any archive, verified or not, has a readable header at a higher epoch than the live one.
+fn archive_ahead_of_live(sorted: &[&Archive], live: &BTreeMap<&String, &KeyInfo>) -> bool {
+    for a in sorted {
+        let Ok(files) = &a.files else { continue };
+        for (stem, i) in files {
+            let (Some(i), Some(l)) = (i, live.get(stem)) else {
+                continue;
+            };
+            if i.kind == l.kind && is_frost(i) && i.epoch > l.epoch {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// `P_k`: the highest proven, old-enough epoch of each live FROST key whose digest is one we hold.
+/// Other kinds (hosted keys, tombstones) have no epochs to prove.
+fn proven_epochs<'a>(
+    sorted: &[&Archive],
+    proofs: &'a BTreeMap<(String, u64), Proof>,
+    live: &BTreeMap<&String, &KeyInfo>,
+    s: &Settings,
+) -> BTreeMap<&'a String, (u64, &'a String)> {
+    let mut proven: BTreeMap<&String, (u64, &String)> = BTreeMap::new();
+    for ((key, epoch), proof) in proofs {
+        let Some(l) = live.get(key) else { continue };
+        if !is_frost(l) || proof.age_ms < s.min_proof_age_ms || *epoch > l.epoch {
+            continue;
+        }
+        if !proof_digest_is_known(sorted, s, key, *epoch, proof, l) {
+            continue;
+        }
+        if proven.get(key).is_none_or(|(e, _)| epoch > e) {
+            proven.insert(key, (*epoch, &proof.digest));
+        }
+    }
+    proven
+}
+
+/// Whether the proof's digest is the live sharing's, or one a verified archive holds at that epoch.
+fn proof_digest_is_known(
+    sorted: &[&Archive],
+    s: &Settings,
+    key: &str,
+    epoch: u64,
+    proof: &Proof,
+    l: &KeyInfo,
+) -> bool {
+    (epoch == l.epoch && proof.digest == l.digest)
+        || sorted.iter().filter(|a| verified(a, s)).any(|a| {
+            info(a, key)
+                .is_some_and(|i| is_frost(i) && i.epoch == epoch && i.digest == proof.digest)
+        })
+}
+
+/// Whether every live FROST key has a proven epoch, and there is at least one such key.
+fn all_frost_keys_proven(
+    live: &BTreeMap<&String, &KeyInfo>,
+    proven: &BTreeMap<&String, (u64, &String)>,
+) -> bool {
+    let frost_keys: Vec<&&String> = live
+        .iter()
+        .filter(|(_, l)| is_frost(l))
+        .map(|(k, _)| k)
+        .collect();
+    !frost_keys.is_empty() && frost_keys.iter().all(|k| proven.contains_key(**k))
+}
+
+/// Whether a verified archive holds every live key as the proven sharing has it: FROST keys at
+/// exactly their proven epoch and digest, every other key as it is live.
+fn holds_proven_sharing(
+    a: &Archive,
+    live: &BTreeMap<&String, &KeyInfo>,
+    proven: &BTreeMap<&String, (u64, &String)>,
+    s: &Settings,
+) -> bool {
+    verified(a, s)
+        && live.iter().all(|(k, l)| match proven.get(*k) {
+            Some((e, d)) => {
+                info(a, k).is_some_and(|i| is_frost(i) && i.epoch == *e && &i.digest == *d)
+            }
+            None => {
+                !is_frost(l)
+                    && info(a, k).is_some_and(|i| {
+                        i.kind == l.kind && i.epoch == l.epoch && i.digest == l.digest
                     })
-            })
-        };
+            }
+        })
+}
+
+/// `F`: the newest verified archive that holds the proven sharing, if every live FROST key is proven.
+fn find_proven_archive<'a>(
+    sorted: &[&'a Archive],
+    live: &BTreeMap<&String, &KeyInfo>,
+    proven: &BTreeMap<&String, (u64, &String)>,
+    s: &Settings,
+    all_proven: bool,
+) -> Option<&'a Archive> {
+    if all_proven {
+        sorted
+            .iter()
+            .rev()
+            .copied()
+            .find(|a| holds_proven_sharing(a, live, proven, s))
+    } else {
+        None
+    }
+}
+
+/// For `keep_older_epochs`: per key, the highest distinct epochs below `P_k` that verified archives
+/// hold, at most `keep_older_epochs` of them.
+fn kept_older_epochs<'a>(
+    sorted: &[&Archive],
+    proven: &BTreeMap<&'a String, (u64, &String)>,
+    s: &Settings,
+) -> BTreeMap<&'a String, BTreeSet<u64>> {
+    // The distinct epochs below P_k that verified archives hold, per key.
+    let mut below: BTreeMap<&String, BTreeSet<u64>> = BTreeMap::new();
+    for a in sorted.iter().filter(|a| verified(a, s)) {
+        for (k, (p, _)) in proven {
+            if let Some(i) = info(a, k) {
+                if i.epoch < *p {
+                    below.entry(*k).or_default().insert(i.epoch);
+                }
+            }
+        }
+    }
+    below
+        .into_iter()
+        .map(|(k, set)| (k, set.into_iter().rev().take(s.keep_older_epochs).collect()))
+        .collect()
+}
+
+/// The verdict of every archive under the epoch rule, in archive order.
+fn epoch_verdicts(
+    sorted: &[&Archive],
+    protected: &BTreeSet<String>,
+    rule: &EpochRule<'_>,
+    s: &Settings,
+) -> Vec<(String, Verdict)> {
+    let mut verdicts: Vec<(String, Verdict)> = Vec::new();
+    for a in sorted {
+        let verdict = epoch_verdict(a, protected, rule, s);
+        verdicts.push((a.name.clone(), verdict));
+    }
+    verdicts
+}
+
+/// The verdict of one archive under the epoch rule.
+fn epoch_verdict(
+    a: &Archive,
+    protected: &BTreeSet<String>,
+    rule: &EpochRule<'_>,
+    s: &Settings,
+) -> Verdict {
+    if protected.contains(&a.name) {
+        Verdict::Keep(Why::Protected)
+    } else if !verified(a, s) {
+        Verdict::Keep(Why::EpochUnreadable)
+    } else {
+        let files = a.files.as_ref().expect("verified");
+        if files.keys().any(|k| !rule.live.contains_key(k)) {
+            Verdict::Keep(Why::KeyNotLive)
+        } else if !rule.all_proven {
+            Verdict::Keep(Why::UnprovenEpoch)
+        } else if let Some(f) = rule.proven_archive {
+            classify(a, f, &rule.live, &rule.proven, &rule.kept_older)
+        } else {
+            Verdict::Keep(Why::NoProvenArchive)
+        }
+    }
+}
+
+/// Apply the count cap to the verdicts: delete the oldest archives whose every key state another
+/// remaining archive holds, until at most `keep_count` remain.
+fn apply_count_cap(
+    verdicts: &mut [(String, Verdict)],
+    sorted: &[&Archive],
+    protected: &BTreeSet<String>,
+    s: &Settings,
+) {
+    if s.keep_count > 0 {
         let mut remaining = verdicts
             .iter()
             .filter(|(_, v)| matches!(v, Verdict::Keep(_)))
             .count();
-        for a in &sorted {
+        for a in sorted {
             if remaining <= s.keep_count {
                 break;
             }
@@ -408,25 +569,12 @@ pub fn plan(
             if protected.contains(&a.name) || !verified(a, s) || *why == Why::EpochUnreadable {
                 continue;
             }
-            let states: Vec<(String, String, u64, String, String)> = a
-                .files
-                .as_ref()
-                .expect("verified")
+            let states = archive_key_states(a);
+            let snapshot = verdicts.to_vec();
+            if states
                 .iter()
-                .filter_map(|(k, i)| {
-                    i.as_ref().map(|i| {
-                        (
-                            k.clone(),
-                            i.kind.clone(),
-                            i.epoch,
-                            i.digest.clone(),
-                            i.dek_id.clone(),
-                        )
-                    })
-                })
-                .collect();
-            let snapshot = verdicts.clone();
-            if states.iter().all(|st| holders(st, &snapshot, &a.name)) {
+                .all(|st| other_kept_archive_holds(sorted, s, st, &snapshot, &a.name))
+            {
                 if let Some((_, v)) = verdicts.get_mut(idx) {
                     *v = Verdict::DeleteCountCap;
                     remaining -= 1;
@@ -434,18 +582,49 @@ pub fn plan(
             }
         }
     }
+}
 
-    // Defensive: at least one verified archive is kept, always.
-    let kept_verified = verdicts.iter().any(|(n, v)| {
-        matches!(v, Verdict::Keep(_)) && sorted.iter().any(|a| &a.name == n && verified(a, s))
-    });
-    if !kept_verified {
-        return closed("internal: the plan would leave no verified archive");
-    }
-    Plan {
-        skip: None,
-        verdicts,
-    }
+/// The key states of a verified archive, one per readable key file.
+fn archive_key_states(a: &Archive) -> Vec<KeyState> {
+    a.files
+        .as_ref()
+        .expect("verified")
+        .iter()
+        .filter_map(|(k, i)| {
+            i.as_ref().map(|i| {
+                (
+                    k.clone(),
+                    i.kind.clone(),
+                    i.epoch,
+                    i.digest.clone(),
+                    i.dek_id.clone(),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Whether a verified archive other than `except`, still kept in `verdicts`, holds the key state.
+fn other_kept_archive_holds(
+    sorted: &[&Archive],
+    s: &Settings,
+    state: &KeyState,
+    verdicts: &[(String, Verdict)],
+    except: &str,
+) -> bool {
+    sorted.iter().any(|b| {
+        b.name != except
+            && verified(b, s)
+            && verdicts
+                .iter()
+                .any(|(n, v)| *n == b.name && matches!(v, Verdict::Keep(_)))
+            && info(b, &state.0).is_some_and(|i| {
+                i.kind == state.1
+                    && i.epoch == state.2
+                    && i.digest == state.3
+                    && i.dek_id == state.4
+            })
+    })
 }
 
 fn is_frost(i: &KeyInfo) -> bool {

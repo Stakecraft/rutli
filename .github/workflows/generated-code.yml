@@ -39,21 +39,42 @@ jobs:
       # (sha256sum of the two downloaded files; Central's .sha256 of the plugin agrees).
       PROTOC_SHA256: 5ae94ad986e83f0b52bd8139e036cbf94ddbba3ad348be8e4baf44447d7e19a4
       PROTOC_GEN_GRPC_JAVA_SHA256: 3a75d1a88b8fe44f4a1d5cb8f22c73f8fcc8d563aed9057ff5ea484b22cdaf2f
+      GEN_GRPC_CACHE_DIR: /home/runner/.cache/rutli-protoc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The two binaries, keyed by their pinned sha256 and checked again after a restore: Maven
+      # Central rate-limits the shared runner addresses (HTTP 429), so most runs should not download.
+      - name: Cache protoc and protoc-gen-grpc-java
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/rutli-protoc
+          # build.sbt holds the versions: a version change starts a new cache.
+          key: protoc-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.sbt') }}-${{ env.PROTOC_SHA256 }}-${{ env.PROTOC_GEN_GRPC_JAVA_SHA256 }}
       - name: Regenerate and compare
         run: |
           set -euo pipefail
+          # Exit 3 from the script is a failed download, not a difference in the stubs (it says so).
           scripts/gen-grpc-java.sh
-          if ! git diff --exit-code --stat -- driver/src/main/java; then
+          # git diff: 0 same, 1 different, anything else is git failing, not a result.
+          rc=0
+          git diff --exit-code --stat -- driver/src/main/java || rc=$?
+          if [ "$rc" -eq 1 ]; then
             echo "::error::driver/src/main/java is not what scripts/gen-grpc-java.sh generates from frost/cosigner/proto: run the script and commit the result"
             exit 1
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::git diff failed (exit ${rc}): the check could not compare"
+            exit 1
           fi
-          if [ -n "$(git status --porcelain -- driver/src/main/java)" ]; then
-            git status --short -- driver/src/main/java
-            echo "::error::the generator added or removed files under driver/src/main/java: commit them"
+          # New files, ignored ones included, whatever the git configuration says about untracked files.
+          if ! extra="$(git ls-files --others -- driver/src/main/java)"; then
+            echo "::error::git ls-files failed: the check could not compare"
+            exit 1
+          fi
+          if [ -n "$extra" ]; then
+            printf '%s\n' "$extra"
+            echo "::error::the generator added files under driver/src/main/java: commit them"
             exit 1
           fi
           echo "OK: generated stubs are current"

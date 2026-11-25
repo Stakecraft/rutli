@@ -1,0 +1,465 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+name: Release assets
+
+# The driver jar and the dealer binary of a release, built from the tag on GitHub-hosted runners,
+# each with an SPDX SBOM, a SHA256SUMS file, a keyless cosign signature (a Sigstore bundle per file)
+# and a GitHub build provenance attestation; everything is attached to the release for the tag.
+#   guard   refuses any ref that is not a v* tag (and carries the `release` environment)
+#   precheck stops a run for a release that already carries SHA256SUMS (before anything is signed)
+#   build-* the jar (sbt driver/assembly) and the dealer for linux-x86_64 and linux-aarch64, three
+#           jobs; each states the sha256 of its file as a job output
+#   sbom    the two SBOMs, from the built files, in a job without a signing identity or write access;
+#           checks the build digests, states the SBOM digests
+# Every job that reads another job's file compares it with the digest in that job's outputs: the jobs
+# of a run share the artifact token and could replace each other's artifacts, not each other's outputs.
+#   sign    the only job with a signing identity (id-token, attestations: write): checks that the
+#           build artifacts are exactly the expected files, then SBOMs, SHA256SUMS, signatures,
+#           provenance and the user's verification commands. No write access to the repository.
+#   publish the only job that may write to the release (contents: write): attaches the signed set;
+#           no signing identity
+# The container image has its own workflow (publish-image.yml), unchanged. How a user verifies these
+# files: docs/releasing.md, "Verify the release assets". release-assets-check.yml runs the same
+# scripts/release-assets.sh commands on pull requests with a throwaway key, so a broken step shows
+# before a tag.
+on:
+  push:
+    tags: ["v*"]
+  # Manual re-run for a release tag only: pick the `v*` tag as the ref. A new run signs again and
+  # replaces the assets of the release (gh release upload --clobber).
+  workflow_dispatch:
+    inputs:
+      replace_published:
+        description: "Replace assets a release already carries (SHA256SUMS present). Off: such a run stops before the upload."
+        type: boolean
+        default: false
+
+# No job gets more than it asks for below.
+permissions: {}
+
+concurrency:
+  group: release-assets-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CANTON_TAG: v3.6.1 # as ci.yml (image-build-check.yml checks that they agree)
+
+jobs:
+  guard:
+    name: Require a release tag ref
+    runs-on: ubuntu-24.04
+    environment: release
+    steps:
+      - name: Require a v* tag ref
+        if: ${{ github.ref_type != 'tag' || !startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          echo "::error::This workflow publishes only from a v* tag ref (got ${REF}). Run it on a release tag."
+          exit 1
+
+  # A release that already carries SHA256SUMS is not touched unless the run was started with
+  # replace_published: the builds are not reproducible, and a second run would leave two sets of
+  # signatures and attestations that both verify. Checked here, before anything is built or signed.
+  precheck:
+    name: The release is not already published
+    needs: guard
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      REPLACE_PUBLISHED: ${{ inputs.replace_published }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: A release with SHA256SUMS needs replace_published
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
+          # Fails closed: any lookup error other than "no such release" stops the run.
+          state="$(scripts/release-assets.sh release-state "$TAG")"
+          echo "release ${TAG}: ${state}"
+          if [ "$state" = listed ] && [ "$REPLACE_PUBLISHED" != true ]; then
+            echo "::error::the release ${TAG} already carries SHA256SUMS; start the run with replace_published to replace the files"
+            exit 1
+          fi
+
+  # Three build jobs, not a matrix: each states the digest of its file as its own job output (a
+  # matrix shares one set of outputs).
+  build-jar:
+    name: Build driver jar
+    needs: [guard, precheck]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.digest.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The tag and the versions in the tree agree
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
+          scripts/release-assets.sh version-check "$TAG"
+
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: sbt/setup-sbt@7e114eae4f32ec3f93c851c2793376a77f384409 # v1.5.15
+      - name: Canton kms-driver-api (published locally, as ci.yml)
+        run: scripts/publish-canton-deps.sh "$CANTON_TAG"
+      - name: Build the driver jar
+        run: scripts/release-assets.sh build-jar out
+
+      # The digest of the file this job made, as a job output: the jobs that use the file compare
+      # against it (an artifact could be replaced by another job of the run; this output cannot).
+      - name: Digest
+        id: digest
+        run: scripts/release-assets.sh digest out jar >>"$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: asset-jar
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
+
+  build-dealer-x86_64:
+    name: Build dealer linux-x86_64
+    needs: [guard, precheck]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.digest.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The tag and the versions in the tree agree
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
+          scripts/release-assets.sh version-check "$TAG"
+
+      # The Rust version of frost/rust-toolchain.toml, no build cache. Keep the two dealer jobs
+      # identical apart from the runner and the names.
+      - name: Rust version (frost/rust-toolchain.toml)
+        id: rust
+        run: |
+          set -euo pipefail
+          v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
+          [ -n "$v" ] || { echo "::error::no channel in frost/rust-toolchain.toml"; exit 1; }
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
+      - name: Build the dealer
+        run: scripts/release-assets.sh build-dealer out
+
+      # The digest of the file this job made, as a job output: the jobs that use the file compare
+      # against it (an artifact could be replaced by another job of the run; this output cannot).
+      - name: Digest
+        id: digest
+        run: scripts/release-assets.sh digest out dealer-x86_64 >>"$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: asset-dealer-x86_64
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
+
+  build-dealer-aarch64:
+    name: Build dealer linux-aarch64
+    needs: [guard, precheck]
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.digest.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The tag and the versions in the tree agree
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
+          scripts/release-assets.sh version-check "$TAG"
+
+      # The Rust version of frost/rust-toolchain.toml, no build cache. Keep the two dealer jobs
+      # identical apart from the runner and the names.
+      - name: Rust version (frost/rust-toolchain.toml)
+        id: rust
+        run: |
+          set -euo pipefail
+          v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
+          [ -n "$v" ] || { echo "::error::no channel in frost/rust-toolchain.toml"; exit 1; }
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
+      - name: Build the dealer
+        run: scripts/release-assets.sh build-dealer out
+
+      # The digest of the file this job made, as a job output: the jobs that use the file compare
+      # against it (an artifact could be replaced by another job of the run; this output cannot).
+      - name: Digest
+        id: digest
+        run: scripts/release-assets.sh digest out dealer-aarch64 >>"$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: asset-dealer-aarch64
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
+
+  # Only this job reads the built files with a parser tool (syft). It has no signing identity and no
+  # write access, so a flaw in that tool cannot be turned into a signature or a release upload.
+  sbom:
+    name: SBOMs
+    needs: [build-jar, build-dealer-x86_64, build-dealer-aarch64]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ github.ref_name }}
+    outputs:
+      driver_sha256: ${{ steps.digest.outputs.driver }}
+      dealer_sha256: ${{ steps.digest.outputs.dealer }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: asset-*
+          path: built
+
+      - name: Install syft (pinned, checked by sha256)
+        run: scripts/release-assets.sh install-tools syft
+
+      - name: SBOMs of the built files
+        # Through the step's environment, never interpolated into the script: the values come from
+        # other jobs.
+        env:
+          JAR_SHA256: ${{ needs.build-jar.outputs.sha256 }}
+          DEALER_X86_64_SHA256: ${{ needs.build-dealer-x86_64.outputs.sha256 }}
+          DEALER_AARCH64_SHA256: ${{ needs.build-dealer-aarch64.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          scripts/release-assets.sh version-check "$TAG"
+          scripts/release-assets.sh gather built out
+          scripts/release-assets.sh check-set out built
+          scripts/release-assets.sh check-digests out \
+            jar="$JAR_SHA256" dealer-x86_64="$DEALER_X86_64_SHA256" dealer-aarch64="$DEALER_AARCH64_SHA256"
+          scripts/release-assets.sh sbom out
+
+      - name: Digests of the SBOMs
+        id: digest
+        run: |
+          set -euo pipefail
+          scripts/release-assets.sh digest out sbom-driver | sed 's/^sha256=/driver=/' >>"$GITHUB_OUTPUT"
+          scripts/release-assets.sh digest out sbom-dealer | sed 's/^sha256=/dealer=/' >>"$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: asset-sbom
+          path: out/*.spdx.json
+          retention-days: 7
+          if-no-files-found: error
+
+  sign:
+    name: Signatures and provenance
+    needs: [build-jar, build-dealer-x86_64, build-dealer-aarch64, sbom]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write      # keyless signing: the workflow's OIDC identity goes into the certificates
+      attestations: write  # store the build provenance attestation with the repository
+    env:
+      TAG: ${{ github.ref_name }}
+      RELEASE_CERT_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release-assets.yml@${{ github.ref }}
+    outputs:
+      release_sha256: ${{ steps.manifest.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # One directory per build artifact, not merged: see "gather".
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: asset-*
+          path: built
+
+      # The build jobs are trusted only to produce these three files, each from its own job:
+      # anything else, a missing file, or a file from the wrong job stops the run before it is
+      # hashed or signed. (A compromised build still gets its own bytes signed: the signature and
+      # the provenance say what this workflow released, not that the bytes derive from the source.)
+      - name: The build artifacts are exactly the expected files
+        run: |
+          set -euo pipefail
+          scripts/release-assets.sh version-check "$TAG"
+          scripts/release-assets.sh gather built out
+          scripts/release-assets.sh check-set out built
+
+      - name: Install cosign (pinned, checked by sha256)
+        run: scripts/release-assets.sh install-tools cosign
+
+      - name: Licenses, SBOMs, checksums
+        # Through the step's environment, never interpolated into the script: the values come from
+        # other jobs.
+        env:
+          JAR_SHA256: ${{ needs.build-jar.outputs.sha256 }}
+          DEALER_X86_64_SHA256: ${{ needs.build-dealer-x86_64.outputs.sha256 }}
+          DEALER_AARCH64_SHA256: ${{ needs.build-dealer-aarch64.outputs.sha256 }}
+          SBOM_DRIVER_SHA256: ${{ needs.sbom.outputs.driver_sha256 }}
+          SBOM_DEALER_SHA256: ${{ needs.sbom.outputs.dealer_sha256 }}
+        run: |
+          set -euo pipefail
+          scripts/release-assets.sh licenses out
+          scripts/release-assets.sh gather-sbom built out
+          # Every downloaded file must be the one its job made: the digests come from those jobs'
+          # outputs, which no other job can change.
+          scripts/release-assets.sh check-digests out \
+            jar="$JAR_SHA256" dealer-x86_64="$DEALER_X86_64_SHA256" dealer-aarch64="$DEALER_AARCH64_SHA256" \
+            sbom-driver="$SBOM_DRIVER_SHA256" sbom-dealer="$SBOM_DEALER_SHA256"
+          scripts/release-assets.sh check-sboms out
+          scripts/release-assets.sh sums out
+          scripts/release-assets.sh check-set out ready
+
+      # Keyless: Fulcio issues a short-lived certificate for this workflow at this tag ref, and each
+      # signature is recorded in the public Rekor log.
+      - name: Sign every file (cosign sign-blob, keyless)
+        run: |
+          set -euo pipefail
+          scripts/release-assets.sh sign out
+          scripts/release-assets.sh check-set out signed
+
+      # Every file but SHA256SUMS itself is a subject (SHA256SUMS lists them); SHA256SUMS is signed.
+      - name: Attest build provenance of every asset
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: out/SHA256SUMS
+          # A storage record would need the artifact-metadata permission; nothing reads it. The
+          # attestation itself is stored with the repository and is what `gh attestation verify` reads.
+          create-storage-record: false
+
+      # The commands of docs/releasing.md ("Verify the release assets"), so a signature or an
+      # attestation a user cannot verify fails the release here, before anything is uploaded.
+      - name: Verify as a user would
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          scripts/release-assets.sh verify out
+          for f in out/rutli-driver-*.jar out/rutli-dealer-*-linux-x86_64 out/rutli-dealer-*-linux-aarch64; do
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-assets.yml" \
+              --source-ref "$GITHUB_REF" --deny-self-hosted-runners
+          done
+
+      # The digest over every signed file, bundles included, as a job output: the upload job compares
+      # (the release-set artifact could be replaced by another job of the run; this output cannot).
+      - name: Digest of the signed release
+        id: manifest
+        run: scripts/release-assets.sh manifest-digest out >>"$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-set
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: Attach to the release
+    needs: sign
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write      # upload the assets to the release of the tag (and create it as a draft if needed)
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      REPLACE_PUBLISHED: ${{ inputs.replace_published }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-set
+          path: out
+
+      # Nothing but the signed files goes to the release: the exact file list, and the digest over all
+      # of them that the signing job stated as its output.
+      - name: The files to attach are exactly the signed files
+        env:
+          RELEASE_SHA256: ${{ needs.sign.outputs.release_sha256 }}
+        run: |
+          set -euo pipefail
+          scripts/release-assets.sh version-check "$TAG"
+          scripts/release-assets.sh check-set out signed
+          scripts/release-assets.sh check-manifest out "$RELEASE_SHA256"
+
+      # A release that does not exist yet is created as a draft (with the assets); the maintainer
+      # writes the notes and publishes it. An existing release only gets the files. The "already
+      # published" refusal is repeated here (it ran first in `precheck`); with replace_published this
+      # workflow's files that are not in the new set are removed.
+      - name: Attach to the release
+        run: |
+          set -euo pipefail
+          # The release-lookup errors that are not "not found" stop the run, so a transient API error
+          # cannot look like a missing release.
+          state="$(scripts/release-assets.sh release-state "$TAG")"
+          if [ "$state" = none ]; then
+            gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes "Draft created by the release assets workflow; notes to follow."
+          elif [ "$state" = listed ] && [ "$REPLACE_PUBLISHED" != true ]; then
+            echo "::error::the release ${TAG} already carries SHA256SUMS; start the run with replace_published to replace the files"
+            exit 1
+          fi
+          # SHA256SUMS and its bundle last: a run that stops half-way has not published the list that
+          # makes a partial release look complete (and a plain retry is not locked out by it).
+          mapfile -t first < <(cd out && find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -printf '%P\n' | LC_ALL=C sort)
+          for f in "${first[@]}"; do gh release upload "$TAG" "out/$f" --clobber; done
+          gh release upload "$TAG" out/SHA256SUMS out/SHA256SUMS.sigstore.json --clobber
+          # Only files of this workflow's own kind are removed; anything else on the release (notes,
+          # reports, a binary for another platform) stays.
+          ours='^(rutli-driver-[0-9A-Za-z.-]+\.(jar|spdx\.json)|rutli-dealer-[0-9A-Za-z.-]+(-linux-(x86_64|aarch64)|\.spdx\.json)|SHA256SUMS|LICENSE|THIRD-PARTY-LICENSES-rust\.txt)(\.sigstore\.json)?$'
+          gh release view "$TAG" --json assets --jq '.assets[].name' | while read -r name; do
+            if [[ "$name" =~ $ours ]] && [ ! -e "out/${name}" ]; then
+              echo "removing ${name}, which is not in this set"
+              gh release delete-asset "$TAG" "$name" --yes </dev/null
+            fi
+          done
+
+      - name: Summary
+        run: |
+          {
+            echo "### Release assets for ${TAG}"
+            echo
+            echo '```'
+            cat out/SHA256SUMS
+            echo '```'
+            echo "Verify: docs/releasing.md, 'Verify the release assets'."
+          } >> "$GITHUB_STEP_SUMMARY"

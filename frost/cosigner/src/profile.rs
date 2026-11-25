@@ -16,7 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
+use crate::config::{Config, SigningPolicyConfig};
 
 /// `profile`: what the operator says this node is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,72 +70,110 @@ pub const DOC: &str = "docs/production-profile.md";
 /// config names), so it can run anywhere, before an upgrade.
 pub fn findings(cfg: &Config) -> Vec<Finding> {
     let mut out = Vec::new();
-    let mut req = |setting: &'static str, found: String, required: &'static str| {
-        out.push(Finding {
-            level: Level::Required,
-            setting,
-            found,
-            required,
-        });
-    };
     let tls = cfg.tls.is_some();
     let p = &cfg.signing_policy;
     let signers: Vec<String> = cfg.signer_allowlist.clone().unwrap_or_default();
-    let listed = |v: &Option<Vec<String>>| v.as_ref().is_some_and(|a| !a.is_empty());
 
+    tls_and_seal_findings(cfg, &mut out);
+    allowlist_findings(cfg, &signers, &mut out);
+    signing_policy_switch_findings(p, tls, &mut out);
+    signer_binding_findings(p, &signers, &mut out);
+    rate_limit_findings(cfg, &mut out);
+    keyfile_and_cluster_findings(cfg, &mut out);
+    hosted_keys_findings(cfg, &mut out);
+    namespace_rule_advisory(p, &mut out);
+    out
+}
+
+/// Adds one [`Level::Required`] finding.
+fn push_required(
+    out: &mut Vec<Finding>,
+    setting: &'static str,
+    found: String,
+    required: &'static str,
+) {
+    out.push(Finding {
+        level: Level::Required,
+        setting,
+        found,
+        required,
+    });
+}
+
+/// The `tls`, `tls.require_peer_pins` and `share_seal` rows.
+fn tls_and_seal_findings(cfg: &Config, out: &mut Vec<Finding>) {
     match &cfg.tls {
-        None => req("tls", "missing (plaintext)".into(), "mutual TLS"),
-        Some(t) if t.allow_expired_ca => req("tls.allow_expired_ca", "true".into(), "false"),
+        None => push_required(out, "tls", "missing (plaintext)".into(), "mutual TLS"),
+        Some(t) if t.allow_expired_ca => {
+            push_required(out, "tls.allow_expired_ca", "true".into(), "false")
+        }
         Some(_) => {}
     }
     if cfg.tls.as_ref().is_some_and(|t| !t.peer_pins_required()) {
-        req(
+        push_required(
+            out,
             "tls.require_peer_pins",
             "false (the explicit opt-out)".into(),
             "on (unset or true): a pin for every peer",
         );
     }
     match &cfg.share_seal {
-        None => req(
+        None => push_required(
+            out,
             "share_seal",
             "missing (key files in plaintext)".into(),
             "share_seal.secret_file (a per-node seal bundle)",
         ),
-        Some(s) if s.secret_env.is_some() => req(
+        Some(s) if s.secret_env.is_some() => push_required(
+            out,
             "share_seal.secret_env",
             "set (the legacy shared master secret)".into(),
             "share_seal.secret_file (a per-node seal bundle) instead",
         ),
-        Some(s) if s.secret_file.is_none() => req(
+        Some(s) if s.secret_file.is_none() => push_required(
+            out,
             "share_seal.secret_file",
             "missing".into(),
             "a per-node seal bundle",
         ),
         Some(_) => {}
     }
+}
+
+/// The `signer_allowlist`, `operator_allowlist` and `refresh_allowlist` rows.
+fn allowlist_findings(cfg: &Config, signers: &[String], out: &mut Vec<Finding>) {
+    let listed = |v: &Option<Vec<String>>| v.as_ref().is_some_and(|a| !a.is_empty());
     if signers.is_empty() {
-        req(
+        push_required(
+            out,
             "signer_allowlist",
             "missing or empty".into(),
             "the driver certificate CN(s)",
         );
     }
     if !listed(&cfg.operator_allowlist) {
-        req(
+        push_required(
+            out,
             "operator_allowlist",
             "missing or empty".into(),
             "the operator certificate CN(s)",
         );
     }
     if !listed(&cfg.refresh_allowlist) {
-        req(
+        push_required(
+            out,
             "refresh_allowlist",
             "missing or empty".into(),
             "the refresh job's certificate CN(s)",
         );
     }
+}
+
+/// The signing-policy on/off switches: refresh, intents, epoch match and signer ACL.
+fn signing_policy_switch_findings(p: &SigningPolicyConfig, tls: bool, out: &mut Vec<Finding>) {
     if p.signer_may_refresh {
-        req(
+        push_required(
+            out,
             "signing_policy.signer_may_refresh",
             "true (the default)".into(),
             "false",
@@ -143,40 +181,49 @@ pub fn findings(cfg: &Config) -> Vec<Finding> {
     }
     // Without TLS the intent switches cannot be on; the `tls` row already says so.
     if tls && !p.intent_required(tls) {
-        req(
+        push_required(
+            out,
             "signing_policy.require_intent",
             effective(p.require_intent, tls),
             "on (unset or true, with TLS)",
         );
     }
     if tls && !p.ceremony_intent_required(tls) {
-        req(
+        push_required(
+            out,
             "signing_policy.require_ceremony_intent",
             effective(p.require_ceremony_intent, tls),
             "on (unset or true, with TLS)",
         );
     }
     if !p.require_epoch_match {
-        req(
+        push_required(
+            out,
             "signing_policy.require_epoch_match",
             "false (the default)".into(),
             "true",
         );
     }
     if !p.signer_acl_required {
-        req(
+        push_required(
+            out,
             "signing_policy.signer_acl_required",
             "false (the default)".into(),
             "true",
         );
     }
+}
+
+/// The `signing_policy.signer_acl` and `signing_policy.signer_pins` rows: every signer needs both.
+fn signer_binding_findings(p: &SigningPolicyConfig, signers: &[String], out: &mut Vec<Finding>) {
     let no_acl: Vec<&str> = signers
         .iter()
         .filter(|cn| !p.signer_acl.contains_key(*cn))
         .map(String::as_str)
         .collect();
     if !no_acl.is_empty() {
-        req(
+        push_required(
+            out,
             "signing_policy.signer_acl",
             format!("no entry for {}", no_acl.join(", ")),
             "an entry for every signer_allowlist CN",
@@ -188,21 +235,29 @@ pub fn findings(cfg: &Config) -> Vec<Finding> {
         .map(String::as_str)
         .collect();
     if !no_pin.is_empty() {
-        req(
+        push_required(
+            out,
             "signing_policy.signer_pins",
             format!("no pin for {}", no_pin.join(", ")),
             "a pin for every signer_allowlist CN",
         );
     }
+}
+
+/// The sign and ceremony-sign rate-limit rows.
+fn rate_limit_findings(cfg: &Config, out: &mut Vec<Finding>) {
+    let p = &cfg.signing_policy;
     if p.sign_rate_limit_per_min == 0 {
-        req(
+        push_required(
+            out,
             "signing_policy.sign_rate_limit_per_min",
             "0 (off)".into(),
             "a limit above 0",
         );
     }
     if p.sign_rate_limit_per_day == 0 {
-        req(
+        push_required(
+            out,
             "signing_policy.sign_rate_limit_per_day",
             "0 (off)".into(),
             "a limit above 0",
@@ -215,78 +270,99 @@ pub fn findings(cfg: &Config) -> Vec<Finding> {
         .map(|r| r.key_id_prefix.as_str())
         .collect();
     if !unlimited.is_empty() {
-        req(
+        push_required(
+            out,
             "signing_policy.rate_limits",
             format!("a 0 (off) limit for prefix(es) {:?}", unlimited),
             "per_min and per_day above 0 in every rule",
         );
     }
     if cfg.ceremony_sign_test_rate_limit_per_min == 0 {
-        req(
+        push_required(
+            out,
             "ceremony_sign_test_rate_limit_per_min",
             "0 (off)".into(),
             "a limit above 0",
         );
     }
+}
+
+/// The `keyfile.*`, `cluster_id` and `cluster_id_change_allowed` rows.
+fn keyfile_and_cluster_findings(cfg: &Config, out: &mut Vec<Finding>) {
     if cfg.keyfile.write_version != 2 {
-        req(
+        push_required(
+            out,
             "keyfile.write_version",
             cfg.keyfile.write_version.to_string(),
             "2",
         );
     }
     if cfg.keyfile.cluster_uuid.is_none() {
-        req(
+        push_required(
+            out,
             "keyfile.cluster_uuid",
             "missing".into(),
             "the cluster's UUID, the same on every node",
         );
     }
     if cfg.keyfile.accept_v1 {
-        req(
+        push_required(
+            out,
             "keyfile.accept_v1",
             "true (the default)".into(),
             "false, once every key file is v2",
         );
     }
     if cfg.cluster_id.is_none() {
-        req(
+        push_required(
+            out,
             "cluster_id",
             "derived from tls.ca_cert".into(),
             "set explicitly, so a CA rotation cannot change it",
         );
     }
     if cfg.cluster_id_change_allowed {
-        req(
+        push_required(
+            out,
             "cluster_id_change_allowed",
             "true".into(),
             "false (only for one deliberate start)",
         );
     }
+}
+
+/// The `hosted_keys.*` rows, only when hosted keys are enabled.
+fn hosted_keys_findings(cfg: &Config, out: &mut Vec<Finding>) {
     if let Some(h) = cfg.hosted_keys.as_ref().filter(|h| h.enabled) {
         if h.decrypt_rate_limit_per_min == 0 {
-            req(
+            push_required(
+                out,
                 "hosted_keys.decrypt_rate_limit_per_min",
                 "0 (off)".into(),
                 "a limit above 0",
             );
         }
         if !h.delete_allowlist.is_empty() && h.delete_approval_threshold == 0 {
-            req(
+            push_required(
+                out,
                 "hosted_keys.delete_approval_threshold",
                 "0 while hosted_keys.delete_allowlist is set".into(),
                 "at least 1",
             );
         }
         if h.commitment_key.is_none() {
-            req(
+            push_required(
+                out,
                 "hosted_keys.commitment_key",
                 "missing".into(),
                 "the cluster-wide commitment key",
             );
         }
     }
+}
 
+/// The advisory row for a missing quorum rule on the namespace key.
+fn namespace_rule_advisory(p: &SigningPolicyConfig, out: &mut Vec<Finding>) {
     if !p
         .rules
         .iter()
@@ -299,7 +375,6 @@ pub fn findings(cfg: &Config) -> Vec<Finding> {
             required: "a quorum approval rule for the namespace key (docs/approval-quorum.md)",
         });
     }
-    out
 }
 
 /// Whether a rule's key-id prefix covers a namespace key. The driver names a FROST key
