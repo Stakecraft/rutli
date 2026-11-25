@@ -101,7 +101,8 @@ refreshes only the runtime base image digest.
 GitHub-hosted runners (never the self-hosted ones), after its own approval on the `release`
 environment. It builds the assets from the tag, signs them and attaches them to the release for the
 tag: an existing release gets the files, a missing one is created as a **draft** that the maintainer
-completes (notes, quality report) and publishes. `scripts/release-assets.sh` holds every step;
+completes (notes, quality report) and publishes. The first tag that runs this workflow is
+`v0.5.0-rc.1`. `scripts/release-assets.sh` holds every step;
 `release-assets-check.yml` runs the same script on pull requests with a throwaway key, so a broken
 step shows before tag day.
 
