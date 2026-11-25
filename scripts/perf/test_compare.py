@@ -365,6 +365,47 @@ class PeerCalls(unittest.TestCase):
                          ["steady", "ramp x3 sign average", "diagnose x30 sign"])
 
 
+class Placement(unittest.TestCase):
+    def run_at(self, zones):
+        run = cluster_run()
+        run["placement"] = {f"rutli-cosigner-n{i + 1}-0": {"node": f"node{i}", "zone": z, "region": ""}
+                            for i, z in enumerate(zones)}
+        run["placement"]["rutli-perf-loadgen"] = {"node": "lg", "zone": zones[0], "region": ""}
+        return run
+
+    def test_runs_placed_differently_are_not_compared(self):
+        before, now = self.run_at(["a", "b", "far"]), self.run_at(["a", "far", "b"])
+        rows, _ = compare.compare(before, now, 0.20, 2.0)
+        self.assertTrue(any("NOT COMPARED" in r[-1] and "a / b / far" in r[-1] for r in rows), rows)
+        self.assertFalse(any("REGRESSION" in r[-1] for r in rows))
+
+    def test_the_same_placement_compares_and_the_generator_does_not_count(self):
+        before, now = self.run_at(["a", "b", "far"]), self.run_at(["a", "b", "far"])
+        now["placement"]["rutli-perf-loadgen"]["zone"] = "elsewhere"
+        rows, _ = compare.compare(before, now, 0.20, 2.0)
+        self.assertFalse(any("NOT COMPARED" in r[-1] for r in rows), rows)
+        self.assertEqual(compare.placement_text({}), "unrecorded")
+
+    def test_a_cosigner_not_read_is_unrecorded_and_the_report_says_not_compared(self):
+        before, now = self.run_at(["a", "b", "far"]), self.run_at(["a", "b", "far"])
+        now["placement"]["rutli-cosigner-n2-0"] = {"node": "", "zone": "", "region": ""}
+        self.assertIsNone(compare.placement_key(now))
+        rows, problems = compare.compare(before, now, 0.20, 2.0)
+        self.assertTrue(any("NOT COMPARED" in r[-1] and "unrecorded now" in r[-1] for r in rows), rows)
+        self.assertEqual(problems, [])
+        with tempfile.TemporaryDirectory() as d:
+            prev, cur, md = (os.path.join(d, n) for n in ("prev.json", "cur.json", "report.md"))
+            with open(prev, "w") as f:
+                json.dump(before, f)
+            with open(cur, "w") as f:
+                json.dump(now, f)
+            self.assertEqual(compare.main([prev, cur, "--markdown", md]), 0)
+            with open(md) as f:
+                report = f.read()
+            self.assertIn("Latency NOT COMPARED", report)
+            self.assertNotIn("No regression above", report)
+
+
 class RigOrCluster(unittest.TestCase):
     def test_only_a_cluster_answer_is_the_clusters_failure(self):
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

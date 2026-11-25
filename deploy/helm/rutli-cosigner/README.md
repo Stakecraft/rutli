@@ -141,7 +141,7 @@ without OnDelete.
 | `image.repository` | `ghcr.io/stakecraft/rutli-cosigner` | |
 | `image.tag` | `0.4.1@sha256:16ad19…558326` | Digest-pinned |
 | `replicaCount` / `threshold` | `3` / `2` | Must match cert count (and `nodes`, if set) |
-| `nodes` | `[]` (= 1..replicaCount) | perNode roster: `id`, `existingClaim` (reuse a PVC, e.g. the legacy `data-rutli-cosigner-<id-1>`), `sealSecret`, `tlsSecret`, `distPublicKey`, `backupClaim`, `backupSecret` |
+| `nodes` | `[]` (= 1..replicaCount) | perNode roster: `id`, `existingClaim` (reuse a PVC, e.g. the legacy `data-rutli-cosigner-<id-1>`), `sealSecret`, `tlsSecret`, `distPublicKey`, `backupClaim`, `backupSecret`, `nodeSelector` (merged over the global one for this node) |
 | `perNode.servicePrefix` | `rutli-node-` | Per-node Service `<prefix><id>` |
 | `seal.perNodeSecretPrefix` / `seal.secretKey` | `rutli-seal-node-` / `node.json` | perNode: each node's seal bundle Secret |
 | `hostedKeys.commitmentKey` | `""` | perNode + hosted keys: required (64 hex) |

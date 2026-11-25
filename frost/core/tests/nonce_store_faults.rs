@@ -32,6 +32,16 @@ fn store_with_old_markers(dir: &Path, sessions: &[String]) -> NonceStore {
     store
 }
 
+/// The exact bytes of a complete sentinel, as a pass writes them (the text itself is private to
+/// the crate): a scratch store is pruned once and the file it leaves is read back.
+fn complete_sentinel_bytes() -> Vec<u8> {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("scratch.nonces");
+    let store = store_with_old_markers(&dir, &sessions(1));
+    store.prune_older_than(HORIZON, 10).unwrap();
+    fs::read(dir.join(PRUNED_SENTINEL)).unwrap()
+}
+
 fn sessions(n: usize) -> Vec<String> {
     (0..n).map(|i| format!("s-{i}")).collect()
 }
@@ -72,24 +82,42 @@ fn a_marker_that_cannot_be_examined_fails_the_pass() {
     }
 }
 
-/// A marker that cannot be removed (the directory is read-only, the sentinel already there) fails
-/// the pass: it is never counted as gone, nor silently kept.
+/// A marker that cannot be removed fails the pass: it is never counted as gone, nor silently
+/// kept. The "marker" is a directory under the marker's name: unlinking a directory is refused
+/// whatever the permissions, in a directory that is otherwise fully writable, so the removal is
+/// the only step that can fail (with a read-only directory, rewriting the sentinel would fail
+/// the same way and the removal might not be reached). The sentinel is complete, so a pass has no
+/// reason to rewrite it; the test checks that it did not.
 #[test]
 fn a_marker_that_cannot_be_removed_fails_the_pass() {
+    use std::os::unix::fs::MetadataExt;
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("k.nonces");
-    let store = store_with_old_markers(&dir, &sessions(2));
-    fs::write(dir.join(PRUNED_SENTINEL), b"pruned before").unwrap();
-    if !permissions_enforced(&dir) {
-        return;
-    }
-    set_mode(&dir, 0o500);
+    let store = store_with_old_markers(&dir, &sessions(1));
+    let marker = dir.join("s-0.used");
+    fs::remove_file(&marker).unwrap();
+    fs::create_dir(&marker).unwrap();
+    File::open(&marker)
+        .unwrap()
+        .set_modified(SystemTime::now() - HOUR)
+        .unwrap();
+    let sentinel = complete_sentinel_bytes();
+    let sentinel_path = dir.join(PRUNED_SENTINEL);
+    fs::write(&sentinel_path, &sentinel).unwrap();
+    let inode = fs::metadata(&sentinel_path).unwrap().ino();
+
     let verdict = store.prune_older_than(HORIZON, 10);
-    set_mode(&dir, 0o700);
+
     assert!(matches!(verdict, Err(CoreError::Io(_))), "got {verdict:?}");
-    for s in sessions(2) {
-        assert!(store.is_consumed(&s).unwrap(), "{s} must still be burned");
-    }
+    assert!(marker.is_dir(), "the marker is still there");
+    assert!(
+        store.is_consumed("s-0").unwrap(),
+        "s-0 must still be burned"
+    );
+    // The complete sentinel was left as it was: not rewritten (a rewrite would succeed here and
+    // give the file a new inode).
+    assert_eq!(fs::metadata(&sentinel_path).unwrap().ino(), inode);
+    assert_eq!(fs::read(&sentinel_path).unwrap(), sentinel);
 }
 
 /// Passes over the same store at once: none fails on a marker another removed first (between its
