@@ -32,6 +32,8 @@ use rutli_frost_core::nonce_store::NonceStore;
 use rutli_frost_core::session::{aggregate, Cosigner, SessionBinding, SessionOwner};
 
 const KEY: &str = "bench-frost-namespace";
+/// The identifier of the third cosigner of the 2-of-3 key.
+const THIRD_COSIGNER_ID: u16 = 3;
 
 /// Canton's sign payload: `0x1220 ‖ sha256` (34 bytes, docs/wire-contract.md).
 fn message() -> Vec<u8> {
@@ -66,7 +68,8 @@ fn random_32() -> [u8; 32] {
 /// Cosigners 1 and 2 of a 2-of-3 key, each with its own marker directory under `dir`.
 fn cosigners(dir: &std::path::Path) -> (Cosigner, Cosigner) {
     let (shares, pkp) =
-        rutli_frost_core::dealer::split_ed25519_seed(&random_32(), &[1, 2, 3], 2).unwrap();
+        rutli_frost_core::dealer::split_ed25519_seed(&random_32(), &[1, 2, THIRD_COSIGNER_ID], 2)
+            .unwrap();
     let cosigner = |i: usize| {
         let kp = frost::keys::KeyPackage::try_from(shares[i].clone()).unwrap();
         Cosigner::new(

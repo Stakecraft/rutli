@@ -21,8 +21,8 @@
 //! that cannot enable reuse.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 /// What one [`NonceStore::prune_older_than`] pass did.
@@ -40,6 +40,16 @@ pub struct PruneReport {
 /// the markers themselves said before (`discard-partial-key` refuses a key that ever signed). The
 /// leading dot keeps it out of the session-id namespace ([`NonceStore::marker_path`]).
 pub const PRUNED_SENTINEL: &str = ".signed";
+
+/// What a complete [`PRUNED_SENTINEL`] holds.
+const SENTINEL_TEXT: &[u8] = b"nonce markers were pruned; this key has signed on this node\n";
+/// Prefix of the file a sentinel is rewritten into before it is renamed over [`PRUNED_SENTINEL`]:
+/// `.signed.<pid>.<n>.tmp`, unique per rewrite and created exclusively, so two passes never write
+/// into one file.
+const SENTINEL_TEMP_PREFIX: &str = ".signed.";
+
+/// Numbers the temporary files of sentinel rewrites within this process.
+static SENTINEL_REWRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 use crate::{CoreError, Result};
 
@@ -131,8 +141,9 @@ impl NonceStore {
     /// the ones already used. Session ids are random UUIDs, so a legitimate reuse of `S` is
     /// negligible and a replayed one only ever gets fresh nonces.
     ///
-    /// A marker whose mtime is in the future (the clock went back) is kept. The first removal from a
-    /// store leaves [`PRUNED_SENTINEL`] (fsynced) so the store still says the key has signed here.
+    /// A marker whose mtime is in the future (the clock went back) is kept. Before a pass removes
+    /// anything, [`PRUNED_SENTINEL`] is on disk, complete and durable (file and directory fsynced),
+    /// so the store still says the key has signed here; see [`NonceStore::write_sentinel`].
     /// After removing anything the directory is fsynced once — a removal lost to a crash only brings
     /// a marker back, which is harmless.
     pub fn prune_older_than(&self, horizon: Duration, max_remove: usize) -> Result<PruneReport> {
@@ -175,18 +186,55 @@ impl NonceStore {
         Ok(report)
     }
 
+    /// Make [`PRUNED_SENTINEL`] present, complete and durable, whether this pass creates it or an
+    /// earlier one did. An earlier write may have stopped partway (a full disk) and left the file
+    /// short, or not yet fsynced: an existing sentinel is checked against [`SENTINEL_TEXT`] and
+    /// fsynced when complete. Otherwise, and when there is none yet, a complete one is written into
+    /// a temporary file of its own, fsynced and renamed into place, so the name only ever points at
+    /// a file whose fsync succeeded, and an existing one stays in place throughout. The directory is
+    /// fsynced last. Anything that is not a regular file under the name is an error, and the pass
+    /// removes nothing.
     fn write_sentinel(&self) -> Result<()> {
         let path = self.dir.join(PRUNED_SENTINEL);
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut f) => {
-                f.write_all(b"nonce markers were pruned; this key has signed on this node\n")?;
-                f.sync_all()?;
-                File::open(&self.dir)?.sync_all()?;
-                Ok(())
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-            Err(e) => Err(e.into()),
+        match complete_sentinel(&path)? {
+            Some(f) => f.sync_all()?,
+            None => self.rewrite_sentinel(&path)?,
         }
+        File::open(&self.dir)?.sync_all()?;
+        Ok(())
+    }
+
+    /// Write a complete sentinel into a temporary file of this call's own and rename it over `path`.
+    /// The name is taken with an exclusive create; one already there (a leftover of a crash, after
+    /// the counter restarted under the same pid) is skipped, never removed, and the next number is
+    /// tried. Only a file this call created is removed on failure.
+    fn rewrite_sentinel(&self, path: &Path) -> Result<()> {
+        const ATTEMPTS: usize = 64;
+        for _ in 0..ATTEMPTS {
+            let n = SENTINEL_REWRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let temp = self.dir.join(format!(
+                "{SENTINEL_TEMP_PREFIX}{}.{n}.tmp",
+                std::process::id()
+            ));
+            let mut f = match OpenOptions::new().write(true).create_new(true).open(&temp) {
+                Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            };
+            let written = f
+                .write_all(SENTINEL_TEXT)
+                .and_then(|()| f.sync_all())
+                .and_then(|()| fs::rename(&temp, path));
+            if let Err(e) = written {
+                let _ = fs::remove_file(&temp);
+                return Err(e.into());
+            }
+            return Ok(());
+        }
+        Err(CoreError::NonceStore(format!(
+            "no free temporary name to rewrite {} after {ATTEMPTS} tries",
+            path.display()
+        )))
     }
 
     fn marker_path(&self, session_id: &str) -> Result<PathBuf> {
@@ -202,6 +250,29 @@ impl NonceStore {
         }
         Ok(self.dir.join(format!("{session_id}.used")))
     }
+}
+
+/// The sentinel at `path`, opened, when it holds exactly [`SENTINEL_TEXT`] (read at most one byte
+/// past it); `None` when it holds anything else or is not there. Only a regular file is opened: a
+/// symbolic link, a FIFO (which would block the open) or a directory under the name is an error.
+fn complete_sentinel(path: &Path) -> Result<Option<File>> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    if !meta.is_file() {
+        return Err(CoreError::NonceStore(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    let mut f = File::open(path)?;
+    let mut held = Vec::with_capacity(SENTINEL_TEXT.len() + 1);
+    (&mut f)
+        .take(SENTINEL_TEXT.len() as u64 + 1)
+        .read_to_end(&mut held)?;
+    Ok((held == SENTINEL_TEXT).then_some(f))
 }
 
 #[cfg(all(test, unix))]
@@ -377,6 +448,170 @@ mod tests {
         assert!(
             verdict.is_err(),
             "an unreadable store must not report a session as unburned"
+        );
+    }
+
+    /// Old markers in a fresh store, ready for a pass that removes them.
+    fn with_old_markers(tmp: &tempfile::TempDir) -> NonceStore {
+        let store = NonceStore::open(tmp.path().join("k.nonces")).unwrap();
+        for s in ["old-1", "old-2"] {
+            store.consume(s).unwrap();
+            age(&store, s, Duration::from_secs(3600));
+        }
+        store
+    }
+
+    #[test]
+    fn a_short_or_empty_sentinel_left_by_an_earlier_pass_is_completed_before_markers_go() {
+        for left in [
+            &b""[..],
+            &b"nonce markers were pru"[..],
+            &b"something else entirely\n"[..],
+            &[SENTINEL_TEXT, &b"x"[..]].concat()[..],
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = with_old_markers(&tmp);
+            fs::write(store.dir.join(PRUNED_SENTINEL), left).unwrap();
+            let r = store
+                .prune_older_than(Duration::from_secs(900), 10)
+                .unwrap();
+            assert_eq!(r.removed, 2);
+            assert_eq!(
+                fs::read(store.dir.join(PRUNED_SENTINEL)).unwrap(),
+                SENTINEL_TEXT
+            );
+            let leftovers: Vec<_> = fs::read_dir(&store.dir)
+                .unwrap()
+                .filter_map(|e| e.ok()?.file_name().into_string().ok())
+                .filter(|n| n.starts_with(SENTINEL_TEMP_PREFIX) && n.ends_with(".tmp"))
+                .collect();
+            assert!(
+                leftovers.is_empty(),
+                "the rewrite is renamed into place: {leftovers:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_complete_sentinel_is_kept_as_it_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = with_old_markers(&tmp);
+        fs::write(store.dir.join(PRUNED_SENTINEL), SENTINEL_TEXT).unwrap();
+        let ino = |p: &Path| std::os::unix::fs::MetadataExt::ino(&fs::metadata(p).unwrap());
+        let before = ino(&store.dir.join(PRUNED_SENTINEL));
+        assert_eq!(
+            store
+                .prune_older_than(Duration::from_secs(900), 10)
+                .unwrap()
+                .removed,
+            2
+        );
+        assert_eq!(
+            ino(&store.dir.join(PRUNED_SENTINEL)),
+            before,
+            "not rewritten"
+        );
+        assert_eq!(
+            fs::read(store.dir.join(PRUNED_SENTINEL)).unwrap(),
+            SENTINEL_TEXT
+        );
+    }
+
+    #[test]
+    fn a_sentinel_name_that_is_not_a_readable_file_stops_the_pass_before_any_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = with_old_markers(&tmp);
+        fs::create_dir(store.dir.join(PRUNED_SENTINEL)).unwrap();
+        assert!(store
+            .prune_older_than(Duration::from_secs(900), 10)
+            .is_err());
+        assert!(store.is_consumed("old-1").unwrap() && store.is_consumed("old-2").unwrap());
+    }
+
+    #[test]
+    fn a_symlink_or_fifo_under_the_sentinel_name_stops_the_pass_before_any_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = with_old_markers(&tmp);
+        let target = tmp.path().join("elsewhere");
+        fs::write(&target, SENTINEL_TEXT).unwrap();
+        std::os::unix::fs::symlink(&target, store.dir.join(PRUNED_SENTINEL)).unwrap();
+        assert!(store
+            .prune_older_than(Duration::from_secs(900), 10)
+            .is_err());
+        assert!(store.is_consumed("old-1").unwrap());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = with_old_markers(&tmp);
+        // A FIFO would block an open for reading: the pass must refuse it, not hang on it.
+        let made = std::process::Command::new("mkfifo")
+            .arg(store.dir.join(PRUNED_SENTINEL))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert!(store
+            .prune_older_than(Duration::from_secs(900), 10)
+            .is_err());
+        assert!(store.is_consumed("old-1").unwrap());
+    }
+
+    #[test]
+    fn a_leftover_temporary_with_the_next_name_is_skipped_not_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = with_old_markers(&tmp);
+        fs::write(store.dir.join(PRUNED_SENTINEL), b"short").unwrap();
+        // What crashes mid-rewrite leave, under the names this process tries next (a run of them:
+        // other tests share the counter and may take a few numbers first).
+        let n = SENTINEL_REWRITES.load(std::sync::atomic::Ordering::Relaxed);
+        let leftovers: Vec<_> = (n..n + 16)
+            .map(|k| {
+                let p = store.dir.join(format!(
+                    "{SENTINEL_TEMP_PREFIX}{}.{k}.tmp",
+                    std::process::id()
+                ));
+                fs::write(&p, b"from before").unwrap();
+                p
+            })
+            .collect();
+        assert_eq!(
+            store
+                .prune_older_than(Duration::from_secs(900), 10)
+                .unwrap()
+                .removed,
+            2
+        );
+        assert_eq!(
+            fs::read(store.dir.join(PRUNED_SENTINEL)).unwrap(),
+            SENTINEL_TEXT
+        );
+        for p in &leftovers {
+            assert_eq!(fs::read(p).unwrap(), b"from before", "not ours: left alone");
+        }
+    }
+
+    #[test]
+    fn a_new_sentinel_is_renamed_into_place_complete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = with_old_markers(&tmp);
+        assert!(!store.dir.join(PRUNED_SENTINEL).exists());
+        assert_eq!(
+            store
+                .prune_older_than(Duration::from_secs(900), 10)
+                .unwrap()
+                .removed,
+            2
+        );
+        assert_eq!(
+            fs::read(store.dir.join(PRUNED_SENTINEL)).unwrap(),
+            SENTINEL_TEXT
+        );
+        let names: Vec<_> = fs::read_dir(&store.dir)
+            .unwrap()
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .collect();
+        assert_eq!(
+            names,
+            vec![PRUNED_SENTINEL.to_string()],
+            "no temporary left"
         );
     }
 }

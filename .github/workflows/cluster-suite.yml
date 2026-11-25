@@ -17,6 +17,9 @@ on:
       - "deploy/helm/**"
       - "frost/loadgen/**"
       - "frost/Dockerfile.perf"
+      - "frost/Dockerfile.dealer"
+      - "scripts/e2e-migration.sh"
+      - "scripts/e2e-migration-env-k8s.sh"
   push:
     # No path filter on a push to main: every commit on main gets the whole set (see main-status.yml).
     branches: [main]
@@ -53,7 +56,46 @@ jobs:
       - name: Build the image under test
         run: |
           diff <(grep '^FROM ' frost/Dockerfile) <(grep '^FROM ' frost/Dockerfile.perf)
+          diff <(grep '^FROM ' frost/Dockerfile) <(grep '^FROM ' frost/Dockerfile.dealer)
           docker build -f frost/Dockerfile.perf -t rutli-perf:local frost
+
+      # The migration suite's ceremony runs on the previous release's cosigners (the upgrade suite
+      # comes after it), and a ceremony's dealer must be of the same release. The expected commit is
+      # the one the chart's digest-pinned release image records (its OCI label
+      # org.opencontainers.image.revision, set when the release was published); the release tag must
+      # name that commit, and the dealer is built from the commit itself with this tree's
+      # frost/Dockerfile.dealer (older tags have none; it copies the context and builds rutli-dealer,
+      # nothing else, and is reviewed with every change). A tag that names another commit stops the job.
+      - name: Build the previous release's dealer
+        run: |
+          set -euo pipefail
+          values=deploy/helm/rutli-cosigner/values.yaml
+          # The top-level image: block only (other images in the values have blocks of their own).
+          block="$(awk '/^image:/ {on=1; next} on && /^[^ #]/ {on=0} on' "$values")"
+          repo="$(sed -n 's/^  repository: \([^ #]*\).*$/\1/p' <<<"$block" | head -n 1)"
+          tag="$(sed -n 's/^  tag: "\([0-9][^@"]*\)@.*/\1/p' <<<"$block" | head -n 1)"
+          digest="$(sed -n 's/^  tag: "[^@"]*@\(sha256:[0-9a-f]\{64\}\)".*/\1/p' <<<"$block" | head -n 1)"
+          [ -n "$repo" ] && [ -n "$tag" ] && [ -n "$digest" ] || { echo "::error::no digest-pinned image in $values"; exit 1; }
+          # Every platform of the release index must record the same commit (read from the registry,
+          # nothing pulled: a second platform of one digest cannot be pulled next to the first).
+          revs="$(docker buildx imagetools inspect "$repo@$digest" --format '{{ json .Image }}' \
+            | jq -r 'if has("config") then [.] else [to_entries[] | select(.key | startswith("unknown") | not) | .value] end | map(.config.Labels["org.opencontainers.image.revision"] // "none") | unique | .[]')"
+          echo "release image $repo@$digest records: ${revs//$'\n'/ }"
+          [ "$(printf '%s\n' "$revs" | wc -l)" -eq 1 ] || { echo "::error::$repo@$digest: its platforms record different commits"; exit 1; }
+          expected="$revs"
+          [[ "$expected" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::$repo@$digest records no commit"; exit 1; }
+          url="https://github.com/${GITHUB_REPOSITORY}.git"
+          commit="$(git ls-remote "$url" "refs/tags/v${tag}^{}" | cut -f1)"
+          [ -n "$commit" ] || commit="$(git ls-remote "$url" "refs/tags/v${tag}" | cut -f1)"
+          if [ "$commit" != "$expected" ]; then
+            echo "::error::tag v${tag} names ${commit:-nothing}, but the release image $repo@$digest was built from $expected"
+            exit 1
+          fi
+          echo "previous release v${tag} = ${expected} (the release image's commit and the tag agree)" | tee -a "$GITHUB_STEP_SUMMARY"
+          # A tag of this run only: no image cached under a reused name can stand in for it.
+          image="rutli-dealer:${tag}-${expected:0:12}-${GITHUB_RUN_ID}"
+          docker build -f- -t "$image" "${url}#${expected}:frost" <frost/Dockerfile.dealer
+          echo "DEALER_IMAGE=$image" >>"$GITHUB_ENV"
 
       - name: Cluster
         run: |
@@ -69,6 +111,7 @@ jobs:
           EOF
           kind create cluster --name rutli-perf --config "${RUNNER_TEMP}/kind.yaml" --wait 180s
           kind load docker-image rutli-perf:local --name rutli-perf
+          kind load docker-image "$DEALER_IMAGE" --name rutli-perf
           kubectl get nodes -o wide
 
       - name: Install the previous release
@@ -82,7 +125,7 @@ jobs:
         run: |
           python3 -I scripts/perf/cluster.py --namespace rutli-perf --profile scripts/perf/profiles/smoke.json \
             --env-name kind --out perf-out/cluster.json --upgrade-image rutli-perf:local --work "$WORK" \
-            --disrupt-secs 90 --commit "$GITHUB_SHA"
+            --dealer-image "$DEALER_IMAGE" --allow-unisolated-dealer --disrupt-secs 90 --commit "$GITHUB_SHA"
 
       # The diagnostic pass, tiny: it checks the wiring (cgroup and pressure readings, the flush
       # probe, load spread over two generators, the key-count step), not the numbers.

@@ -7,6 +7,13 @@
 #   CANTON_HOME=~/.cache/canton-3.7.2/canton-open-source-3.7.2 scripts/e2e-migration.sh
 #   (from the repo root; KEEP=1 keeps the work dir; SKIP_BUILD=1 reuses existing binaries)
 #
+# E2E_STAGES=ceremony runs the cosigner half only, on a cluster that has no Canton (the cluster
+# suite's `migration` suite, scripts/perf/cluster.py, with E2E_ENV=k8s): the namespace key of B1's
+# Canton 3.6.1 test vectors (frost/canton-key/testdata/vectors, exported by `keys.secret.download_to`
+# with a password) stands for Step 2's export, then Step 3 and the cosigner part of Step 8 run as
+# below. E2E_PREFIX sets PREFIX (a cluster that keeps its keys needs a new one per run: imported ids
+# are never deleted); E2E_RESULT names a JSON file for the key id, fingerprint and group key.
+#
 # This file is the procedure. How the cosigners and Canton are started and reached is the
 # environment, in scripts/e2e-migration-env-$E2E_ENV.sh (default `local`: a 2-of-3 cosigner cluster
 # as native processes on 127.0.0.1, mTLS, sealed, hosted keys, the signing policy fully enforced,
@@ -87,11 +94,11 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 E2E_ENV="${E2E_ENV:-local}"
 
 # docs/migration.md §2. NS_FP, OLD_UID and KEY_ID are read from the old participant in Step 2.
-PREFIX="mig1-"
+PREFIX="${E2E_PREFIX:-mig1-}"
 OLD_ID="oldp" # = HINT, the Splice default (§3): the validator party is the old node's admin party
 NEW_ID_ROLLED_BACK="oldp-r1"
 NEW_ID="oldp-r2"
-CEREMONY="e2e-migration-$(date +%s)"
+CEREMONY="${E2E_CEREMONY:-${PREFIX}e2e-migration-$(date +%s)}" # the cluster suite names it, to abort it
 
 BUNDLE=()           # the dealt bundle of each node, as that node reads it
 FOUNDING_BACKUPS=() # each node's founding backup, as that node sees it
@@ -99,16 +106,30 @@ FOUNDING_BACKUPS=() # each node's founding backup, as that node sees it
 step() { printf '\n==> %s\n' "$*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+# Set by env_init, never inherited: the cleanup shreds WORK, and a caller's WORK (the suite's
+# installation directory) must not be what a run that failed early shreds.
+WORK=""
+SYNC=""
 # shellcheck source=scripts/e2e-migration-env-local.sh
 . "$REPO/scripts/e2e-migration-env-$E2E_ENV.sh"
 
 on_exit() {
   local rc=$?
+  trap '' TERM INT # a second signal must not cut the cleanup short
   env_cleanup "$rc"
+  # A run that passed but could not remove what it left in the pods has not passed.
+  if [ "$rc" -eq 0 ] && [ "${CLEANUP_FAILED:-}" != "" ]; then
+    echo "FAIL: the cleanup could not remove:$CLEANUP_FAILED" >&2
+    rc=1
+  fi
   [ "$rc" -eq 0 ] && echo "==> migration e2e OK"
-  return "$rc"
+  exit "$rc" # an EXIT trap's return value is not the script's: only exit sets it
 }
 trap on_exit EXIT
+# A signal ends the run through the EXIT trap too (the cluster suite stops a run that takes too long
+# with SIGTERM): its cleanup removes the dealer pod and the work dir.
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 # --- the handshake with the Canton bootstrap script ----------------------------------------------
 # `$SYNC/<name>` is a marker, `$SYNC/<name>.env` the KEY=value lines that go with it (written first).
@@ -126,18 +147,34 @@ wait_marker() { # marker-name  [timeout-seconds]
 mark() { : >"$SYNC/$1"; }
 value() { sed -n "s/^$2=//p" "$SYNC/$1.env" | head -n 1; } # env-file  key
 
-verify_key() { # extra args; prints the report as JSON, whatever the exit code
-  env_client operator verify-key --key-id "$KEY_ID" --expect-fingerprint "$NS_FP" "$@" --json || true
+verify_key() { # extra args; prints the report as JSON with the command's exit code in .exit_code
+  local out rc=0
+  out="$(env_client operator verify-key --key-id "$KEY_ID" --expect-fingerprint "$NS_FP" "$@" --json)" || rc=$?
+  jq -c --argjson rc "$rc" '. + {exit_code: $rc}' <<<"$out" 2>/dev/null || printf '%s\n' "$out"
 }
+# A sign test that passed: the command succeeded, and every one of the three 2-of-3 quorums signed.
+ALL_QUORUMS='.exit_code == 0 and (.sign_test | length == 3)
+  and ([.sign_test[].signers | sort] | unique) == [[1, 2], [1, 3], [2, 3]] and all(.sign_test[]; .ok)'
 refused() { # what  expected-message  command…
   local what=$1 expect=$2
   shift 2
   if "$@" >"$WORK/refused.out" 2>&1; then fail "$what: accepted"; fi
-  grep -q -- "$expect" "$WORK/refused.out" || fail "$what: refused for the wrong reason: $(cat "$WORK/refused.out")"
+  # The output stays out of the message (a log may be kept): KEEP=1 keeps it in the work dir.
+  grep -q -- "$expect" "$WORK/refused.out" || fail "$what: refused, but not with '$expect' (output: \$WORK/refused.out, KEEP=1)"
   echo "$what -> refused"
 }
 # Lessons f: on macOS GNU coreutils can shadow /bin/rm, which has -P. Files on the operator's machine.
-shred_local() { if [ "$(uname)" = Darwin ]; then /bin/rm -P -rf "$@"; else rm -rf "$@"; fi; }
+# Elsewhere each file is overwritten (shred -u) before the tree goes. On SSDs, copy-on-write file
+# systems and tmpfs neither is provable erasure (split-ceremony.md §4 Step 9, residual exposure).
+shred_local() {
+  if [ "$(uname)" = Darwin ]; then /bin/rm -P -rf "$@"; return; fi
+  local p
+  for p in "$@"; do
+    [ -e "$p" ] || continue
+    find "$p" -type f -exec shred -f -u {} + 2>/dev/null || true
+    rm -rf "$p"
+  done
+}
 commitment_errors() {
   local log
   while IFS= read -r log; do
@@ -167,6 +204,21 @@ step_1_2_export() {
 # --- Step 3: the split ceremony (docs/split-ceremony.md §4) against the running cluster -----------
 # The runbook's dealer host is air-gapped, live-booted and has neither swap nor a core handler; a
 # laptop or a CI runner has both: --allow-swap --allow-core-handler. --confirm-sas types the SAS.
+# --- Step 2 without Canton: B1's export of a Canton 3.6.1 namespace key --------------------------
+step_2_from_vectors() {
+  step "Step 2 (no Canton here). The namespace key: B1's Canton 3.6.1 export with a password (test vectors)"
+  local vec="$REPO/frost/canton-key/testdata/vectors"
+  mkdir -p "$EXPORT_DIR"
+  cp "$vec/namespace.export-pw.bin" "$EXPORT_FILE"
+  EXPORT_PW="$(jq -r .password "$vec/manifest.json")"
+  NS_FP="$(jq -r '.keys[] | select(.name == "namespace") | .fingerprint' "$vec/manifest.json")"
+  OLD_SIG_FP="$(jq -r '.keys[] | select(.name == "signing") | .fingerprint' "$vec/manifest.json")"
+  [[ "$NS_FP" =~ ^1220[0-9a-f]{64}$ ]] || fail "NS_FP from the vectors: '$NS_FP'"
+  KEY_ID="${PREFIX}frost-import-${NS_FP:4:8}" # migration.md §2
+  EXPORT_SHA="$(openssl dgst -sha256 -hex "$EXPORT_FILE" | awk '{print $NF}')"
+  echo "export file sha256 $EXPORT_SHA; NS_FP $NS_FP; KEY_ID $KEY_ID"
+}
+
 dealer() { # expected-fingerprint  out-dir  [password option…]
   local fp=$1 out=$2
   shift 2
@@ -222,8 +274,8 @@ step_3_split_ceremony() {
 
   step "   verify-key --sign-test with the operator certificate (Gate B)"
   rep="$(verify_key --sign-test)"
-  jq -e --arg d "$DIGEST" '.ok and .pkp_digest == $d and .refresh_count == 0 and (.sign_test | length == 3)
-    and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null || fail "verify-key: $rep"
+  jq -e --arg d "$DIGEST" '.ok and .pkp_digest == $d and .refresh_count == 0 and '"$ALL_QUORUMS" <<<"$rep" >/dev/null \
+    || fail "verify-key: $rep"
   refused "verify-key with a wrong fingerprint" "is not the expected" \
     env_client operator verify-key --key-id "$KEY_ID" --expect-fingerprint "$OLD_SIG_FP"
   echo "Gate B: 3/3 nodes, digest $DIGEST, every 2-of-3 quorum signs"
@@ -232,7 +284,7 @@ step_3_split_ceremony() {
   out="$(env_client refresher refresh --key-id "$KEY_ID")"
   grep -q "$GROUP" <<<"$out" || fail "refresh changed the group key: $out"
   rep="$(verify_key --sign-test)"
-  jq -e --arg d "$DIGEST" '.ok and .pkp_digest != $d and .refresh_count == 1 and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null \
+  jq -e --arg d "$DIGEST" '.ok and .pkp_digest != $d and .refresh_count == 1 and '"$ALL_QUORUMS" <<<"$rep" >/dev/null \
     || fail "verify-key after refresh: $rep"
   echo "Gate C: group key unchanged, new digest $(jq -r .pkp_digest <<<"$rep"), refresh count 1"
 
@@ -251,7 +303,7 @@ step_3_split_ceremony() {
     FOUNDING_BACKUPS[i]="$bundle"
   done
   rep="$(verify_key)"
-  jq -e '.ok and .refresh_count == 1' <<<"$rep" >/dev/null || fail "verify-key after the backups: $rep"
+  jq -e '.exit_code == 0 and .ok and .refresh_count == 1' <<<"$rep" >/dev/null || fail "verify-key after the backups: $rep"
 }
 
 # --- Steps 4-7 run in Canton: the cutover rolled back, the cutover that goes through, verify -------
@@ -334,28 +386,11 @@ step_7_audit() {
 # --- Step 8: destroy every old copy the script can reach, with the checks a script can make -------
 step_8_destroy() {
   step "Step 8. Destruction: the export file, the old database, the dealer output, the request files"
-  local f i gone rep
-  [ "$(openssl dgst -sha256 -hex "$EXPORT_FILE" | awk '{print $NF}')" = "$EXPORT_SHA" ] || fail "the export file changed since Step 2"
   env_old_db_exists || fail "the old participant's database is not where the config put it"
-  shred_local "$EXPORT_DIR" "$WORK/dealer" "$WORK"/r[0-9].json "$WORK"/acs-old-attempt1.gz
+  shred_local "$WORK"/acs-old-attempt1.gz
   env_destroy_old_db
-  for gone in "$EXPORT_DIR" "$WORK/dealer" "$WORK/r1.json" "$WORK/r2.json" "$WORK/r3.json"; do
-    [ ! -e "$gone" ] || fail "$gone is still there"
-  done
   ! env_old_db_exists || fail "the old participant's database is still there"
-  # Ceremony residue on the cosigners: the one-time recipient secrets died at install, and the only
-  # backups are the founding ones, taken after the refresh.
-  for i in 1 2 3; do
-    ! env_node_exists "$i" "$(env_node_path "$i" "ceremony/$KEY_ID.recipient")" || fail "node $i kept its recipient secret"
-    env_node_exists "$i" "${FOUNDING_BACKUPS[i]}" || fail "node $i lost its founding backup"
-  done
-  # No file left in the work dir is the export (by content), wherever it might have been copied.
-  while IFS= read -r f; do
-    [ "$(openssl dgst -sha256 -hex "$f" | awk '{print $NF}')" != "$EXPORT_SHA" ] || fail "a copy of the export file survives: $f"
-  done < <(find "$WORK" -type f -size -64k)
-  rep="$(verify_key --sign-test)"
-  jq -e '.ok and .refresh_count == 1 and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null || fail "verify-key after the destruction: $rep"
-  echo "destroyed; verify-key --sign-test OK on the refreshed shares"
+  step_8_destroy_ceremony
 
   step "   after the destruction: the old member's OTK removed, the new participant still transacts"
   mark destroyed
@@ -368,6 +403,39 @@ step_8_destroy() {
   [ "$bad" -eq 0 ] || fail "$bad driver operations failed after the destruction"
   errs="$(commitment_errors)"
   [ -z "$errs" ] || fail "ACS commitment errors: $(head -n 3 <<<"$errs")"
+}
+
+# Step 8's cosigner half: what the ceremony left on the operator's machine, the dealer and the nodes.
+step_8_destroy_ceremony() {
+  step "Step 8. Destruction: the export file, the dealer output, the request files; residue on the nodes"
+  local f i gone rep
+  [ "$(openssl dgst -sha256 -hex "$EXPORT_FILE" | awk '{print $NF}')" = "$EXPORT_SHA" ] || fail "the export file changed since Step 2"
+  shred_local "$EXPORT_DIR" "$WORK/dealer" "$WORK"/r[0-9].json
+  env_destroy_dealer
+  for gone in "$EXPORT_DIR" "$WORK/dealer" "$WORK/r1.json" "$WORK/r2.json" "$WORK/r3.json"; do
+    [ ! -e "$gone" ] || fail "$gone is still there"
+  done
+  # Each node's own copies: its request file and the bundle it was given (split-ceremony.md §4 Step 4).
+  for i in 1 2 3; do
+    env_node_shred "$i" "$(env_node_out "$i" "r$i.json")" "${BUNDLE[i]}"
+    for gone in "$(env_node_out "$i" "r$i.json")" "${BUNDLE[i]}"; do
+      ! env_node_exists "$i" "$gone" || fail "node $i still holds $gone"
+    done
+  done
+  # Ceremony residue on the cosigners: the one-time recipient secrets died at install, and the only
+  # backups are the founding ones, taken after the refresh.
+  for i in 1 2 3; do
+    ! env_node_exists "$i" "$(env_node_path "$i" "ceremony/$KEY_ID.recipient")" || fail "node $i kept its recipient secret"
+    env_node_exists "$i" "${FOUNDING_BACKUPS[i]}" || fail "node $i lost its founding backup"
+  done
+  # No file left in the work dir is the export (by content), wherever it might have been copied.
+  while IFS= read -r f; do
+    [ "$(openssl dgst -sha256 -hex "$f" | awk '{print $NF}')" != "$EXPORT_SHA" ] || fail "a copy of the export file survives: $f"
+  done < <(find "$WORK" -type f -size -64k)
+  rep="$(verify_key --sign-test)"
+  jq -e '.ok and .refresh_count == 1 and '"$ALL_QUORUMS" <<<"$rep" >/dev/null \
+    || fail "verify-key after the destruction: $rep"
+  echo "destroyed; verify-key --sign-test OK on the refreshed shares"
 }
 
 # --- the Canton bootstrap script (Steps 1, 2, 4-7 and the end of 8) -------------------------------
@@ -689,6 +757,18 @@ main() {
   EXPORT_DIR="$WORK/export"
   EXPORT_FILE="$EXPORT_DIR/namespace.export"
   export EXPORT_PW
+  if [ "${E2E_STAGES:-all}" = ceremony ]; then
+    step_2_from_vectors
+    step_3_split_ceremony
+    unset EXPORT_PW EXPORT_PW_WRONG # only Step 3's dealer needed them
+    step_8_destroy_ceremony
+    if [ -n "${E2E_RESULT:-}" ]; then
+      jq -n --arg key_id "$KEY_ID" --arg fp "$NS_FP" --arg group "$GROUP" --arg ceremony "$CEREMONY" \
+        --arg isolated "${DEALER_ISOLATED:-unknown}" \
+        '{key_id: $key_id, fingerprint: $fp, group_key: $group, ceremony: $ceremony, dealer_isolated: $isolated}' >"$E2E_RESULT"
+    fi
+    return
+  fi
   EXPORT_PW="$(openssl rand -base64 24)" # Step 2.3: random, at least 24 characters, in the environment only
   export E2E_OLD_ID="$OLD_ID" E2E_NEW_ID_ROLLED_BACK="$NEW_ID_ROLLED_BACK" E2E_NEW_ID="$NEW_ID"
 

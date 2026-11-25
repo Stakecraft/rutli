@@ -10,6 +10,21 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+/// How many distinct error messages are kept apart; the rest are counted as `(other)`.
+const MAX_DISTINCT_MESSAGES: usize = 31;
+/// Microseconds in a millisecond.
+const MICROS_PER_MS: f64 = 1000.0;
+/// The scale that rounds a value in milliseconds to three decimals.
+const MS_ROUNDING_SCALE: f64 = 1000.0;
+/// The divisor that turns a percentage into a fraction.
+const PERCENT_DIVISOR: f64 = 100.0;
+/// The median, as a percentile.
+const PERCENTILE_P50: f64 = 50.0;
+/// The 95th percentile.
+const PERCENTILE_P95: f64 = 95.0;
+/// The 99th percentile.
+const PERCENTILE_P99: f64 = 99.0;
+
 /// The outcome of one logical request (a driver call: every failover attempt included).
 #[derive(Debug, Clone)]
 pub struct Outcome {
@@ -154,7 +169,9 @@ impl Recorder {
         if let Some(m) = message {
             let key = message_key(outcome.code, &m);
             // 31 messages and `(other)`: at most 32 entries.
-            let key = if self.messages.contains_key(&key) || self.messages.len() < 31 {
+            let key = if self.messages.contains_key(&key)
+                || self.messages.len() < MAX_DISTINCT_MESSAGES
+            {
                 key
             } else {
                 "(other)".into()
@@ -171,42 +188,18 @@ impl Recorder {
     }
 
     pub fn report(mut self, wall: Duration) -> ClientReport {
-        let mut errors: BTreeMap<String, u64> = BTreeMap::new();
-        let mut failovers: BTreeMap<String, u64> = BTreeMap::new();
-        let mut ok_micros: Vec<u64> = Vec::new();
-        let mut timeline: BTreeMap<u64, Second> = BTreeMap::new();
-        let mut bad_answers = 0;
-        let mut leaders: BTreeMap<String, (u64, Vec<u64>)> = BTreeMap::new();
+        let mut tally = Tally::default();
         for o in &self.outcomes {
-            if let Some(name) = &o.leader {
-                let entry = leaders.entry(name.clone()).or_default();
-                if o.code == "OK" && !o.bad_answer {
-                    entry.1.push(o.latency.as_micros() as u64);
-                } else {
-                    entry.0 += 1;
-                }
-            }
-            let sec = timeline.entry(o.at.as_secs()).or_insert_with(|| Second {
-                t: o.at.as_secs(),
-                ..Default::default()
-            });
-            if o.code == "OK" && !o.bad_answer {
-                ok_micros.push(o.latency.as_micros() as u64);
-                sec.ok += 1;
-                sec.max_ms = sec.max_ms.max(millis(o.latency.as_micros() as u64));
-            } else {
-                sec.errors += 1;
-                if o.code != "OK" {
-                    *errors.entry(o.code.to_string()).or_default() += 1;
-                }
-            }
-            if o.bad_answer {
-                bad_answers += 1;
-            }
-            for f in &o.failovers {
-                *failovers.entry(f.to_string()).or_default() += 1;
-            }
+            tally.add(o);
         }
+        let Tally {
+            mut errors,
+            failovers,
+            mut ok_micros,
+            timeline,
+            bad_answers,
+            leaders,
+        } = tally;
         if self.saturated > 0 {
             errors.insert("CLIENT_SATURATED".into(), self.saturated);
         }
@@ -228,19 +221,7 @@ impl Recorder {
                 0.0
             },
             timeline: timeline.into_values().collect(),
-            by_leader: leaders
-                .into_iter()
-                .map(|(name, (errors, mut micros))| {
-                    (
-                        name,
-                        LeaderReport {
-                            ok: micros.len() as u64,
-                            errors,
-                            latency: latency(&mut micros),
-                        },
-                    )
-                })
-                .collect(),
+            by_leader: leader_reports(leaders),
             connect: None,
             fd_peak: None,
             fd_limit: None,
@@ -248,12 +229,78 @@ impl Recorder {
     }
 }
 
+/// What the outcomes of a run add up to, before the percentiles are taken.
+#[derive(Default)]
+struct Tally {
+    errors: BTreeMap<String, u64>,
+    failovers: BTreeMap<String, u64>,
+    ok_micros: Vec<u64>,
+    timeline: BTreeMap<u64, Second>,
+    bad_answers: u64,
+    /// Per cosigner that gave the final answer: its errors and the latencies of its successes.
+    leaders: BTreeMap<String, (u64, Vec<u64>)>,
+}
+
+impl Tally {
+    /// Count one outcome.
+    fn add(&mut self, o: &Outcome) {
+        if let Some(name) = &o.leader {
+            let entry = self.leaders.entry(name.clone()).or_default();
+            if o.code == "OK" && !o.bad_answer {
+                entry.1.push(o.latency.as_micros() as u64);
+            } else {
+                entry.0 += 1;
+            }
+        }
+        let sec = self
+            .timeline
+            .entry(o.at.as_secs())
+            .or_insert_with(|| Second {
+                t: o.at.as_secs(),
+                ..Default::default()
+            });
+        if o.code == "OK" && !o.bad_answer {
+            self.ok_micros.push(o.latency.as_micros() as u64);
+            sec.ok += 1;
+            sec.max_ms = sec.max_ms.max(millis(o.latency.as_micros() as u64));
+        } else {
+            sec.errors += 1;
+            if o.code != "OK" {
+                *self.errors.entry(o.code.to_string()).or_default() += 1;
+            }
+        }
+        if o.bad_answer {
+            self.bad_answers += 1;
+        }
+        for f in &o.failovers {
+            *self.failovers.entry(f.to_string()).or_default() += 1;
+        }
+    }
+}
+
+/// The per-cosigner report of the tallied leaders (errors, latencies of the successes).
+fn leader_reports(leaders: BTreeMap<String, (u64, Vec<u64>)>) -> BTreeMap<String, LeaderReport> {
+    leaders
+        .into_iter()
+        .map(|(name, (errors, mut micros))| {
+            (
+                name,
+                LeaderReport {
+                    ok: micros.len() as u64,
+                    errors,
+                    latency: latency(&mut micros),
+                },
+            )
+        })
+        .collect()
+}
+
 fn millis(micros: u64) -> f64 {
-    round3(micros as f64 / 1000.0)
+    round3(micros as f64 / MICROS_PER_MS)
 }
 
 fn round3(v: f64) -> f64 {
-    (v * 1000.0).round() / 1000.0
+    (v * MS_ROUNDING_SCALE).round() / MS_ROUNDING_SCALE
 }
 
 /// Percentiles by nearest rank: the smallest sample with at least `p` percent at or below it.
@@ -264,16 +311,16 @@ fn latency(micros: &mut [u64]) -> Latency {
     micros.sort_unstable();
     let rank = |p: f64| {
         let n = micros.len();
-        let idx = ((p / 100.0) * n as f64).ceil() as usize;
+        let idx = ((p / PERCENT_DIVISOR) * n as f64).ceil() as usize;
         micros.get(idx.clamp(1, n) - 1).copied().unwrap_or_default()
     };
     let sum: u128 = micros.iter().map(|&m| u128::from(m)).sum();
     Latency {
         count: micros.len() as u64,
         mean_ms: millis((sum / micros.len() as u128) as u64),
-        p50_ms: millis(rank(50.0)),
-        p95_ms: millis(rank(95.0)),
-        p99_ms: millis(rank(99.0)),
+        p50_ms: millis(rank(PERCENTILE_P50)),
+        p95_ms: millis(rank(PERCENTILE_P95)),
+        p99_ms: millis(rank(PERCENTILE_P99)),
         max_ms: millis(*micros.last().expect("not empty")),
     }
 }

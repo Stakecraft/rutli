@@ -132,9 +132,12 @@ final case class SigningJournalConfig(
   *                   torn down and the next call fails over (5 s).
   * @param leaderRecovery     After this long the first endpoint gets the lead back, after it lost it
   *                   (60 s).
-  * @param signLeader  `rotate` (default) | `sticky`: where each sign starts. Rotate spreads signs
-  *                   over the healthy endpoints in turn; sticky keeps them on the preferred leader,
-  *                   as before 0.5.0. Ceremonies and hosted-key calls are sticky either way.
+  * @param signLeader  `sticky` (default) | `rotate`: where each sign starts. Sticky keeps signs on
+  *                   the preferred leader, as before 0.5.0 (past a cosigner that answered another
+  *                   group key for the key), and a verified signature makes its cosigner the
+  *                   preferred leader; rotate spreads signs over the healthy endpoints in turn, and
+  *                   a verified signature does not move the preferred leader (only a failure moves
+  *                   it). Ceremonies and hosted-key calls are sticky either way.
   */
 final case class FrostConfig(
     endpoint: Option[String] = None,

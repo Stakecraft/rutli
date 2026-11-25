@@ -16,7 +16,7 @@ each cosigner's memory and open file descriptors before and after, and judges ev
   limit-rate      more signatures than a key's per-minute ceiling
   limit-ceremony  80 DKGs at once, 10 DKGs of one key at once, two refreshes back to back
   limit-decrypt   more EcdhDerive than the key's per-minute ceiling
-  limit-sessions  1500 signatures of one key asked of one leader at the same moment
+  limit-sessions  1500 signatures of one key asked of one leader within a second, over 30 connections
   recovery        a short stream of signatures after all of the above
 
 A scenario fails when a request ends in a gRPC code the scenario does not allow, an answer does
@@ -116,8 +116,8 @@ class ComposeCluster:
     def loadgen_argv(self, args, timeout_secs, cn=None, flags=None):
         """`cn`: the client certificate (certs/<cn>.crt), the driver's by default. `flags`: more
         load generator flags (a deadline policy)."""
-        # The generator holds a connection per client and cosigner: far above Docker's default
-        # descriptor limit in the limit-sessions scenario. The cosigners keep the default.
+        # The generator holds a connection per client and cosigner: above Docker's default
+        # descriptor limit in the larger scenarios. The cosigners keep the default.
         argv = ["docker", "run", "--rm", "--label", "rutli-perf=loadgen", "--network", self.network,
                 "--ulimit", "nofile=65536:65536"]
         if self.uid:
@@ -550,12 +550,15 @@ class Runner:
 
         # Far more signatures in flight on one key through one leader than a node keeps sessions
         # for: some are refused or time out, the nodes stay up and give their memory and
-        # descriptors back.
+        # descriptors back. All 1 500 are sent within a second (open loop) over 30 connections,
+        # 50 requests on each: a session limit, not a connection storm. 1 500 fresh mTLS handshakes at
+        # once on a small machine run into the cosigner's 5 s handshake deadline, and the client
+        # sees a cut handshake as a transport error; that cost is the `connect` suite's measure.
         r, _ = self.scenario(
             "limit-sessions",
             lambda: self.loadgen(
-                ["sign", "--key", KEY_STEADY, "--name", "limit-sessions", "--count", "1500", "--clients", "1500",
-                 "--prefer", "cosigner1", "--no-failover"],
+                ["sign", "--key", KEY_STEADY, "--name", "limit-sessions", "--count", "1500", "--rate", "1500",
+                 "--clients", "30", "--prefer", "cosigner1", "--no-failover"],
                 timeout_secs=90, wall_timeout=900,
             ),
             allowed=("UNAVAILABLE", "DEADLINE_EXCEEDED", "ABORTED", "RESOURCE_EXHAUSTED"),

@@ -283,6 +283,13 @@ class KeyClasses(unittest.TestCase):
                                 {"namespace": "tenantb-frost-namespace", "hosted": "tenantb-rutli-enc"}])
         with open(os.path.join(here, "k8s-deploy.sh")) as f:
             deploy = f.read()
+        # After the migration suite the first tenant's namespace key is the imported one, which
+        # k8s-deploy.sh limits like a namespace key.
+        s.imported_key = "perf-mig1700000000-frost-import-cb0e86a9"
+        self.assertEqual(s.class_keys(s.tenants()[0])["namespace"], s.imported_key)
+        self.assertEqual(s.class_keys(s.tenants()[1])["namespace"], "tenantb-frost-namespace")
+        self.assertIn("key_id_prefix: perf-mig, per_min: 10, per_day: 200", deploy)
+        s.imported_key = None
         # The namespace rate limits and the ACLs of the install match the profile's names.
         for t, k in zip(s.tenants(), keys):
             self.assertIn(f"key_id_prefix: {k['namespace']}, per_min: 10, per_day: 200", deploy)

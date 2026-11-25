@@ -54,6 +54,19 @@ if q_need shfmt shell.shfmt.unformatted_files; then
     listed="$(q_lines "$W/shfmt.out")"
     unparsed="$(q_lines "$W/shfmt.err")"
     q_metric shell.shfmt.unformatted_files "$((listed + unparsed))"
+    # Say what differs, so a failing ratchet does not need a local shfmt to be fixed: the diff of every
+    # file counted (first 80 lines each, in a log group) and what shfmt could not parse.
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      echo "::group::shfmt -d $f"
+      shfmt -d "${SHFMT_FLAGS[@]}" "$f" 2>&1 | head -n 80 || true
+      echo "::endgroup::"
+    done <"$W/shfmt.out"
+    if [ -s "$W/shfmt.err" ]; then
+      echo "::group::shfmt could not parse"
+      cat "$W/shfmt.err"
+      echo "::endgroup::"
+    fi
   else
     q_null shell.shfmt.unformatted_files "shfmt failed (exit $rc)"
   fi

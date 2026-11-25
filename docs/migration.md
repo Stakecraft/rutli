@@ -92,7 +92,9 @@ numbers in brackets point there. Substitute the parameters from §2.
 
 `scripts/e2e-migration.sh` runs this procedure on Canton 3.6.1 in CI, with the commands as written here: a JCE participant
 with a party and contracts, Steps 1–5 against a local 2-of-3 cluster, a rollback before the point of no return (§6) and a
-second cutover, Step 7 and the parts of Step 8 a script can check. It cannot run Step 6 as written, which needs a Splice
+second cutover, Step 7 and the parts of Step 8 a script can check. The cluster suite (`docs/cluster-suite.md`, "The migration suite") runs the same script's
+cosigner half, Step 3 and the cosigner part of Step 8, on a Kubernetes cluster with the production
+profile, with the dealer in a pod of its own. It cannot run Step 6 as written, which needs a Splice
 validator: in its place the new participant makes the topology changes the Splice party migrator makes (remove the old
 trust certificate, host the party, import the reference ACS of Step 4.2 with `repair.import_acs`). The script's header
 lists what it does not cover.

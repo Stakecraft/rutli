@@ -14,6 +14,19 @@ use std::time::Duration;
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+/// The median, as a quantile.
+const QUANTILE_P50: f64 = 0.50;
+/// The 95th percentile, as a quantile.
+const QUANTILE_P95: f64 = 0.95;
+/// The 99th percentile, as a quantile.
+const QUANTILE_P99: f64 = 0.99;
+/// How many times shorter than its deadline a call is expected to finish (the "3x margin", #249).
+const DEADLINE_MARGIN_FACTOR: f64 = 3.0;
+/// The scale that rounds a value in milliseconds to three decimals.
+const MS_ROUNDING_SCALE: f64 = 1000.0;
+/// The scale that rounds a share of calls to six decimals.
+const SHARE_ROUNDING_SCALE: f64 = 1e6;
+
 /// The histogram whose percentiles a run reports.
 pub const SIGN_DURATION: &str = "rutli_sign_duration_seconds";
 /// Per-call durations at the calling leader, by `call` (the peer-liveness deadlines, #249).
@@ -230,71 +243,93 @@ pub fn report(
         else {
             // No baseline: everything this cosigner counted since it started would pass for the
             // run's own. Its gauges are still what they are.
-            for (series, &value) in &a.series {
-                if a.types
-                    .get(metric_name(series))
-                    .is_some_and(|t| t == "gauge")
-                {
-                    target.gauges.insert(series.clone(), value);
-                }
-            }
+            record_gauges(a, &mut target);
             out.scrape_errors.push(format!(
                 "{name}: not scraped before the run, so its counters are left out"
             ));
             out.targets.insert(name.clone(), target);
             continue;
         };
-        let cumulative = |series: &str| {
-            let metric = metric_name(series);
-            let base = metric
-                .strip_suffix("_bucket")
-                .or_else(|| metric.strip_suffix("_sum"))
-                .or_else(|| metric.strip_suffix("_count"))
-                .unwrap_or(metric);
-            [metric, base].iter().any(|m| {
-                a.types
-                    .get(*m)
-                    .is_some_and(|t| t == "counter" || t == "histogram")
-            })
-        };
-        target.counters_reset = restarted.contains(name)
-            || b.series.iter().any(|(series, &was)| {
-                cumulative(series) && a.series.get(series).is_none_or(|&now| now < was)
-            });
+        target.counters_reset = restarted.contains(name) || counter_went_down(a, b);
         let b = if target.counters_reset { &empty } else { b };
-        for (series, &value) in &a.series {
-            let metric = metric_name(series);
-            let base = metric
-                .strip_suffix("_bucket")
-                .or_else(|| metric.strip_suffix("_sum"))
-                .or_else(|| metric.strip_suffix("_count"))
-                .filter(|base| a.types.get(*base).is_some_and(|t| t == "histogram"));
-            let kind = a
-                .types
-                .get(base.unwrap_or(metric))
-                .map_or("untyped", String::as_str);
-            if kind == "gauge" {
-                target.gauges.insert(series.clone(), value);
-                continue;
-            }
-            if kind != "counter" && kind != "histogram" {
-                continue;
-            }
-            let delta = value - b.series.get(series).copied().unwrap_or(0.0);
-            if kind == "counter" {
-                if delta != 0.0 {
-                    target.counters.insert(series.clone(), delta);
-                    *out.counters.entry(series.clone()).or_default() += delta;
-                }
-            } else {
-                histograms.add(series, metric, base, delta);
-            }
-        }
+        tally_series(a, b, &mut target, &mut out.counters, &mut histograms);
         out.targets.insert(name.clone(), target);
     }
     out.peer_calls = histograms.peer_calls();
     out.sign_duration = histograms.sign_duration();
     out
+}
+
+/// Put the gauges of the scrape `a` into `target`.
+fn record_gauges(a: &Scrape, target: &mut TargetReport) {
+    for (series, &value) in &a.series {
+        if a.types
+            .get(metric_name(series))
+            .is_some_and(|t| t == "gauge")
+        {
+            target.gauges.insert(series.clone(), value);
+        }
+    }
+}
+
+/// Did a cumulative series (counter or histogram) of the scrape `b` go down, or vanish, by the
+/// scrape `a`? Then the cosigner restarted in between.
+fn counter_went_down(a: &Scrape, b: &Scrape) -> bool {
+    let cumulative = |series: &str| {
+        let metric = metric_name(series);
+        let base = metric
+            .strip_suffix("_bucket")
+            .or_else(|| metric.strip_suffix("_sum"))
+            .or_else(|| metric.strip_suffix("_count"))
+            .unwrap_or(metric);
+        [metric, base].iter().any(|m| {
+            a.types
+                .get(*m)
+                .is_some_and(|t| t == "counter" || t == "histogram")
+        })
+    };
+    b.series.iter().any(|(series, &was)| {
+        cumulative(series) && a.series.get(series).is_none_or(|&now| now < was)
+    })
+}
+
+/// Sort every series of the scrape `a` into `target` (gauges, counter deltas against `b`), into
+/// `total_counters` (the counter deltas summed over the cosigners) or into `histograms`.
+fn tally_series(
+    a: &Scrape,
+    b: &Scrape,
+    target: &mut TargetReport,
+    total_counters: &mut BTreeMap<String, f64>,
+    histograms: &mut Histograms,
+) {
+    for (series, &value) in &a.series {
+        let metric = metric_name(series);
+        let base = metric
+            .strip_suffix("_bucket")
+            .or_else(|| metric.strip_suffix("_sum"))
+            .or_else(|| metric.strip_suffix("_count"))
+            .filter(|base| a.types.get(*base).is_some_and(|t| t == "histogram"));
+        let kind = a
+            .types
+            .get(base.unwrap_or(metric))
+            .map_or("untyped", String::as_str);
+        if kind == "gauge" {
+            target.gauges.insert(series.clone(), value);
+            continue;
+        }
+        if kind != "counter" && kind != "histogram" {
+            continue;
+        }
+        let delta = value - b.series.get(series).copied().unwrap_or(0.0);
+        if kind == "counter" {
+            if delta != 0.0 {
+                target.counters.insert(series.clone(), delta);
+                *total_counters.entry(series.clone()).or_default() += delta;
+            }
+        } else {
+            histograms.add(series, metric, base, delta);
+        }
+    }
 }
 
 /// The histogram deltas a report reads, summed over the cosigners.
@@ -338,9 +373,9 @@ impl Histograms {
         Some(HistogramReport {
             count: self.sign_count,
             mean_ms: round3(self.sign_sum / self.sign_count * MS_PER_SEC),
-            p50_ms: q(0.50),
-            p95_ms: q(0.95),
-            p99_ms: q(0.99),
+            p50_ms: q(QUANTILE_P50),
+            p95_ms: q(QUANTILE_P95),
+            p99_ms: q(QUANTILE_P99),
         })
     }
 
@@ -385,23 +420,26 @@ fn peer_call_report(call: &str, buckets: &BTreeMap<String, f64>) -> Option<PeerC
     let within_third = deadline.and_then(|d| {
         cumulative
             .iter()
-            .find(|(bound, _)| (bound - d / 3.0).abs() < THIRD_EDGE_TOLERANCE_SECS)
+            .find(|(bound, _)| {
+                (bound - d / DEADLINE_MARGIN_FACTOR).abs() < THIRD_EDGE_TOLERANCE_SECS
+            })
             .map(|&(_, n)| n / total)
     });
     let q = |q: f64| round3(quantile(q, &cumulative) * MS_PER_SEC);
     Some(PeerCallReport {
         count: total,
-        p50_ms: q(0.50),
-        p99_ms: q(0.99),
+        p50_ms: q(QUANTILE_P50),
+        p99_ms: q(QUANTILE_P99),
         p999_ms: q(MARGIN_SHARE),
         deadline_ms: deadline.map(|d| round3(d * MS_PER_SEC)),
-        within_third: within_third.map(|w| (w * 1e6).round() / 1e6),
+        within_third: within_third
+            .map(|w| (w * SHARE_ROUNDING_SCALE).round() / SHARE_ROUNDING_SCALE),
         margin_3x: within_third.map(|w| w >= MARGIN_SHARE),
     })
 }
 
 fn round3(v: f64) -> f64 {
-    (v * 1000.0).round() / 1000.0
+    (v * MS_ROUNDING_SCALE).round() / MS_ROUNDING_SCALE
 }
 
 /// `histogram_quantile(q, …)` over cumulative buckets sorted by upper bound: linear interpolation

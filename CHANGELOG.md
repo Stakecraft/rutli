@@ -7,6 +7,137 @@ Upgrading a 0.4.x cluster to 0.5.0: [docs/upgrading-to-0.5.md](docs/upgrading-to
 
 ## [Unreleased]
 
+## [0.5.0-rc.1] — 2026-11-25
+
+_First release candidate of 0.5.0, the release the external audit reviews. Pre-1.0 and not yet externally audited: for soak and review, not for production key custody. **Several defaults change and some settings are required before a node starts** (peer TLS key pins, the production profile, signing intents, a minimum interval between refreshes): read "Changed (operators must act)" and "Changed (breaking default)" below, and follow [docs/upgrading-to-0.5.md](docs/upgrading-to-0.5.md) in order: the driver first, then the cosigners one at a time, and no hosted-key creation while the cluster runs mixed versions._
+
+### Added
+
+- **The cluster suite has a diagnostic pass** (`scripts/perf/cluster.py --diagnose`, see
+  `docs/cluster-suite.md`): it measures the flush cost of the cosigners' volume, ramps the load
+  around the throughput knee while recording each cosigner's CPU, CPU and IO pressure and writes,
+  and repeats the overloaded rate over 2, 20 and 200 keys, to tell CPU, a per-key lock and the
+  disk apart. `k8s-deploy.sh` gains `--generators N` and a diagnostic-only `--diagnostic-tmpfs`
+  install whose results are never used as a baseline. Test tooling only; nothing changes in the
+  cosigner, the driver or the chart.
+- **A scenario that ends in an unexpected code says why in its log**: a verdict (the cosigners
+  cut slow handshakes, the load generator was starved of CPU or descriptors, or undecided), the
+  cosigners' handshake timeouts, accept errors, open connections and connection limit, the load
+  generator's CPU throttling (Kubernetes) and peak descriptors against its limit, and the most
+  frequent error messages. `rutli-loadgen` reports its own peak descriptors (`fd_peak`,
+  `fd_limit`, Linux).
+- **The contested-DKG check of `limit-ceremony` tests what clients do**: `rutli-loadgen dkg
+  --retry-aborted N` retries a contended ceremony with jittered backoff and a fresh intent, and
+  checks that an `ALREADY_EXISTS` points at the group key the winners answered. The ten clients of
+  one key id must all end with that key or `ALREADY_EXISTS` for it.
+- **The cluster suite's load profile is measured** (`scripts/perf/profiles/devnet-validator.json`,
+  a DevNet validator over 7 days): x1 is that load's shape, the average (0.063 signatures/s), its
+  busiest minute (0.87/s) and its shortest burst (2.3/s), run one after another in every ramp step.
+  The run reports the headroom factor of the whole shape and a headroom against each measure; a
+  phase that fails drops out and the ramp goes on with the others. The former placeholder profile
+  is `synthetic-ecdh.json`, labelled as synthetic: the measured validator sends no ECDH.
+
+- **The cluster suite's load generator can follow the driver's deadlines**
+  (`cluster.py --driver-deadlines`, or `--sign-attempt-timeout-secs` / `--attempt-timeout-secs` /
+  `--request-timeout-secs`): a deadline per attempt, 5 s for signatures and 10 s for ECDH, with
+  failover to the next cosigner, within a budget per call, so that
+  disruption numbers say what a driver would see.
+
+- **Signs can rotate over the healthy cosigners (`frost.sign-leader`, default `sticky`).** Every
+  sign starts at one preferred leader (or at the next cosigner that has not answered another group
+  key for that key): while it is healthy, that cosigner leads every signature, and the other two
+  run their leader path only when a failover needs it. That stays the default.
+  With `frost.sign-leader = rotate` each sign starts at the next cosigner in turn, among those not
+  demoted within `frost.leader-recovery` and not answering another group key for that key. With
+  the cosigners' choice of the second member, each node then leads about 1/3 of the signs and takes
+  part in about 2/3. One call still has one attempt in flight, one signing intent and the same
+  deadlines. Ceremonies and hosted-key calls stay on the preferred leader in both modes.
+  - **Per-node sign rate limits:** under `rotate` the two cosigners that used to follow the leader
+    take part in about 2/3 of a key's signatures instead of 1/2. A limit sized for the key's whole
+    rate is unaffected. A limit sized for a non-leading node's old share needs raising before
+    `rotate` is switched on.
+  - **The default:** `sticky` in this release. Leaving the setting unset keeps the policy of
+    earlier releases and does not switch rotation on. `rotate` has not yet run on the test stands
+    for the two weeks asked of a default; it becomes the default in a later release.
+
+- **`rutli-cosigner keyfile prove` records that an epoch of a FROST key is proven.** A refresh commit shows that the nodes agreed, not that the shares sign together; `verify-key --sign-test` shows that, but only on the workstation that ran it. `keyfile prove --key-id K --epoch E --report verify.json` takes the report of `verify-key --sign-test --json`, checks it against this node's own live epoch, sharing, group key, roster and threshold, and writes a clear marker `keys/.proven/<key>.<epoch>.json` (with the report's SHA-256 and the node's clock). A node whose live epoch differs cannot stamp. The report is the operator's statement; the node cannot check who produced it. New gauges `rutli_key_epoch_proven{key}` and `rutli_key_epoch_age_seconds{key}`, and a warning alert `RutliKeyEpochUnproven` (unproven, key file older than three days). **Upgrade note:** after upgrading, every key alerts until `keyfile prove` has been run for its live epoch on each node (`docs/ceremonies.md`, "Proving an epoch"). Backup retention (a later change) will keep older epochs until the newer one is proven.
+
+- **`rutli-cosigner residue-scan`: an inventory of key files that are not the node's live state.**
+  It reads `data_dir` and any backups you name (directories, plain tars, single key files), and
+  lists:
+  - plaintext key files;
+  - files sealed under a DEK other than the current one;
+  - older epochs of a live share;
+  - key ids the node does not hold;
+  - staged shares of ceremonies that are not in progress;
+  - split-ceremony material;
+  - copies of hosted keys and tombstones, each with a note that one copy of a hosted key is the
+    whole key;
+  - temps, unknown directories and a non-empty `lost+found`.
+
+  `--legacy-master-env` reports whether the node's DEK is still the legacy master's derivation.
+  The scan takes no lock and writes nothing, so it can run beside the daemon. It reports what it
+  found on the paths given, never that a key is destroyed. Every report lists what a file walk
+  cannot see: freed blocks, snapshots, copies elsewhere, core dumps and swap. Exit 0, 1 or 2;
+  `--json` schema in `docs/residue-scan.md`.
+
+- **The cluster suite runs under the production profile** (`scripts/perf/k8s-deploy.sh`), with
+  everything it requires: operator and refresher roles, `signer_may_refresh: false`,
+  `require_epoch_match`, key-file v2, a pinned cluster id, and two tenants whose driver
+  certificates are pinned and limited to their own key prefixes. The matching load profile
+  `scripts/perf/profiles/production.json` adds three key classes: the signing keys carry the
+  measured ladder and the disruption load; each tenant's namespace key and hosted encryption key
+  sign or decrypt once during every disruption and during the upgrade, within the driver's
+  deadlines, and the namespace key's rate limit (10 a minute) must refuse the excess. The
+  `limit-ceremony` refreshes run with the refresher's certificate. Its contested-DKG clients also retry
+  `UNAVAILABLE` (a ceremony still resolving), which the driver hands Canton as retryable. `gen-frost-certs.sh` issues
+  extra client certificates (`RUTLI_EXTRA_CLIENTS`). Test tooling only.
+
+- **The load generator can start signatures as the driver's `frost.sign-leader` does**
+  (`rutli-loadgen --sign-leader rotate|sticky`; `cluster.py --sign-leader`, implied as `rotate` by
+  `--driver-deadlines`): rotate starts each signature at the next cosigner that has not failed in
+  the last 60 s. The cluster suite's `disrupt` gains slow-node scenarios (one cosigner's node
+  delayed 2.5 s under each policy, and 6 s under rotate) that record each cosigner's share of the
+  signatures it led and took part in. Test tooling only.
+
+- **`rutli-cosigner key show` and `key fingerprint`: read-only key commands** (`docs/admin-cli.md`).
+  `key show --key-id ID [--expect-fingerprint FP] [--json]` asks every cosigner what it holds
+  under an id and prints the public key, the Canton fingerprint (`1220…`), origin and epoch, and
+  whether the nodes agree, for a FROST key or a cluster-hosted key (an id with the `rutli-` tag is
+  read as hosted, any other as FROST, the cosigners' own rule). It runs the checks of `verify-key`
+  and `verify-hosted` over the same two read-only RPCs with the same operator certificate; with
+  `--expect-fingerprint` the verdict is the same. Without it the output is the cluster's own
+  report, compared with nothing: do not take an import's or a migration's expected fingerprint
+  from it. A report with any problem names no fingerprint for the cluster.
+  `key fingerprint --in FILE` computes the fingerprint of a public key file offline
+  (SubjectPublicKeyInfo as DER, PEM or hex, a Canton `keys.public.download` file, or a raw
+  Ed25519 key as 64 hex digits). No new RPC, role, config key or wire change, and nothing that
+  generates, imports or lists keys.
+
+- **The cluster suite reports the cosigners' peer-call timings** per scenario, ramp step and
+  diagnosis step (`peer_calls` in `cluster.json`, a table in the report): per call class the
+  count, p50/p99/p99.9 and the share within a third of its deadline, with every call that misses
+  that 3x margin flagged. The net-delay scenarios run at 50 and 150 ms by default. Test tooling
+  only.
+
+- **`RutliCosignerMemoryNearLimit`** warns when a cosigner's working set has been above 80 % of its
+  memory limit for 5 minutes (Kubernetes, from cAdvisor and kube-state-metrics). The chart's
+  `resources.limits.memory` default (320Mi) now states its rule: 1.5 times the highest working set
+  the cluster suite measured, plus the memory-backed `/tmp`. `docs/performance.md` gives the
+  measured peaks and about 75 KB per sign session in flight, for sizing a busier cluster.
+
+- **Where a signature's time goes** (#186). New histograms: `rutli_sign_round1_duration_seconds`
+  and `rutli_sign_round2_duration_seconds` (a member's rounds),
+  `rutli_sign_journal_append_duration_seconds` (lock wait included),
+  `rutli_nonce_marker_duration_seconds` and `rutli_intent_verify_duration_seconds`, each labelled
+  `result` only, and `rutli_sign_journal_fsync_duration_seconds` (no labels). New gauges:
+  `rutli_signs_in_flight` (signatures this node leads, raised and lowered as each starts and ends),
+  and the async runtime's workers, alive tasks and global queue depth (`rutli_runtime_*` gauges),
+  and the counter `rutli_runtime_busy_milliseconds_total` (busy ratio:
+  `rate(..[5m]) / 1000 / rutli_runtime_workers`), both sampled from the key-store watchdog thread. The blocking-pool queue depth
+  needs unstable tokio APIs and is not exported. Metrics only: nothing changes in what is signed,
+  journaled or refused.
+
 ### Changed (operators must act)
 
 - **Helm chart: a `helm upgrade` of a per-node install no longer restarts the cosigners; roll them
@@ -181,30 +312,6 @@ Upgrading a 0.4.x cluster to 0.5.0: [docs/upgrading-to-0.5.md](docs/upgrading-to
     refreshes": restoring a node needs its backup of the current epoch; a cluster rebuild needs `t`
     nodes' backups of one epoch; a refresh does not retire old shares or rotate the seal key).
 
-### Security
-
-- **The cosigner keeps serving when it runs short of file descriptors, and never stops serving
-  without saying so.** At start-up it raises its soft open-file limit to the hard limit and logs
-  both (`rutli_fd_limit`). It accepts gRPC connections in its own loop: an accept error such as
-  running out of descriptors is retried after a short backoff and reported
-  (`rutli_grpc_accept_errors_total`, alert `RutliGrpcAcceptErrors`), where it used to end the
-  server. Open connections are capped below the descriptor limit (the soft limit less 256, or half
-  of it under a limit below 512, at most 4096); past the cap new connections wait in the listen backlog
-  (`rutli_grpc_connections`, `rutli_grpc_connection_limit`, alert `RutliGrpcConnectionsNearLimit`).
-  A new connection gets 5 s to finish its TLS handshake (without TLS: to send its first
-  bytes; `rutli_grpc_handshake_timeouts_total`), and an error during a handshake no longer ends
-  the server. The server sends HTTP/2 keepalive pings
-  (every 60 s, 20 s timeout), so connections to peers that vanished are closed. If the gRPC server
-  ever returns without a shutdown request, the daemon logs it and exits non-zero. Also in 0.4.1.
-- **heapless 0.7.17: nine `unsound` RustSec advisories (RUSTSEC-2026-0574 to -0582) are ignored in
-  `frost/deny.toml`, with the reason recorded per advisory.** heapless comes in only through
-  frost-core 2.2.0 → postcard 1.1.3, and no release of either moves it to the fixed heapless 0.9.4.
-  frost-core calls only postcard's `to_allocvec` and `from_bytes`, which do not touch heapless;
-  postcard itself uses only heapless' `Vec` and `String`, in functions frost-core does not call;
-  and the cosigner and dealer binaries contain no heapless code (checked on their symbol tables).
-  No code change; the same holds for 0.4.0 as released. In the lockfile, spin moves from 0.9.8 to
-  0.9.9, because 0.9.8 was yanked. The ignores are also in 0.4.1, which keeps spin 0.9.8.
-
 ### Changed
 
 - **Helm chart: the PodDisruptionBudget sets `unhealthyPodEvictionPolicy: AlwaysAllow`** (new value
@@ -238,6 +345,39 @@ Upgrading a 0.4.x cluster to 0.5.0: [docs/upgrading-to-0.5.md](docs/upgrading-to
   `RutliSignUnknownSessions` (`deploy/monitoring`, warning) fires at more than 3 in 15 minutes
   on a node, so a single such request no longer alerts, and neither do the one or two a restart
   or a refresh leaves behind.
+
+- **Helm chart: the cosigner's `/tmp` and the backup sidecar's work directory are memory-backed and size-limited** (`tmp.sizeLimit`, default `64Mi`; `backup.workSizeLimit`, default `128Mi`), in both topologies, so what ceremonies and backup runs put there never reaches the Kubernetes node's disk. They count against the container memory limits, which grow with them: cosigner `320Mi` (was `256Mi`), backup sidecar `192Mi` (was `64Mi`). The sidecar links the key files into its work directory instead of copying them; the archive is unchanged, and a run that does not fit logs `BACKUP_FAILED reason=work-dir-full`. `scripts/check-deploy-policy.sh` refuses a disk-backed or unbounded `emptyDir` on a cosigner pod. Upgrade note: the pod templates change, so roll the cosigners one at a time (`scripts/upgrade-cosigners.sh`); a restore extracts the backup with `--exclude=./journal` (`docs/disaster-recovery.md`).
+
+- **Backup retention by epoch** (`backup.retention`, on by default; `rutli-cosigner backup-retain`). The backup sidecar deletes the archives of an older key epoch only when the newer epoch is proven (`keyfile prove`, from the previous change) and the proof is `backup.retention.minProofAgeDays` old (default 7); a complete verified archive of the proven epoch and the newest archive always remain. With no proof nothing is deleted by epoch. It deletes nothing when an archive's epoch cannot be read (v1 key files, a damaged tar), when this node's live epoch is behind its newest archive's (a node that missed a refresh), or on any error, and says why in the sidecar log (`BACKUP_RETENTION …`). `backup.destination.keep` still caps the number of archives but never takes the newest or the proven one. `backup-retain --dry-run` lists what it would delete. **Upgrade note:** the sidecar now mounts the cosigner's config read-only and runs the cosigner binary after each backup (the sidecar image must contain it, as the default does); the pod template changes, so roll the cosigners one at a time. Until `keyfile prove` has been run for a key's live epoch, its older archives stay (up to `keep`); the `RutliKeyEpochUnproven` alert says so after three days. Set `backup.retention.enabled=false` for the old count-only rotation. `docs/disaster-recovery.md`, "Backup retention". New warning alert `RutliBackupVolumeFilling` (a backup PVC over 80% full for an hour, from the kubelet volume metrics): the sidecar exports no metrics, and the directory can now exceed `keep` while older epochs are unproven or retention is skipping or failing.
+
+- **`verify-key` and `verify-hosted` print a little more.** The first line names the kind of key
+  (`(FROST)`, `(hosted)`) and prints the expected fingerprint in its canonical form. When every
+  check passed, the summary adds the fingerprint; for a FROST key it also adds origin, epoch,
+  refresh count and threshold when the nodes agree on them. `--json` gains `kind` and
+  `fingerprint` (null unless every check passed, a failed `--sign-test` included). For a symmetric
+  hosted key the empty `public key (SPKI)` line is gone. Checks and exit codes are unchanged, and
+  `keyfile prove` reads the report as before.
+
+- **A leader's signing partners are spread over every cosigner** (#193). A leader still signs with
+  itself; its partners now follow a hash of the intent's request id instead of always being the
+  lowest other identifiers. Over many signatures each cosigner takes part in about the same share:
+  about half each besides a sticky leader in 2-of-3 (before: 100 % and 0 %), about 60 % each in
+  3-of-5 (before: 100, 100, 60, 20, 20 %). Journal appends, nonce markers and flushes are spread
+  the same way, and no cosigner stays cold until a failover needs it. A leader keeps one order
+  for all its attempts on a request. A Sign without an intent keeps the roster order. No
+  configuration and no wire change; members of a mixed-version cluster run every check as before.
+  `docs/architecture.md`, "Which partners a leader signs with".
+
+- **A node number or key-envelope recipient from the wire that does not fit 16 bits is refused, and so is a config that lists more than 65,535 peers.** Before, a peer reporting node `65537` (or an envelope addressed to it) was read as node 1 and a roster of 65,536 would have wrapped `max_signers` to 0. The roster slot, the pinned key and the AEAD already held, so no key was ever exposed; the deviant value is now an error (`Config`), as it should be.
+
+- **The sign round 1 and round 2 deadlines are configuration** (#249). `peer_deadlines.sign_round1_ms`
+  (default 2000, 500 to 5000) and `peer_deadlines.sign_round2_ms` (default 5000, 1000 to 9000) replace
+  the constants, for a cluster whose burst latency leaves less than a 3x margin. A node rejects the
+  section until it runs this release, so set it only after every node is upgraded. The
+  `rutli_peer_call_duration_seconds` histogram gains buckets at 1.05, 2.1, 3.15 and 5.25 s, just above
+  the default deadlines, and at 4, 6, 7, 8, 9 and 9.5 s for configured ones.
+
+- **Helm chart: `peerDeadlines` sets the peer round deadlines of a signing session.** It renders the cosigner's `peer_deadlines` section (`signRound1Ms`, `signRound2Ms`); empty keeps the defaults, which are recommended. A value out of bounds fails `helm template`. Set it only after every cosigner runs a release that knows the section.
 
 ### Fixed
 
@@ -429,7 +569,390 @@ Upgrading a 0.4.x cluster to 0.5.0: [docs/upgrading-to-0.5.md](docs/upgrading-to
   `docs/migration.md` §10 (lesson a) saves and restores are now written at the synchronizer's protocol version: protocol
   version 35 no longer exists on Canton 3.7, so writing them at 35 fails there.
 
+- **The driver keeps its group-key pins across restarts (`frost.pin-dir`).** Until now a FROST
+  group key was pinned in memory only. After every driver restart it had to be agreed again, and
+  one cosigner answering a different key blocked the pin and with it signing. Now:
+  - a pin is written once, durably, before the key is used, and never replaced; every new pin is
+    also an audit-log entry (`group-key-pin`);
+  - once pinned, a cosigner that answers another key is logged at ERROR and routed around, for
+    `getPublicKey`, sign leader choice and `keyExistsAndIsActive`, which now checks the answer
+    against the pin;
+  - a first pin needs a roster majority of identical answers. A DKG's new key also needs no
+    disagreeing answer. For an existing key one dissenter is tolerated (reported and demoted) when
+    every endpoint has its own `tls-name`;
+  - `frost.expected-group-keys` lets the operator anchor a first pin to the ceremony record;
+  - a damaged pin file stops the start, naming the file, and so does a pin file that names another
+    key than its audit-log entry; a pin file that is lost while the audit log records it refuses
+    that key. Recovery is in `docs/disaster-recovery.md` §3i;
+  - `StateCheck --pin-dir` checks a copy read-only, and the production profile requires `pin-dir`;
+  - the DKG ceremony ids the driver sends intents for are written to `pin-dir` (`<key-id>.dkg`,
+    fsynced) before each request goes out. A driver killed between a DKG request and its reply (a
+    pod restart during a bootstrap) takes the key as its own on the next start. Without this, the
+    DKG fix (#169) would refuse it.
+
+  Without `pin-dir` the driver warns and behaves as before. **Upgrade:** add `pin-dir` on the
+  participant's state volume, ideally with `expected-group-keys` for the namespace key. The next
+  use pins.
+
+- **A DKG for a key another client created is refused instead of returned** (by a driver that
+  signs its ceremony intents, as the production profile requires). Since 0.4.0-rc.3 a
+  DKG for an id every cosigner already holds returns the existing key, so that Canton's retry after
+  a timeout succeeds. A second participant on the same cluster without `frost.key-prefix` was handed
+  the first participant's keys that way, without a warning. `DkgReply` now carries `existing` and
+  `origin_ceremony_id`, the DKG that created the key. The driver accepts an existing key only as a
+  retry of a ceremony it started itself. Otherwise the DKG fails with a message naming
+  `frost.key-prefix` and the new `frost.adopt-existing-keys`, for deliberately adopting a key after
+  checking it.
+  - **Restart.** With `frost.pin-dir` the driver keeps its ceremony ids durably (#168), so a
+    restart in the middle of a bootstrap adopts the key. Without `pin-dir` they live in memory,
+    and such a restart is refused. The message then says what to do: adopt the key with
+    `frost.adopt-existing-keys` once it is clear that no other participant uses the key prefix,
+    and remove the entry once the key is registered.
+  - **Rolling upgrade.** A 0.4.x driver ignores the new fields and behaves as before. A 0.5.0
+    driver with a leader older than 0.5.0 cannot tell and accepts the key with a warning, as before.
+    The DKG request is unchanged. The cosigners talk to each other as before (no peer message
+    changed).
+  - The Java stubs in `driver/src/main/java` were regenerated. They now also carry
+    `KeyEpochReply.stale_by_own_record`, which was missing from them.
+
+- **A cosigner that stops answering costs one short deadline, not a minute.** The driver's
+  channels had no keepalive and every attempt had the full 60 s deadline, so each call in flight to
+  a cosigner whose machine was powered off or cut off waited a minute before failing over. Now:
+  - HTTP/2 keepalive runs on every cosigner channel, also while idle (`frost.keepalive-time` 10 s,
+    `frost.keepalive-timeout` 5 s);
+  - every attempt has its own deadline: `frost.sign-attempt-timeout` (5 s) and
+    `frost.attempt-timeout` (10 s), both configurable, within `frost.request-timeout`, the
+    budget of the whole call (now 30 s, was 60 s). A DKG keeps the whole budget in one attempt;
+  - a failed-over sign keeps its intent, so the cosigners' per-request share cap still holds;
+  - a cosigner that lost the lead gets it back after `frost.leader-recovery` (60 s), and each
+    change of leader is logged with the leader order.
+
+  A cluster that cannot be reached in time (`UNAVAILABLE`, `DEADLINE_EXCEEDED`, the budget spent)
+  now reaches Canton as a retryable error, so Canton retries the call. Before, it was a final error.
+  Refusals, bad signatures, pin mismatches and disagreement stay final. Why 5 s for signs: every
+  confirmation response is a threshold signature unless session signing keys are on, and it must
+  be sequenced within the confirmation response timeout (30 s by Canton's default).
+  `docs/architecture.md`, "Deadlines, keepalive and what Canton waits for".
+
+- **A cosigner that stops answering, or loses its volume, costs a signature one short deadline,
+  not one or two 10 s timeouts** (#153, #174, #176). Before, peer calls had one 10 s timeout that
+  started only after the connection, peer channels had no keepalive (a healed partition or a
+  replaced pod left every call on a dead connection waiting the full timeout), the leader waited
+  for the abort of the member that had just failed, and a leader cut off from its peers held a
+  signature until the client gave up. Now:
+  - peer channels run HTTP/2 keepalive (5 s, PONG within 3 s, also while idle), TCP keepalive and,
+    on Linux, `TCP_USER_TIMEOUT`; a connection must be up within 3 s, and a dead one is replaced
+    within about 8 s;
+  - every peer call has its own deadline on the leader's clock (sign round 1 2 s, round 2 5 s,
+    abort 1 s, `NodeInfo`/`KeyEpoch`/`CeremonyStatus` 3 s; ceremonies and hosted-key writes keep
+    10 s), sent to the peer as `grpc-timeout`. Inside a Sign that carries a deadline the rounds fit
+    it: a deadline under 1 s is refused at once with `DEADLINE_EXCEEDED`; without one a signature
+    has 20 s (was 45 s). At most n − t + 1 subset attempts per signature (2 in 2-of-3, 3 in
+    3-of-5; was 10), stopped earlier by that clock; a Sign that gives up answers `UNAVAILABLE` with
+    the `rutli-error: attempts-exhausted` trailer;
+  - each leader keeps a liveness state per peer, fed only by its own calls: a peer that is
+    unreachable, whose sign rounds stop completing while it reports no progress (`rutli-load` reply
+    metadata), or that answers `keystore-down` is tried last — never skipped — until a probe or a
+    trial (one signature per window tries a subset with it first) brings it back. A busy member that
+    keeps making progress is never marked down, nor is a 0.4.x member, which reports no load; a
+    `KeyEpoch` or `CeremonyStatus` past its deadline marks nothing down. DKG, refresh and hosted-key
+    writes do not consult it;
+  - a leader that cannot reach t cosigners answers `UNAVAILABLE` with the `rutli-error: no-quorum`
+    trailer before round 1; an overloaded leader (512 signatures in flight, or its own round late)
+    answers `UNAVAILABLE` `overloaded`; the driver fails over on both as before;
+  - a member whose round-2 store work fails with a definite I/O error marks its key store down at
+    once and answers with the `rutli-error: keystore-down` trailer; store work still running after
+    3 s starts a key-store probe at once. The next probe that finds the store working clears it,
+    with no restart. A sign round that waited for a blocking thread past its caller's deadline is
+    not started.
+
+  New metrics `rutli_peer_call_duration_seconds{call}`, `rutli_peer_state{peer,state}`,
+  `rutli_peer_breaker_transitions_total{peer,to,reason}` and
+  `rutli_sign_fast_refusals_total{reason}`, and alerts `RutliPeerDown`, `RutliPeerFlapping` and
+  `RutliNoQuorum` (critical). No configuration and no wire-format change; a mixed-version cluster
+  works (an older member's refusals read as plain `UNAVAILABLE`). `docs/architecture.md`, "Peer
+  liveness".
+
+- **The driver no longer tells Canton that a key does not exist, or that a signature cannot be made,
+  because one cosigner said so while the others could not be reached.** Canton retries a retryable
+  KMS error and never retries a final one. `keyExistsAndIsActive` for a FROST key, a group-key read,
+  every call on a hosted key that is or may be EC, and a sign whose leader answers from its own
+  state (`NOT_FOUND`, a ceremony in progress, a signature that does not verify) are now decided over
+  the whole roster, whatever the order the cosigners were asked in: the answer is final once all but
+  one cosigner gave it (2 of 3, 4 of 5); short of that, while a cosigner is unreachable or does not
+  answer within the attempt deadline, the call fails with that cosigner's status, which is
+  retryable, and the audit entry carries `unconfirmed=<endpoint> reason=<CODE>`
+  (`docs/observability.md`). Before, such a call could end `NOT_FOUND`, final, depending on the
+  order. A ciphertext that a cosigner's shared secret does not open still ends as an ECIES failure.
+  `keyExistsAndIsActive` for a FROST key the driver has not pinned now asks the next cosigner after
+  a `NOT_FOUND` instead of returning the first one. No configuration change.
+
+- **A hosted-key delete fence no longer reads the key store on a runtime worker** (#126). The fence a
+  hosted-key delete takes on each cosigner reads the key file; it now runs on a blocking thread like
+  every other key-store access, also for the leader's own node. A hung data volume during a delete
+  parks that thread instead of stalling Health, `/metrics` and other requests on a node with one
+  runtime worker (the default CPU limit).
+
+- **A key generation or a sign that meets a ceremony already holding the key is retried by Canton
+  instead of failing for good.** Canton retries a retryable KMS error and never retries a final
+  one, and the driver reported only `UNAVAILABLE` and `DEADLINE_EXCEEDED` as retryable. The
+  cosigners' "not now" is now retryable too: `ABORTED` (a DKG or refresh ceremony holds the key,
+  the sign session is gone, this ceremony lost to a newer one), and the same "ceremony … is already
+  in progress" when a leader passes a member's refusal on as `INTERNAL`. `ABORTED` for conflicting
+  hosted-key material (`hosted-conflict`) and every other `INTERNAL` stay final. A DKG is still not
+  re-run on another cosigner by the driver itself; the retry is Canton's (`docs/architecture.md`,
+  "What Canton waits for"). No configuration change.
+
+- **A burst of new connections no longer waits seconds before a cosigner accepts it** (#181). The gRPC
+  listener asked the kernel for a listen backlog of 128; a burst of new clients (every driver
+  reconnecting after a cosigner restart) overflowed it, the kernel dropped their connection attempts,
+  and each client waited out its retransmissions (1 s, 3 s) and often its 5 s connect timeout. The
+  listener now asks for 4096, which the kernel caps at `net.core.somaxconn`; the start-up line shows
+  the effective value and warns when `somaxconn` caps it lower.
+
+- **A cosigner that lacks a hosted key no longer makes the driver tell Canton that the key does not
+  exist.** RSA decrypt, symmetric encrypt and decrypt, and `getPublicKey` / `keyExistsAndIsActive`
+  for an RSA key returned the first cosigner's `NOT_FOUND` at once, as a final error, also when the
+  other cosigners held the key. The driver now asks the next cosigner (audit note
+  `failover=<from>→<to> reason=NOT_FOUND`), and the one without the key loses the lead. When no
+  cosigner serves the call, the rule of the FROST and EC calls applies: `NOT_FOUND` is final once
+  all but one cosigner said so; while a cosigner that may hold the key could not be reached the
+  call is retryable, with `unconfirmed=<endpoint> reason=<CODE>` in the audit entry. A rate limit
+  (`RESOURCE_EXHAUSTED`) is still returned at once and never routed around. For a hosted key whose
+  type the driver has not seen yet, the hop past a cosigner without it is noted as `failover=`,
+  no longer `ec-failover=` (which now marks an ECIES decrypt only). No configuration change.
+
+- **A lookup of a key that no cosigner has no longer takes the lead from every cosigner.** Since
+  the driver asks the next cosigner after a `NOT_FOUND`, each cosigner that answered so lost the
+  lead at once; for a wrong or deleted key id that was all of them, and with
+  `frost.sign-leader = rotate` the signs then went to one cosigner for `leader-recovery`. A cosigner
+  that says it lacks a key now loses the lead only when another cosigner serves the call, and the
+  lead goes to that one. Applies to hosted-key calls and to `keyExistsAndIsActive` for a pinned
+  FROST key.
+  (Unreleased behaviour; no configuration change.)
+
+- **The nonce store makes its "this key has signed here" sentinel durable before pruning.** Before a
+  pruning pass removes any nonce marker, the `.signed` sentinel is now complete and on disk (file
+  and directory fsynced), also when an earlier pass already created it. A sentinel that differs
+  from what a complete write leaves is rewritten through a temporary file and a rename, and a name
+  that is not a regular file (a link, a FIFO, a directory) stops the pass before anything is
+  removed. The sentinel is what `discard-partial-key` relies on to refuse a key that has signed on
+  the node.
+
+- **A sign that every cosigner refuses from its own state no longer takes the lead from every
+  cosigner.** A sign leader that answers `NOT_FOUND`, `ABORTED`, `FAILED_PRECONDITION` or
+  `UNIMPLEMENTED` (its share is gone, a ceremony holds the key, an older release) loses the lead.
+  When all of them answered so, all lost it, and with `frost.sign-leader = rotate` the signs for
+  every key then went to one cosigner for `leader-recovery`. Now none loses the lead when every
+  cosigner answers so. Nothing else changes: such a leader loses the lead as before when another
+  leader signs or fails in another way, when the request budget is spent, or when a later leader's
+  refusal ends the sign. (Unreleased behaviour; no configuration change.)
+
+- **One cosigner's reply no longer changes what the driver knows a hosted key to be.** The driver
+  remembers the spec of each hosted key it has seen (RSA, AES, EC); a key id is never used twice,
+  so the spec of an id does not change. A `getPublicKey` or `keyExistsAndIsActive` reply under
+  another spec replaced the remembered one. Such a reply is now passed over like "not found": the
+  next cosigner is asked (audit note `reason=OTHER_SPEC`), and the one that answered so loses the
+  lead when another serves the key. The driver then asks every cosigner what it holds, and the
+  remembered spec changes only when all but one of them, and at least two, hold the key under one
+  other spec (audit note `hosted-spec=<old>→<new>`). Also: a hop of such a read past a cosigner
+  that lacks a key known to be EC is noted `ec-failover=` again, and the retryable "not a final
+  answer" error keeps the gRPC trailers of the cosigner's status. (Unreleased behaviour; no
+  configuration change.)
+
 ### Security
+
+- **The cosigner keeps serving when it runs short of file descriptors, and never stops serving
+  without saying so.** At start-up it raises its soft open-file limit to the hard limit and logs
+  both (`rutli_fd_limit`). It accepts gRPC connections in its own loop: an accept error such as
+  running out of descriptors is retried after a short backoff and reported
+  (`rutli_grpc_accept_errors_total`, alert `RutliGrpcAcceptErrors`), where it used to end the
+  server. Open connections are capped below the descriptor limit (the soft limit less 256, or half
+  of it under a limit below 512, at most 4096); past the cap new connections wait in the listen backlog
+  (`rutli_grpc_connections`, `rutli_grpc_connection_limit`, alert `RutliGrpcConnectionsNearLimit`).
+  A new connection gets 5 s to finish its TLS handshake (without TLS: to send its first
+  bytes; `rutli_grpc_handshake_timeouts_total`), and an error during a handshake no longer ends
+  the server. The server sends HTTP/2 keepalive pings
+  (every 60 s, 20 s timeout), so connections to peers that vanished are closed. If the gRPC server
+  ever returns without a shutdown request, the daemon logs it and exits non-zero. Also in 0.4.1.
+- **heapless 0.7.17: nine `unsound` RustSec advisories (RUSTSEC-2026-0574 to -0582) are ignored in
+  `frost/deny.toml`, with the reason recorded per advisory.** heapless comes in only through
+  frost-core 2.2.0 → postcard 1.1.3, and no release of either moves it to the fixed heapless 0.9.4.
+  frost-core calls only postcard's `to_allocvec` and `from_bytes`, which do not touch heapless;
+  postcard itself uses only heapless' `Vec` and `String`, in functions frost-core does not call;
+  and the cosigner and dealer binaries contain no heapless code (checked on their symbol tables).
+  No code change; the same holds for 0.4.0 as released. In the lockfile, spin moves from 0.9.8 to
+  0.9.9, because 0.9.8 was yanked. The ignores are also in 0.4.1, which keeps spin 0.9.8.
+
+- **A cosigner no longer makes hosted key material servable on one peer's word.** Up to 0.4.0 one
+  compromised cosigner could get an honest node to store its own material for a hosted key id that
+  node did not hold yet: by pushing it during another node's `GenerateKey`, by fencing the id
+  itself and pushing, by answering a read-repair first, or through the sweep's push, which then
+  spread the copy. A leader also counted a node holding other material as a failed replica, so the
+  leader and one more node could report a key created while a third served something else. Now:
+  - A node stores a hosted key it does not hold only when two peers return the same material and
+    every other peer answers, with no other material, no copy it cannot check and no valid
+    tombstone (read-repair, the anti-entropy sweep, a leader that finds the key on its peers). Only
+    an answer counts: a silent peer is unknown, never "does not hold it". Short of that it stores
+    nothing and answers `UNAVAILABLE` (trailer `rutli-error: hosted-unconfirmed`); it answers
+    `NOT_FOUND` only when `n - write_quorum + 1` nodes said they hold nothing under the id, or a node
+    holds a tombstone for it (which a node lacking the key now applies before it pulls). This holds
+    on every path that reads a key: `PublicKey`, `KeyInfo`, `Decrypt`, `EcdhDerive`,
+    `SymmetricEncrypt`, `SymmetricDecrypt`. Read-repair fan-outs are capped at 20 a second per node;
+    past that a lookup answers `UNAVAILABLE`, never `NOT_FOUND`.
+  - The anti-entropy sweep no longer pushes. Each node pulls what it lacks, once per key per sweep.
+  - A push into an id a node lacks is accepted only from the caller holding that node's generation
+    fence for the id under the ceremony id it names, and only if no other peer that answers holds
+    different material, a copy the node cannot check, or a valid tombstone.
+  - A conflict aborts a generation: the leader rolls it back and answers `ABORTED` (trailer
+    `rutli-error: hosted-conflict`). A rollback that misses a node is logged and counted
+    (`rutli_hosted_rollback_incomplete_total`, `RutliHostedRollbackIncomplete`). A leader that lacks
+    the id adopts a key its peers confirm instead of minting one, refuses over an unconfirmed
+    copy, and mints only when `n - write_quorum + 1` nodes answered that they hold nothing under
+    the id (with five nodes and `write_quorum: 2`, two nodes down stop generation). The leader
+    writes a new key to its own disk only after the write quorum holds it. A rollback purge undoes
+    only a write made under the same fence instance, and ends that fence on the node it reaches.
+  - Each pull or push check is charged to a per-node fan-out ceiling, and one sweep pulls at most
+    256 missing ids (64 per listing peer; ids more peers list first); the rest wait for the next
+    sweep. Decrypt budgets are charged once the key is loaded.
+  - Times on a pulled key are the latest of the agreeing peers', not the earliest.
+  - The sweep lists its peers at the same time, 10 s each, and goes on without a peer that hangs.
+  - A key from a peer whose creation or undelete time lies in the future (beyond
+    `signing_policy.clock_skew_secs`) is refused, so it cannot make itself undeletable. An RSA key
+    whose public half is not its own is refused, as EC keys already were.
+  - Every refusal is logged with the peer and the key and counted in the new
+    `rutli_hosted_replication_refusals_total{reason}`; conflicts also count in
+    `rutli_anti_entropy_conflicts_total`. Keys held with a future time are reported in the new
+    `rutli_hosted_keys_future_timestamp`. New alerts `RutliHostedReplicationRefused` and
+    `RutliHostedKeyFutureTimestamp`.
+  - `GenerateKeyReply` carries the leader's `commitment`, and `KeyInfo` with `local_only` reports a
+    node's own copy (`commitment`, derived `public_key_der`, no read-repair), for the driver's check
+    after a generation (the generate-intent entry).
+
+  What stays open, in `docs/security/threat-model.md`: a plant still lands when every other holder
+  is unreachable from the receiving node, and with `write_quorum: 2` a compromised cosigner can be
+  one of the two holders without keeping a copy. (A compromised cosigner fencing an id nobody has
+  created yet is closed by the client-signed generate intent, a separate entry.) With honest nodes
+  only, a leader that dies after writing one replica, with that replica's node down when the client
+  retries, can still leave the id forked (paged as a conflict); `docs/hosted-keys.md` has the step
+  table.
+
+  **What changes for operators:**
+  - A key held by one node only is no longer copied automatically. That is a key whose other
+    holders are gone for good, a key written with `write_quorum: 1`, or a cluster of two cosigners.
+    `RutliHostedKeyCriticallyUnderReplicated` pages for it; copy it by hand with `export-key` and
+    `import-key` (`docs/hosted-keys.md` §4, `docs/disaster-recovery.md` §3c).
+  - `import-key` writes to one node, and the sweep no longer spreads it from there: run it on every
+    cosigner, or on two and let the third pull.
+  - After losing the whole cluster, restore two nodes' backups (or one, plus a hand copy).
+  - The daemon warns at startup when `hosted_keys.write_quorum` is below 2 or the roster has fewer
+    than three cosigners.
+
+  **Upgrade note (from 0.4.0):** upgrade one cosigner at a time, and **do not create or delete
+  hosted keys while the cluster is mixed**; existing keys keep being served. Upgraded nodes enforce
+  the new rules only on what they accept. A 0.4.0 node still accepts a push from any peer, pulls
+  the first copy and, as leader, writes its own copy first and treats a conflict as a failed
+  replica; a 0.4.0 leader that dies after its own write can still fork the id with a retry. A 0.4.0
+  node answers NOT_FOUND for a deleted key (it ignores `include_tombstone`), so until every node is
+  upgraded a deleted key can be pulled back from two old replicas until the next sweep applies the
+  tombstone. A 0.4.0 node's sweep push to an upgraded node is refused (`reason="unfenced"`,
+  `RutliHostedReplicationRefused`) until the upgraded node has pulled the key itself. Before you start, run `verify-hosted` for every hosted key and check
+  `rutli_anti_entropy_conflicts_total`: a replica that diverged earlier is not repaired by the
+  upgrade (`docs/hosted-keys.md` §4).
+
+- **Creating a hosted key needs a client-signed generate intent.** Before, a genkey fence needed
+  no client authorization, so one compromised cosigner could fence an id nobody had created, store
+  material it chose on one honest node and keep a copy itself; as the second agreeing peer it then
+  had the material spread by pull, and a later generation adopted it. Now `GenerateKey` carries a
+  `SignedIntent` with purpose `generate-key`, signed by the driver with its mTLS key: the cluster id,
+  the key id, the spec, the roster identifier of the cosigner asked to lead, a request id (the
+  ceremony id is `genkey-<hex(request_id)>`) and a short validity.
+  - Every node verifies it at the genkey fence, before it takes the guard, through the same
+    verifier as DKG intents: signer on `signer_allowlist` and within `signer_acl`, its pin, cluster,
+    key, spec, and that the cosigner fencing it is the leader the intent names. The fence marks the
+    request id spent, durably, on every node it reaches. A push that would create a copy is
+    accepted only under the guard such a fence took, for the spec it declared (an identical copy
+    already held stays a no-op). The leader checks the intent on `GenerateKey` too
+    (the signer must be the caller), and fences its own node first, so nothing is minted before
+    its own node verified the intent.
+  - A cosigner shown the intent in its fence cannot use it: the intent names another leader.
+  - Without a valid intent: `PERMISSION_DENIED` at the leader, and a peer refuses the fence and any
+    push that would create a copy. Counted in `rutli_ceremony_intent_refusals_total{reason}` (new reasons `spec` and
+    `leader`) and logged with the asking peer and the key; pushes in
+    `rutli_hosted_replication_refusals_total` (new reasons `spec`, `intent`, `mixed-version`).
+    `RutliCeremonyIntentRefused`, `RutliCeremonyIntentAbsent` and `RutliHostedReplicationRefused`
+    cover them.
+  - The switch is the existing `signing_policy.require_ceremony_intent` (on by default with TLS).
+    With it off, a generation without an intent is accepted, counted in
+    `rutli_ceremony_intent_absent_total` and warned about; an intent that is present is still
+    verified in full. Opting out for a DKG now also opts out for hosted keys. The opt-out on one
+    node exposes the whole cluster: with one compromised holder it makes the two copies of a key no
+    client asked for (`write_quorum: 2`), and the enforcing nodes then pull it. It is meant only as
+    a temporary state of a rollout, on every node.
+  - The driver signs a fresh intent for every endpoint it tries, after asking that endpoint for its
+    roster identifier (new `Capabilities.node_identifier`; an endpoint that does not report one is
+    refused). After `GenerateKey` it asks every endpoint for its own copy (`KeyInfo`,
+    `local_only`) and gives the key id to Canton only when at least two cosigners hold the reply's
+    commitment, spec and public key and none reports other material. When it is short only because
+    endpoints were silent, the next endpoint leads the same id under a fresh intent and is checked
+    again (each endpoint once per call); the check uses what is left of the driver's
+    request-timeout, keeping room for one more attempt. Otherwise the call fails, not retryable, and that leader
+    does not become the preferred one; one endpoint that reports other material is enough, and its
+    statement is not checked, so a faulty or compromised node can veto a generation this way. The
+    same check applies when `GenerateKey` returns an existing key.
+  - A leader asked to generate with an intent refuses (`FAILED_PRECONDITION`, `ceremony refused: …
+    speaks hosted-key protocol 0`), before fencing anything, while a reachable cosigner predates
+    generate intents (new `NodeInfo.hosted_protocol`; 0.4.0 reports 0). An unreachable one is
+    skipped, as by the fence.
+  - The leader the client asked still chooses the key material and can veto the generation; it
+    reads every hosted key anyway, and the driver's check stops a key the other nodes do not
+    confirm from reaching Canton. It can still push other material than it reports: the check then
+    refuses, but that material stays under the id until an operator removes it. A leader that dies after one replica still leaves a copy that node serves
+    (`docs/hosted-keys.md`, "A leader that dies mid-generation").
+  - Proto: `SignIntent.hosted_spec` (11) and `leader` (12), `GenerateKeyRequest.intent` (3),
+    `CeremonyFenceRequest.spec` (8; `intent` (7) is now valid on a genkey fence),
+    `CapabilitiesReply.node_identifier` (4), `NodeInfoReply.hosted_protocol` (5). `FetchKeyRequest`
+    3, `FetchKeyReply` 5–6 and `KeyInfoReply` 7–8 are reserved. The driver's Java stubs are
+    regenerated.
+
+  **Upgrade note (from 0.4.0):** a 0.5.0 cosigner refuses a generation without an intent, and a
+  0.4.0 driver signs none. Upgrade the driver first: against 0.4.0 cosigners it refuses to generate
+  hosted keys (`FAILED_PRECONDITION`, "does not report its roster identifier"), and everything else
+  works as before. Then roll the cosigners with the default switch. While the cluster is mixed,
+  generation is refused by the driver at a 0.4.0 endpoint, by a 0.5.0 leader while any 0.4.0
+  cosigner it can reach is up ("speaks hosted-key protocol 0"), and at a 0.4.0 leader's fence by
+  0.5.0 peers. With the 0.4.0 node unreachable, a 0.5.0 leader completes the generation on the
+  upgraded nodes (client-authorized). Pause key creation (onboarding, rotation) until every
+  cosigner runs 0.5.0. To roll the cosigners first instead, add
+  `require_ceremony_intent: false` to each cosigner's config as you upgrade it; the 0.4.0 driver
+  then keeps generating, at the old risk (a compromised cosigner can create a key nobody asked for,
+  cluster-wide even if only one node opted out, and the switch also stops requiring DKG and refresh
+  intents). Upgrade the driver after the last
+  cosigner, then remove the opt-out on every node. To roll the driver back below 0.5.0, turn the
+  opt-out on first. `docs/hosted-keys.md`, "Upgrading from 0.4.0".
+
+- **The cosigner turns core dumps off at start and wipes key shares from memory when it drops
+  them.** The daemon sets `RLIMIT_CORE = 0` and, on Linux, `PR_SET_DUMPABLE = 0` before it opens
+  a key store, and logs one line saying what took effect (a warning names what did not). The same
+  code now serves `rutli-dealer`. A FROST share held by the process (a loaded key file, the signing
+  cache's copy, a ceremony's new share) is zeroized when dropped; before, the signing share stayed
+  in freed memory. One copy is still not wiped: the old share the FROST library consumes during a
+  refresh, which it drops unwiped (an upstream change). See `docs/production-profile.md`.
+
+- **FROST library 3.0.0 (frost-ed25519 / frost-core, from 2.2.0).** 3.0.0 wipes from memory on drop
+  what 2.2.0 left behind: signing keys, secret shares, key packages, signing nonces and the DKG
+  secret packages. Key files, split bundles, wire messages and key digests stay byte-identical to
+  2.2.0 in both directions. A cluster can therefore be upgraded one node at a time, sign and run
+  ceremonies with mixed versions, and a node can be rolled back to 0.4.x/2.2.0 and load every key
+  file written meanwhile. A key file or split bundle whose public key package records
+  `min_signers` (which Rütli never writes) is refused. Intermediate values inside the library are
+  still not wiped; process isolation remains the control for those.
+
+- **The cosigner image applies Debian's security updates.** The runtime stage of `frost/Dockerfile`
+  runs `apt-get upgrade` on top of the pinned base, which takes the Debian security updates
+  published after the digest was taken (libc and zlib at the time of writing, #158). What Debian has no fix for (OpenSSL, util-linux and other
+  packages of the slim base that the daemon does not use) remains; `docs/image-vulnerabilities.md`
+  has the numbers. The image build check now scans the image it builds and prints the counts.
 
 - **Release images are built on GitHub-hosted runners, signed and attested.** `publish-image.yml` no
   longer runs on the self-hosted CI runners (`vars.CI_RUNNER`), where a job is root on the runner's
@@ -457,6 +980,116 @@ Upgrading a 0.4.x cluster to 0.5.0: [docs/upgrading-to-0.5.md](docs/upgrading-to
   weekly, and checks the result has the attestation structure the release requires. It also fails
   if an action is not pinned by SHA or if the Dockerfile and `rust-toolchain.toml` name different
   Rust versions.
+
+### Build
+
+- **Every push to main runs the whole set of checks once, unfiltered, and a red main opens an issue.**
+  `e2e.yml`, `image-build-check.yml`, `cluster-suite.yml` and `load.yml` now run on every push to
+  main (before: only when a path filter matched, or only on pull requests; main broke unnoticed
+  when two changes met that no single pull request's checks covered). The new workflow
+  `main-status.yml` watches them and CI: on a failure it opens the issue "main is red" (labels
+  `prio:p0`, `type:test`) with the first failing commit, the failing jobs and links, or comments on
+  the open one; it closes the issue when every check is green on the tip of main. Pushes to main are
+  never cancelled by a later push. The load test on a push runs on a GitHub-hosted runner and
+  compares nothing, so the weekly comparison keeps its baseline on the repository's runner; its
+  baseline lookup now ignores runs from pushes. The e2e workflow's own failure issue is replaced by
+  "main is red". README: status badge for main.
+
+- **Quality ratchet for every language in the repository.** The "Quality" workflow measures Rust
+  (clippy, rustfmt, tests, coverage, cargo deny, unsafe code, rustqual), the Scala driver (warnings,
+  tests, coverage, scalafmt), shell, Python, Dockerfiles, GitHub Actions, Helm/k8s manifests,
+  protobuf, Semgrep, gitleaks and typos, and compares the numbers with `quality/baseline.json`. A pull
+  request fails when it makes a gated metric worse; old debt does not block it. Pull requests run the
+  areas they touch, pushes to main run everything with coverage (watched by "Main status"), cargo
+  audit and a scan of the released image run nightly, and a report of the last release against main
+  runs on Mondays. `scripts/quality-report.sh` compares any two refs; the first report, v0.4.0 to
+  main, is in `quality/reports/`. See `quality/README.md`.
+
+- **Changelog fragments.** A pull request adds one file `changelog.d/<PR number>.<section>.md` instead of
+  editing `CHANGELOG.md`, so merges no longer conflict on the same lines. `scripts/changelog.py check`
+  validates the fragments, `scripts/changelog.py assemble <version> <date>` writes the release section
+  at release time, and the "Changelog" workflow requires a fragment (or the label `no-changelog`) on a
+  pull request that changes `frost/`, `driver/`, `deploy/` or `scripts/`. Until 2026-12-18 an edit of
+  `CHANGELOG.md` itself also passes. The existing `[Unreleased]` text stays where it is. See
+  `changelog.d/README.md`.
+
+- **A new push to a pull request cancels that pull request's earlier CI runs.** `ci.yml` and
+  `image-build-check.yml` get a concurrency group per pull request with `cancel-in-progress` for
+  `pull_request` events only; a push to main, a schedule or a manual run has its own group (the run
+  id) and is never cancelled or replaced. Less load on the two self-hosted runners.
+
+- **`PERF_RUNNER` for measured runs, and a cache plan before CI moves to hosted runners.** The
+  scheduled load test now runs on `vars.PERF_RUNNER` (or `vars.CI_RUNNER` when unset), so clearing
+  `CI_RUNNER` does not move a measured run to hosted hardware; a baseline from another kind of
+  runner is not compared. The Rust caches of `ci.yml`, `e2e.yml` and `proptest.yml` are saved by
+  main only (before, each pull request saved its own 440 MB copy and the repository's cache sat at
+  10.4 of 10 GB). New weekly workflow "Cache usage" warns at 8 GB and fails at 9.5 GB.
+  See `docs/ci-cache.md`.
+
+- **CI checks that the self-hosted runner's installed job-started guard is the repository's.**
+  `scripts/check-runner-guard.sh`, run daily by the new workflow "Runner guard" on the
+  measured-runs runner (`vars.PERF_RUNNER`), compares the hook the runner runs
+  (`ACTIONS_RUNNER_HOOK_JOB_STARTED`) with `deploy/ci-runner/job-started-guard.sh` and names the
+  runner when they differ: a warning on a pull request, a failure otherwise.
+
+- **The release path is proven without a tag.** A new hosted job in `image-build-check.yml` runs the
+  steps of `publish-image.yml` (metadata, login, build by digest with SBOM and provenance, the index
+  with its checks) against a registry that runs inside the job, with dummy credentials and no real
+  registry. It runs on pull requests that touch `frost/` or the workflows, on main and weekly, and a
+  new check keeps its docker action pins equal to the release workflow's. The checkout pin of
+  `runner-guard.yml` is bumped to v7.0.1.
+
+- **A workflow file that does not parse can no longer be merged unnoticed.** New workflow "Workflow
+  lint" runs actionlint (pinned release, checked by sha256) on every pull request and on every push to
+  main, and is watched by the "main is red" issue. It would have caught
+  the YAML error that kept the new Runner guard workflow from running; that error is fixed here.
+
+- **CI fails when the checked-in gRPC Java stubs differ from what the proto generates.** New workflow
+  "Generated code" runs `scripts/gen-grpc-java.sh` on a hosted runner and fails on any difference
+  under `driver/src/main/java`: on every push to main (watched by the "main is red" issue) and on
+  pull requests that touch the proto, the stubs, the script or `build.sbt`. The generator now reads
+  the protobuf and gRPC versions from `build.sbt`, downloads with `curl -f` over HTTPS, and CI checks
+  the downloaded `protoc` and `protoc-gen-grpc-java` against pinned sha256 values.
+
+- **Adding or removing a label no longer leaves a cancelled check on a pull request.** The
+  changelog workflow re-runs on label changes; its earlier run on the same commit used to be cancelled
+  and stayed next to the new one, which left the pull request unstable. The workflow now has no
+  concurrency group (it takes seconds). The Fuzz workflow cancels in-progress runs only for pull
+  requests, like the others: a nightly or manual release-candidate run is never cancelled by another.
+
+- **The quality ratchet compares with main's last measurement instead of a committed file.** A pull
+  request is compared with the Quality run of its base commit on main, main with its previous run,
+  the nightly advisory scan with the previous night. An improvement is locked in by main's own run
+  after the merge, so no pull request edits `quality/baseline.json` any more (it stays as the floor
+  at the last release). A manual run on main with `accept` records a deliberate regression. Pull
+  requests no longer run cargo audit or the image scan, and typos findings are reported, not gated.
+
+- **The load generator reports per-call peer timings** (#249). For each `call` class of
+  `rutli_peer_call_duration_seconds` its report now gives, per load, the call count, p50, p99 and
+  p99.9, the deadline, the share of calls that finished within a third of it (read at the bucket
+  edge there), and whether the 3× margin rule holds (at least 99.9 % within a third). This is the
+  readout that decides whether a peer-call deadline stays a constant or becomes a bounded setting.
+
+- **The driver jar and the dealer binary are built, signed and attested by the release.** New
+  workflow `release-assets.yml` (on a `v*` tag, hosted runners, behind the `release` environment)
+  builds `rutli-driver-<version>.jar` and `rutli-dealer-<version>-linux-x86_64` / `-linux-aarch64`
+  from the tag, writes an SPDX SBOM for each, a `SHA256SUMS`, a keyless cosign signature (a
+  `.sigstore.json` bundle) for every file and a GitHub build provenance attestation, checks them
+  as a user would, and attaches them to the release (a missing release is created as a draft). The
+  `sign` job (`id-token: write`, `attestations: write`) reads each build artifact from its own
+  directory, checks that they are exactly the expected files and that each has the digest its
+  producing job stated as a job output (the SBOMs come from a job without
+  a signing identity, a release that already has `SHA256SUMS` is refused before anything is built); the `publish` job (`contents: write`) only attaches the signed set;
+  `publish-image.yml` is unchanged. The new workflow "Release assets check" runs the same `scripts/release-assets.sh`
+  steps on pull requests and on every push to main with a throwaway key. The driver jar keeps
+  `META-INF/maven` (the dependencies' `pom.properties`) so scanners can identify its contents. Verification commands: `docs/releasing.md`, "Verify the release assets".
+  The quality ratchet now prints the `shfmt -d` diff of every file it counts as unformatted.
+
+- **The generated-stubs check no longer fails on a rate-limited download.** Maven Central answered
+  HTTP 429 to the `protoc` download on a shared runner and the "Generated code" check failed without
+  comparing anything. `scripts/gen-grpc-java.sh` now retries the download, the workflow caches the two
+  binaries by their pinned sha256 (checked again after a restore), and a download that still fails
+  stops with exit 3 and "this is not a difference in the stubs".
 
 ### Documentation
 
@@ -491,19 +1124,13 @@ Upgrading a 0.4.x cluster to 0.5.0: [docs/upgrading-to-0.5.md](docs/upgrading-to
   `docs/disaster-recovery.md` said it stays supported for production keys; `SECURITY.md` said never. The two now agree
   with `SECURITY.md`: it keeps every encryption key on the participant host; use cluster hosting or the HSM delegate.
 
-### Build
-
-- **Every push to main runs the whole set of checks once, unfiltered, and a red main opens an issue.**
-  `e2e.yml`, `image-build-check.yml`, `cluster-suite.yml` and `load.yml` now run on every push to
-  main (before: only when a path filter matched, or only on pull requests; main broke unnoticed
-  when two changes met that no single pull request's checks covered). The new workflow
-  `main-status.yml` watches them and CI: on a failure it opens the issue "main is red" (labels
-  `prio:p0`, `type:test`) with the first failing commit, the failing jobs and links, or comments on
-  the open one; it closes the issue when every check is green on the tip of main. Pushes to main are
-  never cancelled by a later push. The load test on a push runs on a GitHub-hosted runner and
-  compares nothing, so the weekly comparison keeps its baseline on the repository's runner; its
-  baseline lookup now ignores runs from pushes. The e2e workflow's own failure issue is replaced by
-  "main is red". README: status badge for main.
+- **One rotation recipe** (`docs/key-rotation.md`): generate the new key through the driver, then
+  `owner_to_key_mappings.rotate_key`, as rehearsed in B8, with the check of the new key in the
+  cluster and the Canton 3.7 `synchronizerId` caveat. `rotate_node_key(s)` is marked as not
+  rehearsed, and `rotate_kms_node_key` as not applicable to keys Canton generates in Rütli. The
+  roadmap's v0.5.0 row no longer promises a `rotate_kms_node_key` recipe and describes the admin
+  CLI as it ships: read-only. `docs/admin-cli.md` maps each key task to its command and
+  credential.
 
 ## [0.4.1] — 2026-11-20
 
@@ -2382,6 +3009,7 @@ not audited. Do not place production authority keys behind it.
 - HSM backend validated only against SoftHSM.
 - No third-party security audit.
 
+[0.5.0-rc.1]: https://github.com/Stakecraft/rutli/releases/tag/v0.5.0-rc.1
 [0.4.0]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0
 [0.4.0-rc.6]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.6
 [0.4.0-rc.5]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.5

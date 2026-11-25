@@ -5,6 +5,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// Longest `signing_policy.intent_max_lifetime_secs` accepted (one hour).
+const MAX_INTENT_LIFETIME_SECS: u64 = 3600;
+/// Largest `signing_policy.clock_skew_secs` accepted (one hour).
+const MAX_CLOCK_SKEW_SECS: u64 = 3600;
+/// Milliseconds in one second.
+const MILLIS_PER_SECOND: u64 = 1000;
+/// Smallest `signing_policy.journal_max_mib_per_key` accepted.
+const MIN_JOURNAL_MAX_MIB_PER_KEY: u32 = 4;
+/// Length of a SHA-256 digest of a certificate's public key (`tls_spki_sha256`).
+const SPKI_SHA256_BYTES: usize = 32;
+
 /// Static cluster configuration for one cosigner node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -577,6 +588,17 @@ impl SigningPolicyConfig {
     }
 
     fn validate(&self, signers: &[String], tls: bool) -> crate::Result<()> {
+        self.check_intent_and_limits(tls)?;
+        self.check_refresh_interval()?;
+        self.check_journal_limits()?;
+        self.check_signer_bindings(signers)?;
+        self.check_approvers()?;
+        self.check_rules()?;
+        Ok(())
+    }
+
+    /// The intent switches need TLS; the intent lifetime, clock skew and share count are in range.
+    fn check_intent_and_limits(&self, tls: bool) -> crate::Result<()> {
         use crate::DaemonError::Config;
         if self.require_intent == Some(true) && !tls {
             return Err(Config(
@@ -589,12 +611,14 @@ impl SigningPolicyConfig {
                     .into(),
             ));
         }
-        if self.intent_max_lifetime_secs == 0 || self.intent_max_lifetime_secs > 3600 {
+        if self.intent_max_lifetime_secs == 0
+            || self.intent_max_lifetime_secs > MAX_INTENT_LIFETIME_SECS
+        {
             return Err(Config(
                 "signing_policy.intent_max_lifetime_secs must be 1..=3600".into(),
             ));
         }
-        if self.clock_skew_secs > 3600 {
+        if self.clock_skew_secs > MAX_CLOCK_SKEW_SECS {
             return Err(Config(
                 "signing_policy.clock_skew_secs must be at most 3600".into(),
             ));
@@ -604,6 +628,12 @@ impl SigningPolicyConfig {
                 "signing_policy.max_shares_per_request must be at least 1".into(),
             ));
         }
+        Ok(())
+    }
+
+    /// The refresh minimum interval is in range and a refresh waiver time is valid.
+    fn check_refresh_interval(&self) -> crate::Result<()> {
+        use crate::DaemonError::Config;
         if self.refresh_min_interval_secs > MAX_REFRESH_MIN_INTERVAL_SECS {
             return Err(Config(format!(
                 "signing_policy.refresh_min_interval_secs must be at most {MAX_REFRESH_MIN_INTERVAL_SECS} \
@@ -616,7 +646,7 @@ impl SigningPolicyConfig {
                     "signing_policy.refresh_interval_waived_at {at:?} is not a UTC time like 2026-11-19T14:00:00Z"
                 )));
             };
-            if ms > crate::intent::now_ms() + self.clock_skew_secs * 1000 {
+            if ms > crate::intent::now_ms() + self.clock_skew_secs * MILLIS_PER_SECOND {
                 return Err(Config(format!(
                     "signing_policy.refresh_interval_waived_at {at:?} is more than clock_skew_secs ({} s) \
                      ahead of this node's clock: use the time you decided to refresh, not a later one \
@@ -625,7 +655,13 @@ impl SigningPolicyConfig {
                 )));
             }
         }
-        if self.journal_max_mib_per_key < 4 {
+        Ok(())
+    }
+
+    /// The journal size and retention are in range.
+    fn check_journal_limits(&self) -> crate::Result<()> {
+        use crate::DaemonError::Config;
+        if self.journal_max_mib_per_key < MIN_JOURNAL_MAX_MIB_PER_KEY {
             return Err(Config(
                 "signing_policy.journal_max_mib_per_key must be at least 4".into(),
             ));
@@ -635,6 +671,12 @@ impl SigningPolicyConfig {
                 "signing_policy.journal_retention_days must be at least 1".into(),
             ));
         }
+        Ok(())
+    }
+
+    /// Every signer ACL and pin entry names a listed signer and is well formed.
+    fn check_signer_bindings(&self, signers: &[String]) -> crate::Result<()> {
+        use crate::DaemonError::Config;
         for cn in self.signer_acl.keys() {
             if !signers.contains(cn) {
                 return Err(Config(format!(
@@ -660,6 +702,12 @@ impl SigningPolicyConfig {
                 hex32(&format!("signing_policy.signer_pins.{cn}"), h)?;
             }
         }
+        Ok(())
+    }
+
+    /// Approver ids are unique and their keys parse.
+    fn check_approvers(&self) -> crate::Result<()> {
+        use crate::DaemonError::Config;
         let mut ids = std::collections::HashSet::new();
         for a in &self.approvers {
             if !ids.insert(a.id.as_str()) {
@@ -675,6 +723,12 @@ impl SigningPolicyConfig {
                 ))
             })?;
         }
+        Ok(())
+    }
+
+    /// Every approval rule has a known mode and a threshold the approvers can meet.
+    fn check_rules(&self) -> crate::Result<()> {
+        use crate::DaemonError::Config;
         for r in &self.rules {
             match r.mode.as_str() {
                 "auto" => {}
@@ -994,7 +1048,8 @@ impl Config {
     /// an operator CLI config may leave them out.
     fn validate_peer_pins(&self) -> crate::Result<()> {
         use crate::DaemonError::Config;
-        let mut owner: std::collections::HashMap<[u8; 32], u16> = std::collections::HashMap::new();
+        let mut owner: std::collections::HashMap<[u8; SPKI_SHA256_BYTES], u16> =
+            std::collections::HashMap::new();
         for p in &self.peers {
             let Some(list) = &p.tls_spki_sha256 else {
                 continue;
@@ -1118,6 +1173,34 @@ impl Config {
         if let Some(d) = &self.peer_deadlines {
             d.validate()?;
         }
+        self.check_roster_members()?;
+        self.check_threshold_and_own_identifier()?;
+        self.check_allowlists_set_under_tls()?;
+        let cns = self.check_mesh_identities()?;
+        self.validate_peer_pins()?;
+        self.check_peer_allowlist_matches_roster(&cns)?;
+        self.check_signer_and_peer_roles_apart()?;
+        self.check_operator_and_refresh_allowlists()?;
+        let signers: Vec<String> = self.signer_allowlist.clone().unwrap_or_default();
+        self.signing_policy.validate(&signers, self.tls.is_some())?;
+        self.check_share_seal_exclusive()?;
+        self.check_dist_public_keys_distinct()?;
+        self.check_hosted_keys_with_seal_bundle()?;
+        self.check_hosted_keys_sealed_and_quorum()?;
+        self.check_hosted_delete_settings()?;
+        self.keyfile.validate(self.share_seal.is_some())?;
+        if self.profile == Some(crate::profile::Profile::Production) {
+            let required = crate::profile::required(self);
+            if !required.is_empty() {
+                return Err(Config(crate::profile::refusal(&required)));
+            }
+        }
+        Ok(())
+    }
+
+    /// The peer roster is not empty, not too large, and lists no identifier or endpoint twice.
+    fn check_roster_members(&self) -> crate::Result<()> {
+        use crate::DaemonError::Config;
         if self.peers.is_empty() {
             return Err(Config("peer roster is empty".into()));
         }
@@ -1159,6 +1242,12 @@ impl Config {
                 )));
             }
         }
+        Ok(())
+    }
+
+    /// The threshold is in range and this node is in the roster.
+    fn check_threshold_and_own_identifier(&self) -> crate::Result<()> {
+        use crate::DaemonError::Config;
         if self.threshold < 1 || self.threshold > self.max_signers() {
             return Err(Config(format!(
                 "threshold {} out of range 1..={}",
@@ -1172,6 +1261,12 @@ impl Config {
                 self.identifier
             )));
         }
+        Ok(())
+    }
+
+    /// Under TLS, the signer and peer allowlists are set and not empty.
+    fn check_allowlists_set_under_tls(&self) -> crate::Result<()> {
+        use crate::DaemonError::Config;
         // With TLS enabled the Signer API is reachable by any cluster-CA-signed client, so a
         // signer_allowlist (the driver cert CN) is mandatory — otherwise a cosigner cert could
         // request arbitrary signatures. Plaintext (dev) may omit it.
@@ -1203,6 +1298,12 @@ impl Config {
                     .into(),
             ));
         }
+        Ok(())
+    }
+
+    /// Every peer has its own server name and client CN; returns the roster's client CNs.
+    fn check_mesh_identities(&self) -> crate::Result<std::collections::HashSet<String>> {
+        use crate::DaemonError::Config;
         // Mesh identities: one server name and one client CN per node. Two peers sharing either
         // would make them interchangeable on the wire — the hole per-peer names close (M3).
         let mut names = std::collections::HashSet::new();
@@ -1223,7 +1324,15 @@ impl Config {
                 )));
             }
         }
-        self.validate_peer_pins()?;
+        Ok(cns)
+    }
+
+    /// Under TLS, the peer allowlist is exactly the roster's client CNs.
+    fn check_peer_allowlist_matches_roster(
+        &self,
+        cns: &std::collections::HashSet<String>,
+    ) -> crate::Result<()> {
+        use crate::DaemonError::Config;
         // The mesh allowlist is exactly the roster's client CNs: a CN on it that names no roster
         // node could drive the raw FROST rounds as nobody in particular, and a roster node missing
         // from it could not take part.
@@ -1244,6 +1353,12 @@ impl Config {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// No CN is in both the signer allowlist and the peer allowlist.
+    fn check_signer_and_peer_roles_apart(&self) -> crate::Result<()> {
+        use crate::DaemonError::Config;
         // The Signer API and the mesh Peer API are separate roles: a CN in both would put a
         // cosigner cert on the Signer API (or the driver on the raw FROST rounds).
         if let (Some(signers), Some(peers)) = (&self.signer_allowlist, &self.peer_allowlist) {
@@ -1254,6 +1369,13 @@ impl Config {
                 )));
             }
         }
+        Ok(())
+    }
+
+    /// The operator and refresh allowlists are not empty and share no CN with the signer or peer
+    /// role.
+    fn check_operator_and_refresh_allowlists(&self) -> crate::Result<()> {
+        use crate::DaemonError::Config;
         // The operator role exists to be weaker than the driver role; a CN in two role lists
         // would quietly be the stronger one (and a cosigner CN would put a mesh cert on the
         // Signer API).
@@ -1297,8 +1419,12 @@ impl Config {
                 )));
             }
         }
-        let signers: Vec<String> = self.signer_allowlist.clone().unwrap_or_default();
-        self.signing_policy.validate(&signers, self.tls.is_some())?;
+        Ok(())
+    }
+
+    /// `share_seal` names exactly one secret source.
+    fn check_share_seal_exclusive(&self) -> crate::Result<()> {
+        use crate::DaemonError::Config;
         if let Some(seal) = &self.share_seal {
             if seal.secret_env.is_some() == seal.secret_file.is_some() {
                 return Err(Config(
@@ -1308,6 +1434,12 @@ impl Config {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// No two peers pin the same distribution key.
+    fn check_dist_public_keys_distinct(&self) -> crate::Result<()> {
+        use crate::DaemonError::Config;
         // Pinned distribution keys: well-formed, and one per node (two nodes with one key would
         // let either open the other's envelopes).
         let mut seen_keys = std::collections::HashSet::new();
@@ -1321,6 +1453,13 @@ impl Config {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// With a seal bundle and hosted keys on, every peer pins its distribution key and the
+    /// commitment key is set.
+    fn check_hosted_keys_with_seal_bundle(&self) -> crate::Result<()> {
+        use crate::DaemonError::Config;
         let hosted_on = self.hosted_keys.as_ref().is_some_and(|h| h.enabled);
         if let Some(h) = &self.hosted_keys {
             h.commitment_key_bytes()?;
@@ -1349,6 +1488,13 @@ impl Config {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// Hosted keys need `share_seal`, and the write quorum is in range.
+    fn check_hosted_keys_sealed_and_quorum(&self) -> crate::Result<()> {
+        use crate::DaemonError::Config;
+        let hosted_on = self.hosted_keys.as_ref().is_some_and(|h| h.enabled);
         // Hosted keys are whole private keys at rest on every node. Refusing to hold them
         // unsealed is the whole point of the feature — an unsealed replica would be strictly worse
         // than the HSM delegate it replaces.
@@ -1368,6 +1514,12 @@ impl Config {
                 )));
             }
         }
+        Ok(())
+    }
+
+    /// The hosted-key delete allowlist, ACL and approval threshold are consistent.
+    fn check_hosted_delete_settings(&self) -> crate::Result<()> {
+        use crate::DaemonError::Config;
         if let Some(h) = self
             .hosted_keys
             .as_ref()
@@ -1405,13 +1557,6 @@ impl Config {
                     h.delete_approval_threshold,
                     self.signing_policy.approvers.len()
                 )));
-            }
-        }
-        self.keyfile.validate(self.share_seal.is_some())?;
-        if self.profile == Some(crate::profile::Profile::Production) {
-            let required = crate::profile::required(self);
-            if !required.is_empty() {
-                return Err(Config(crate::profile::refusal(&required)));
             }
         }
         Ok(())

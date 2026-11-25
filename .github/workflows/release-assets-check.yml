@@ -1,0 +1,157 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+name: Release assets check
+
+# release-assets.yml runs only on a v* tag. This runs the same scripts/release-assets.sh steps without
+# one: it builds the driver jar and the dealer, writes their SBOMs and SHA256SUMS, signs every file with
+# a throwaway key made here (no transparency log upload) and verifies the signatures as a user would,
+# then checks that a changed file and a swapped signature are refused. Nothing is signed with the
+# project's identity and nothing is published. Not covered: the keyless identity, the provenance
+# attestation and the upload to a release.
+on:
+  pull_request:
+    paths:
+      - "driver/**"
+      - "build.sbt"
+      - "project/**"
+      - "frost/**"
+      - "scripts/release-assets.sh"
+      - "scripts/publish-canton-deps.sh"
+      - ".github/workflows/release-assets.yml"
+      - ".github/workflows/release-assets-check.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-assets-check-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  dry-run:
+    name: Release assets with a throwaway key
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CANTON_TAG: v3.6.1 # as ci.yml (image-build-check.yml checks that they agree)
+      COSIGN_PASSWORD: ""
+      RELEASE_DEALER_ARCHS: x86_64 # one machine here; the release builds both
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # sbt and the driver's dependencies (~/.sbt, ~/.ivy2/cache, ~/.cache/coursier) come from a cache
+      # when one matches, as in ci.yml: Maven Central rate-limits the shared runner addresses (HTTP 429).
+      # A cache miss still downloads, and can still meet a 429; then re-run. This check does not prove
+      # a clean download of the dependencies; the release build, which uses no cache, does.
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: sbt
+      - uses: sbt/setup-sbt@7e114eae4f32ec3f93c851c2793376a77f384409 # v1.5.15
+      # Cached as ci.yml does (same key): this check only, the release build uses no cache.
+      - name: Cache Canton API artifacts (ivy local)
+        id: canton-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.ivy2/local/com.daml
+          key: canton-api-${{ runner.os }}-${{ runner.arch }}-${{ env.CANTON_TAG }}-v1
+      - name: Canton kms-driver-api (published locally, as the release workflow)
+        if: steps.canton-cache.outputs.cache-hit != 'true'
+        run: scripts/publish-canton-deps.sh "$CANTON_TAG"
+
+      - name: Rust version (frost/rust-toolchain.toml)
+        id: rust
+        run: |
+          set -euo pipefail
+          v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
+          [ -n "$v" ] || { echo "::error::no channel in frost/rust-toolchain.toml"; exit 1; }
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
+
+      - name: Install cosign and syft (pinned, checked by sha256)
+        run: scripts/release-assets.sh install-tools
+
+      - name: Build, SBOMs, checksums
+        run: |
+          set -euo pipefail
+          scripts/release-assets.sh version-check
+          scripts/release-assets.sh build-jar out
+          scripts/release-assets.sh build-dealer out
+          scripts/release-assets.sh check-set out built
+          scripts/release-assets.sh licenses out
+          scripts/release-assets.sh sbom out
+          # The release signs what it gathers from one directory per artifact: do the same here.
+          mkdir -p art/asset-jar art/asset-dealer-x86_64 art/asset-sbom gathered
+          cp out/rutli-driver-*.jar art/asset-jar/
+          cp out/rutli-dealer-*-linux-x86_64 art/asset-dealer-x86_64/
+          cp out/*.spdx.json art/asset-sbom/
+          rm -rf out
+          # As the release: digests stated before the hand-over, compared after it.
+          jar_sha="$(scripts/release-assets.sh digest art/asset-jar jar | cut -d= -f2)"
+          dealer_sha="$(scripts/release-assets.sh digest art/asset-dealer-x86_64 dealer-x86_64 | cut -d= -f2)"
+          scripts/release-assets.sh gather art out
+          scripts/release-assets.sh gather-sbom art out
+          sbom_driver_sha="$(scripts/release-assets.sh digest art/asset-sbom sbom-driver | cut -d= -f2)"
+          sbom_dealer_sha="$(scripts/release-assets.sh digest art/asset-sbom sbom-dealer | cut -d= -f2)"
+          scripts/release-assets.sh check-digests out jar="$jar_sha" dealer-x86_64="$dealer_sha" \
+            sbom-driver="$sbom_driver_sha" sbom-dealer="$sbom_dealer_sha"
+          scripts/release-assets.sh check-sboms out
+          echo "$jar_sha" >"$RUNNER_TEMP/jar.sha256"
+          scripts/release-assets.sh licenses out
+          scripts/release-assets.sh sums out
+          scripts/release-assets.sh check-set out ready
+
+      - name: Sign with a throwaway key and verify
+        run: |
+          set -euo pipefail
+          keys="${RUNNER_TEMP}/keys"
+          mkdir -p "$keys"
+          (cd "$keys" && cosign generate-key-pair >/dev/null)
+          export COSIGN_KEY="${keys}/cosign.key" COSIGN_PUBKEY="${keys}/cosign.pub"
+          scripts/release-assets.sh sign out
+          scripts/release-assets.sh check-set out signed
+          scripts/release-assets.sh verify out
+          # As between the signing and the upload job: a digest over the whole signed release.
+          scripts/release-assets.sh manifest-digest out | cut -d= -f2 >"$RUNNER_TEMP/release.sha256"
+          scripts/release-assets.sh check-manifest out "$(cat "$RUNNER_TEMP/release.sha256")"
+
+      # The verification must fail when a file changes after signing, and when a signature belongs to
+      # another file.
+      - name: A changed file and a swapped signature are refused
+        run: |
+          set -euo pipefail
+          export COSIGN_PUBKEY="${RUNNER_TEMP}/keys/cosign.pub"
+          jar="$(printf '%s\n' out/rutli-driver-*.jar | head -n 1)"
+          cp -r out tampered
+          printf 'x' >> "tampered/$(basename "$jar")"
+          if scripts/release-assets.sh verify tampered; then echo "::error::a changed jar passed the verification"; exit 1; fi
+          rm -rf tampered; cp -r out tampered
+          cp "tampered/LICENSE.sigstore.json" "tampered/$(basename "$jar").sigstore.json"
+          if scripts/release-assets.sh verify tampered; then echo "::error::a swapped signature passed the verification"; exit 1; fi
+          rm -rf tampered; cp -r out tampered
+          echo stray > tampered/unexpected.txt
+          if scripts/release-assets.sh check-set tampered signed; then echo "::error::an unexpected file passed check-set"; exit 1; fi
+          rm -rf tampered; mkdir -p wrong/asset-jar wrong/asset-dealer-x86_64 wrong/asset-sbom
+          cp out/rutli-dealer-*-linux-x86_64 wrong/asset-jar/
+          if scripts/release-assets.sh gather wrong gathered-wrong; then echo "::error::a dealer in the jar artifact passed gather"; exit 1; fi
+          # An artifact replaced between its build and the signing job: same name, other bytes.
+          rm -rf swapped; cp -r out swapped
+          printf 'x' >>"swapped/$(basename "$jar")"
+          if scripts/release-assets.sh check-digests swapped jar="$(cat "$RUNNER_TEMP/jar.sha256")"; then
+            echo "::error::a replaced artifact passed check-digests"; exit 1
+          fi
+          # The signed release replaced between the signing and the upload job: one bundle changed.
+          rm -rf swapped; cp -r out swapped
+          printf ' ' >>"swapped/LICENSE.sigstore.json"
+          if scripts/release-assets.sh check-manifest swapped "$(cat "$RUNNER_TEMP/release.sha256")"; then
+            echo "::error::a changed release passed check-manifest"; exit 1
+          fi
+          echo "OK: tampering, an unexpected file, a file from the wrong artifact a replaced artifact and a changed signed release are detected"

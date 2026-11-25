@@ -31,6 +31,9 @@ use sha2::{Digest, Sha256};
 use crate::error::DaemonError;
 use crate::Result;
 
+/// Milliseconds in a second.
+const MILLIS_PER_SECOND: u64 = 1000;
+
 /// The directory of markers, inside the key directory (a dot-dir: key listings skip it).
 pub const DIR: &str = ".proven";
 
@@ -336,7 +339,9 @@ pub fn refresh_gauges(keys_dir: &Path, now_ms: u64) -> BTreeSet<String> {
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |t| now_ms.saturating_sub(t.as_millis() as u64) / 1000);
+            .map_or(0, |t| {
+                now_ms.saturating_sub(t.as_millis() as u64) / MILLIS_PER_SECOND
+            });
         metrics::gauge!(crate::metrics::KEY_EPOCH_PROVEN, "key" => header.key_id.clone())
             .set(if proven { 1.0 } else { 0.0 });
         metrics::gauge!(crate::metrics::KEY_EPOCH_AGE_SECONDS, "key" => header.key_id.clone())

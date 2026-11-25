@@ -387,8 +387,15 @@ proptest! {
     /// A node is never benched while a peer vouches for its exact sharing, nor while no peer
     /// reports a newer epoch (and its own records agree).
     #[test]
-    fn a_node_is_not_stale_without_evidence(mine in mine(), committed in prop::option::of(0u64..5), answers in answers()) {
-        prop_assume!(committed.is_none_or(|c| c <= mine.epoch));
+    fn a_node_is_not_stale_without_evidence(
+        (mine, committed) in mine().prop_flat_map(|m| {
+            // This node's own records name no newer epoch than its share (built directly, not
+            // filtered, so high case counts do not run out of accepted inputs).
+            let epoch = m.epoch;
+            (Just(m), prop::option::of(0..=epoch))
+        }),
+        answers in answers(),
+    ) {
         let vouched = answers.iter().any(|(_, v)| v.epoch == mine.epoch && v.pkp_digest == mine.pkp_digest);
         let newer = answers.iter().any(|(_, v)| v.epoch > mine.epoch);
         let verdict = evaluate(&mine, committed, &answers);

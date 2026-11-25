@@ -11,7 +11,7 @@
 // compatibility). Canton v3.6.1 builds on 2.13.18.
 ThisBuild / scalaVersion := "2.13.18"
 ThisBuild / organization := "com.stakecraft"
-ThisBuild / version      := "0.4.0"
+ThisBuild / version      := "0.5.0-rc.1"
 
 // Canton nodes run on Java 17. Pin the bytecode target so the driver jar loads there even when the
 // build machine's default JDK is newer (class-file version skew otherwise breaks at runtime).
@@ -103,6 +103,9 @@ lazy val driver = (project in file("driver"))
     assembly / assemblyMergeStrategy := {
       case PathList("META-INF", "rutli", _*)    => MergeStrategy.first
       case PathList("META-INF", "services", _*) => MergeStrategy.concat
+      // pom.properties of each bundled dependency: what SBOM and vulnerability scanners read to
+      // identify the jar's contents (the release SBOM, scripts/release-assets.sh).
+      case PathList("META-INF", "maven", _*)    => MergeStrategy.first
       // Dependencies' license and notice files are reproduced in META-INF/rutli/THIRD-PARTY-LICENSES.txt.
       case PathList("META-INF", _*)             => MergeStrategy.discard
       // scala-library's root LICENSE and NOTICE would otherwise read as this jar's own.

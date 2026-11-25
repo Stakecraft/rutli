@@ -84,6 +84,13 @@ jobs:
           a="$(pins .github/workflows/publish-image.yml)"; b="$(pins .github/workflows/image-build-check.yml)"
           [ -n "$a" ] && [ "$a" = "$b" ] || { echo "::error::docker action pins differ between publish-image.yml and image-build-check.yml:"; diff <(echo "$a") <(echo "$b") || true; exit 1; }
           echo "OK: same docker action pins"
+      - name: CI, the release assets workflow and its check use one Canton version
+        run: |
+          set -euo pipefail
+          v() { sed -n 's/^ *CANTON_TAG: \(v[0-9.]*\).*$/\1/p' "$1" | head -n 1; }
+          a="$(v .github/workflows/ci.yml)"; b="$(v .github/workflows/release-assets.yml)"; c="$(v .github/workflows/release-assets-check.yml)"
+          [ -n "$a" ] && [ "$a" = "$b" ] && [ "$a" = "$c" ] || { echo "::error::CANTON_TAG differs: ci.yml '${a}', release-assets.yml '${b}', release-assets-check.yml '${c}'"; exit 1; }
+          echo "OK: CANTON_TAG ${a}"
       - name: The release dry run builds and tags by the release workflow's rules
         run: |
           set -euo pipefail

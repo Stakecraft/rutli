@@ -437,6 +437,8 @@ DESTRUCTION RECORD — key FP 1220______________________  (after cutover go on _
 wrong SAS refused, the operator certificate refused on `Sign` and `Refresh`, restarts, a node down)
 on a local 3-node mTLS cluster from the working tree, with B1's throwaway Canton 3.6.1 namespace key.
 The cluster tests in `frost/cosigner/tests/split_ceremony.rs` and `dealer_cli.rs` are the automated
-analogue. `scripts/e2e-migration.sh` runs Steps 1–7 inside the whole migration ([migration.md](migration.md)), on a key
+analogue. The cluster suite's `migration` suite runs Steps 1–7 on Kubernetes, in the live cosigner pods, with
+the dealer in a network-less pod of its own (`docs/cluster-suite.md`, "The migration suite").
+`scripts/e2e-migration.sh` runs Steps 1–7 inside the whole migration ([migration.md](migration.md)), on a key
 a running Canton 3.6.1 participant has just exported with a random password, against cosigners with the full signing
 policy, and then uses the key from a new participant.
