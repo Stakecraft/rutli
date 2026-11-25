@@ -179,6 +179,8 @@ class FrostBackend(
   import FrostBackend._
 
   require(endpoints.nonEmpty, "FrostBackend needs at least one cosigner endpoint")
+  // The preferred leader keeps its endpoint index in 16 bits (Lead).
+  require(endpoints.size <= 0xffff, s"FrostBackend takes at most ${0xffff} cosigner endpoints, got ${endpoints.size}")
 
   /** The single source of every key id this backend mints or routes on. Validates `keyPrefix`. */
   private val ids: FrostKeyIds = FrostKeyIds(keyPrefix)
@@ -579,14 +581,26 @@ class FrostBackend(
     // Recorded even when another call already moved the lead: it is still evidence that this node
     // failed just now, and it only delays the first endpoint's recovery. Before the lead moves, so
     // that startIndex never sees the lead off endpoint 0 without its demotion time.
-    demotedAt.set(i, System.nanoTime())
+    recordDemotion(i, nowNanos())
     if (preferred.compareAndSet(i, to) && to != i)
       logger.info(s"FROST: leader is now ${endpoints(to)} (was ${endpoints(i)}); leader order ${leaderOrder(to)}")
   }
 
+  /** System.nanoTime for a demotion time. Never 0, which [[demotedAt]] reads as "never". */
+  private def nowNanos(): Long = {
+    val t = System.nanoTime()
+    if (t == 0L) 1L else t
+  }
+
+  /** Endpoint `i` lost the lead at `at` ([[nowNanos]]): recorded unless a later time is there. */
+  private def recordDemotion(i: Int, at: Long): Unit = {
+    demotedAt.updateAndGet(i, (last: Long) => if (last == 0L || at - last > 0L) at else last)
+    ()
+  }
+
   /** The endpoint `i` just said it lacks the key, and its demotion is held back: what a later
     * [[demoteHeld]] needs, taken now — the lead as it is and the time. */
-  private def hold(i: Int): Held = Held(i, preferred.state, System.nanoTime())
+  private def hold(i: Int): Held = Held(i, preferred.state, nowNanos())
 
   /** Demote an endpoint whose demotion was held back. `to` takes the lead: the endpoint that served
     * the call, or for a sign that ended otherwise the one the lead would have reached
@@ -597,11 +611,12 @@ class FrostBackend(
     *     A lead that another call has moved meanwhile, also onto this endpoint, is newer than the
     *     answer and stays;
     *   - the time recorded is the time of the answer, unless the endpoint lost the lead again
-    *     later. */
+    *     later. So an endpoint whose answer is older than [[leaderRecovery]] when the call ends is
+    *     past its recovery time at once; with the default timeouts no call lasts that long. */
   private def demoteHeld(held: Held, to: Int): Unit = {
     val i = held.index
     // Before the lead moves, as in demote.
-    demotedAt.updateAndGet(i, (last: Long) => if (last == 0L || held.at - last > 0L) held.at else last)
+    recordDemotion(i, held.at)
     if (preferred.moveIfUnmoved(held.lead, i, to) && to != i)
       logger.info(s"FROST: leader is now ${endpoints(to)} (was ${endpoints(i)}); leader order ${leaderOrder(to)}")
   }
@@ -621,7 +636,8 @@ class FrostBackend(
     * missed deadline, a restart) therefore does not keep the lead elsewhere for good. */
   private def startIndex(): Int = {
     val p = preferred.get
-    if (p != 0 && System.nanoTime() - demotedAt.get(0) > leaderRecovery.toNanos && preferred.compareAndSet(p, 0)) {
+    val lost = demotedAt.get(0)
+    if (p != 0 && (lost == 0L || System.nanoTime() - lost > leaderRecovery.toNanos) && preferred.compareAndSet(p, 0)) {
       logger.info(
         s"FROST: leader back to ${endpoints(0)} (lost the lead more than $leaderRecovery ago); leader order ${leaderOrder(0)}"
       )
@@ -714,6 +730,9 @@ class FrostBackend(
       holdOnlyIfAll: Boolean = false,
   )(op: SignerGrpc.SignerBlockingStub => A): A = {
     val n = channels.size
+    // The lead as this walk found it. A success makes its endpoint the preferred leader only if
+    // nothing but this walk has moved the lead since: what another call did meanwhile is newer.
+    val leadAtStart: Long = preferred.state
     // With `holdOnlyIfAll`: the call ends, and not with every endpoint held back. The endpoints
     // in `held` (latest first) lose the lead to `to`, where it would be had each been demoted as
     // it failed.
@@ -753,7 +772,7 @@ class FrostBackend(
           // the endpoint that served — not to the next one in the ring, which may be one that
           // failed later in this walk.
           seen.lackedKeyAt.reverse.foreach(h => demoteHeld(h, i))
-          preferred.compareAndSet(observed, i)
+          preferred.moveIfUnmoved(leadAtStart, observed, i)
           answer
         case Left(failure) =>
           val error: Exception = failure match {
@@ -1053,6 +1072,7 @@ class FrostBackend(
   )(op: SignerGrpc.SignerBlockingStub => A): A = {
     val n = channels.size
     val start = startIndex()
+    val leadAtStart: Long = preferred.state // see withCheckedFailover
     // `stales`: how many endpoints gave a stale answer so far, `firstStale` the first of them;
     // `unreachable`: the endpoint asked most recently that could not be reached; `sick`: the last
     // INTERNAL or UNKNOWN error.
@@ -1103,6 +1123,7 @@ class FrostBackend(
           // Not demoted here: a stale answer costs the lead only when another cosigner then serves
           // the call (below). A key that is nowhere, or a blob no cosigner's secret opens, is not
           // these cosigners' fault, and demoting all of them would switch the sign rotation off.
+          val heldNow = hold(i) // the lead and the time as they are when the answer is in
           val (reason, meaning) = o.fold(e => (e.getStatus.getCode.toString, MayBeOld), staleAnswer)
           val first = firstStale.getOrElse(o)
           val staleNow = stales + (if (o.fold(_ => true, counts)) 1 else 0)
@@ -1112,14 +1133,14 @@ class FrostBackend(
               val note = if (knownEc) "ec-failover" else "failover"
               logger.warn(s"FROST: $what via ${endpoints(i)} answered $reason for $key — $meaning; asking $to")
               notes.add(s"$note=${endpoints(i)}→$to reason=$reason")
-              attempt(k + 1, Some(first), staleNow, unreachable, sick, hold(i) :: staleAt)
+              attempt(k + 1, Some(first), staleNow, unreachable, sick, heldNow :: staleAt)
             case None => exhausted(Some(first), staleNow, unreachable, sick)
           }
         case Right(answer) =>
           // The cluster serves the key: the cosigners that answered stale lose the lead, to the
           // one that served (see withCheckedFailover).
           staleAt.reverse.foreach(h => demoteHeld(h, i))
-          preferred.compareAndSet(start, i)
+          preferred.moveIfUnmoved(leadAtStart, start, i)
           answer
         case Left(e) =>
           // A real answer (RESOURCE_EXHAUSTED, INVALID_ARGUMENT, ...), returned at once as before.
@@ -1614,6 +1635,7 @@ class FrostBackend(
   private def generateHosted(keyId: String, spec: String): Future[String] = {
     val notes = currentNotes.get
     Future(blocking {
+      val leadAtStart = preferred.state // see withCheckedFailover
       val start = preferred.get
       // One budget for the whole call: the cluster-id lookup, every attempt and every copy check
       // come out of it.
@@ -1715,7 +1737,7 @@ class FrostBackend(
         attemptTimeout,
         budgetEnd,
       )(stub => stub.generateKey(request(stub)))
-      preferred.compareAndSet(start, lastTried.get)
+      preferred.moveIfUnmoved(leadAtStart, start, lastTried.get)
       reply
     }).map { reply =>
       learnSpec(keyId, spec)
@@ -2700,14 +2722,16 @@ object FrostBackend {
   private final case class Held(index: Int, lead: Long, at: Long)
 
   /** The preferred leader and how many times the lead has moved, as one atomic value. A call that
-    * holds a demotion back keeps the value it saw ([[state]]) and may move the lead later only if
-    * nothing has moved it since ([[moveIfUnmoved]]); every other change is by endpoint index, as
-    * with a plain atomic integer. */
+    * holds a demotion back, or makes the endpoint that served it the preferred leader, keeps the
+    * value it saw ([[state]]) and moves the lead later only if nothing has moved it since
+    * ([[moveIfUnmoved]]). A demotion of an endpoint that failed just now, and the return of the
+    * lead to the first endpoint, go by endpoint index, as with a plain atomic integer. An index
+    * has 16 bits, far more than a roster has cosigners. */
   private final class Lead {
     // The count of moves in the upper bits, the endpoint index in the lower 16.
     private val packed = new java.util.concurrent.atomic.AtomicLong(0L)
     private def indexOf(value: Long): Int = (value & 0xffffL).toInt
-    private def moved(value: Long, to: Int): Long = (((value >>> 16) + 1L) << 16) | to.toLong
+    private def moved(value: Long, to: Int): Long = (((value >>> 16) + 1L) << 16) | (to.toLong & 0xffffL)
 
     /** The endpoint index of the preferred leader. */
     def get: Int = indexOf(packed.get)
@@ -2726,7 +2750,7 @@ object FrostBackend {
 
     /** Move the lead from `from` to `to` if it was on `from` in `seen` and has not moved since. */
     def moveIfUnmoved(seen: Long, from: Int, to: Int): Boolean =
-      indexOf(seen) == from && (from == to || packed.compareAndSet(seen, moved(seen, to)))
+      indexOf(seen) == from && (if (from == to) packed.get == seen else packed.compareAndSet(seen, moved(seen, to)))
   }
 
   /** An answer the driver checked and refused to use (see `withCheckedFailover`): `code` names it

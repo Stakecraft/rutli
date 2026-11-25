@@ -145,6 +145,34 @@ class FrostHeldDemotionSpec extends AnyWordSpec with Matchers {
       }
     }
 
+    "not make the cosigner that served the preferred leader when the lead has gone round meanwhile" in {
+      withCluster(rotate = false) { (backend, nodes) =>
+        nodes(0).holdsKey = false
+        nodes(1).holdsKey = false
+        val pause = new Pause
+        nodes(2).pause = Some(pause)
+        val held = lookup(backend)
+        pause.arrived() shouldBe true
+
+        // Meanwhile a sign finds no cosigner: each loses the lead in turn, and it is back at the
+        // first. The lookup started with the lead there too, but this is not the lead it saw.
+        nodes.foreach(_.signs = false)
+        intercept[io.grpc.StatusRuntimeException](sign(backend)).getStatus.getCode shouldBe Status.Code.UNAVAILABLE
+        nodes.map(_.signCalls.get) shouldBe Seq(1, 1, 1)
+
+        pause.letGo()
+        await(held) shouldBe Data
+
+        // Neither the held-back demotions nor the lookup's success moved it: the next hosted call
+        // starts at the first cosigner, not at the third, which the sign has just found down.
+        nodes(2).pause = None
+        nodes.foreach(_.holdsKey = true)
+        val before = nodes.map(_.hostedCalls.get)
+        await(lookup(backend)) shouldBe Data
+        nodes.map(_.hostedCalls.get).zip(before).map { case (now, prev) => now - prev } shouldBe Seq(1, 0, 0)
+      }
+    }
+
     "be dated from the cosigner's answer, not from the end of the call" in {
       val recovery = 1.second
       withCluster(rotate = true, recovery = recovery) { (backend, nodes) =>
