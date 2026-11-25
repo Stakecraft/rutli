@@ -17,6 +17,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, SigningPolicyConfig};
+use crate::journal::{SEGMENT_BYTES, TYPICAL_ENTRY_BYTES};
 
 /// `profile`: what the operator says this node is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +83,7 @@ pub fn findings(cfg: &Config) -> Vec<Finding> {
     keyfile_and_cluster_findings(cfg, &mut out);
     hosted_keys_findings(cfg, &mut out);
     namespace_rule_advisory(p, &mut out);
+    journal_cap_advisory(p, &mut out);
     out
 }
 
@@ -377,6 +379,39 @@ fn namespace_rule_advisory(p: &SigningPolicyConfig, out: &mut Vec<Finding>) {
     }
 }
 
+/// The advisory row for a journal size cap smaller than an estimate of one day's journal at the
+/// highest daily sign limit: retention keeps the last day's entries, so such a journal grows past
+/// the cap. The estimate is one share per charge at [`TYPICAL_ENTRY_BYTES`], plus two segments; it
+/// is not a bound on disk use (replayed intents, sign tests and gated keys write more).
+fn journal_cap_advisory(p: &SigningPolicyConfig, out: &mut Vec<Finding>) {
+    const MIB: u64 = 1 << 20;
+    let per_day = p
+        .rate_limits
+        .iter()
+        .map(|r| r.per_day)
+        .chain([p.sign_rate_limit_per_day])
+        .max()
+        .unwrap_or(0);
+    let day = u64::from(per_day)
+        .saturating_mul(TYPICAL_ENTRY_BYTES)
+        .saturating_add(2 * SEGMENT_BYTES);
+    let cap = u64::from(p.journal_max_mib_per_key) * MIB;
+    if per_day > 0 && cap < day {
+        out.push(Finding {
+            level: Level::Advisory,
+            setting: "signing_policy.journal_max_mib_per_key",
+            found: format!(
+                "{} MiB, below about {} MiB for {per_day} signs a day",
+                p.journal_max_mib_per_key,
+                day.div_ceil(MIB)
+            ),
+            required: "at least the estimate of one day's journal at the daily sign limit (one share \
+                       per charge, 600 bytes each, plus two segments); retention keeps the last day's \
+                       entries above a smaller cap",
+        });
+    }
+}
+
 /// Whether a rule's key-id prefix covers a namespace key. The driver names a FROST key
 /// `<frost.key-prefix>frost-<Canton's key name>`, and the key name depends on who created it: a
 /// Splice validator calls it `namespace`, Canton's own auto-init `<node>-namespace` (for example
@@ -602,6 +637,32 @@ mod tests {
             ("signing_policy.rules", Level::Advisory, |c| {
                 c.signing_policy.rules[0].key_id_prefix = "p1-rutli-enc-".into();
             }),
+            // A daily limit raised without the journal cap: a day's journal no longer fits.
+            (
+                "signing_policy.journal_max_mib_per_key",
+                Level::Advisory,
+                |c| {
+                    c.signing_policy.sign_rate_limit_per_day = 200_000;
+                },
+            ),
+            (
+                "signing_policy.journal_max_mib_per_key",
+                Level::Advisory,
+                |c| {
+                    c.signing_policy.rate_limits = vec![RateLimitRule {
+                        key_id_prefix: "busy-".into(),
+                        per_min: 300,
+                        per_day: 200_000,
+                    }];
+                },
+            ),
+            (
+                "signing_policy.journal_max_mib_per_key",
+                Level::Advisory,
+                |c| {
+                    c.signing_policy.journal_max_mib_per_key = 8;
+                },
+            ),
         ];
         // A well-formed hosted-keys block on its own fires nothing.
         let mut ok = enforced();

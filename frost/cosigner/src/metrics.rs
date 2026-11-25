@@ -87,6 +87,14 @@ pub const SIGNER_ACL_ABSENT: &str = "rutli_signer_acl_absent_total";
 pub const SIGN_JOURNAL_ENTRIES: &str = "rutli_sign_journal_entries_total";
 /// Sign journal failures (corrupt on open, append failed): the share was refused.
 pub const SIGN_JOURNAL_ERRORS: &str = "rutli_sign_journal_errors_total";
+/// Sign journal retention runs that stopped with a key's journal above
+/// `signing_policy.journal_max_mib_per_key`, at a segment retention keeps: its newest entry is less
+/// than a day old (the rate-limit ledger is rebuilt from those) or cannot be read.
+pub const SIGN_JOURNAL_OVER_CAP: &str = "rutli_sign_journal_over_cap_total";
+/// Sign journal segments, among those read when a key's journal opens (the last day's), whose first
+/// entry starts the hash chain afresh (`prev` = genesis) although older segments exist or its name
+/// or sequence number is not 1. Counted once the journal has opened.
+pub const SIGN_JOURNAL_CHAIN_RESTARTS: &str = "rutli_sign_journal_chain_restarts_total";
 /// Counter, label `reason`: DKG/refresh ceremony intents and hosted-key generate intents this node
 /// refused — at the fence or part 1 of a ceremony a peer leads, at the fence of a generation, or as
 /// leader on Signer.Dkg/Refresh/GenerateKey (certificate, signer, pin, signature, cluster, purpose,
@@ -599,6 +607,8 @@ fn prime_hosted_and_policy_series() {
     metrics::counter!(SIGNER_ACL_ABSENT).absolute(0);
     metrics::counter!(SIGN_JOURNAL_ENTRIES).absolute(0);
     metrics::counter!(SIGN_JOURNAL_ERRORS).absolute(0);
+    metrics::counter!(SIGN_JOURNAL_OVER_CAP).absolute(0);
+    metrics::counter!(SIGN_JOURNAL_CHAIN_RESTARTS).absolute(0);
     for reason in SIGN_POLICY_REASONS {
         metrics::counter!(SIGN_POLICY_REFUSALS, "reason" => *reason).absolute(0);
     }
@@ -737,6 +747,14 @@ pub fn describe() {
     describe_counter!(
         SIGN_JOURNAL_ERRORS,
         "Sign journal failures; the share was refused"
+    );
+    describe_counter!(
+        SIGN_JOURNAL_OVER_CAP,
+        "Sign journal retention runs stopped above journal_max_mib_per_key by a segment with entries of the last day or an unreadable last entry"
+    );
+    describe_counter!(
+        SIGN_JOURNAL_CHAIN_RESTARTS,
+        "Sign journal segments read on open that restart the hash chain although they are not the key's first"
     );
     describe_counter!(
         EPOCH_MISMATCH,
