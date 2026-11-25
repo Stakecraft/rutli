@@ -20,6 +20,8 @@
 #   E2E_DEALER_IMAGE    the dealer's image: one with rutli-dealer of the cosigners' release
 #                       (frost/Dockerfile.perf, or frost/Dockerfile.dealer for an earlier tag)
 #   E2E_LOADGEN_POD     the load generator pod (default rutli-perf-loadgen)
+#   E2E_SCRATCH         an empty directory for the local work dir (the suite passes one it removes
+#                       itself); default a new one under TMPDIR
 #   E2E_ALLOW_UNISOLATED_DEALER=1  go on when the dealer pod reaches the network (its NetworkPolicy
 #                       not enforced: kind's default network plugin); otherwise that is a failure
 
@@ -41,16 +43,28 @@ env_init() {
   [ "${E2E_STAGES:-all}" = ceremony ] || fail "E2E_ENV=k8s runs only E2E_STAGES=ceremony: there is no Canton on the cluster"
   [ -n "${E2E_DEALER_IMAGE:-}" ] || fail "E2E_DEALER_IMAGE is required for E2E_ENV=k8s"
   [ -f "${E2E_CERTS:-}/ca.crt" ] || fail "E2E_CERTS must name the installation's certificate directory (no ca.crt in '${E2E_CERTS:-}')"
-  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rutli-e2e-migration-k8s.XXXXXX")"
+  if [ -n "${E2E_SCRATCH:-}" ]; then
+    [ -d "$E2E_SCRATCH" ] && [ -z "$(ls -A "$E2E_SCRATCH")" ] || fail "E2E_SCRATCH must be an empty directory"
+    WORK="$E2E_SCRATCH"
+  else
+    WORK="$(mktemp -d "${TMPDIR:-/tmp}/rutli-e2e-migration-k8s.XXXXXX")"
+  fi
   SYNC="$WORK/sync"
   mkdir -p "$SYNC" "$WORK/certs"
   cp "$E2E_CERTS/ca.crt" "$WORK/certs/ca.crt"
   # shellcheck disable=SC2034  # the procedure runs "$DEALER" split-key …
   DEALER=_dealer_in_pod
   DEALER_STARTED=0
-  # A dealer pod left by a run that was killed outright (and whatever its memory held) goes first.
+  # What a run that was killed outright left goes first: its dealer pod (and whatever its memory
+  # held) and the ceremony's files in the cosigners' /tmp.
   _kq delete pod "$DEALER_POD" --wait=true --timeout=120s --ignore-not-found >/dev/null
   _kq delete networkpolicy "$DEALER_POD" --ignore-not-found >/dev/null
+  local n
+  for n in 1 2 3; do
+    # shellcheck disable=SC2016  # expanded by the pod's shell
+    _kq exec "$(_pod "$n")" -c cosigner -- sh -c 'rm -rf /tmp/r[0-9].json /tmp/share-*.json /tmp/backup-founding-node*' \
+      || fail "could not clear cosigner $n's /tmp of an earlier run's ceremony files"
+  done
 
   step "Cluster in namespace $NS: every cosigner healthy, the load generator ready"
   local i role

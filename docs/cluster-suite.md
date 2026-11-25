@@ -284,8 +284,9 @@ as the Compose end-to-end test, not a second copy:
    - the cosigner pods' and the load generator's `/tmp`, where the requests, bundles and founding
      backups go, must be memory-backed, or the suite stops before copying anything;
    - after the ceremony (or a timeout, or a SIGTERM to the suite) the suite deletes the dealer pod
-     and waits until it is gone; the pod also has a 30-minute deadline of its own, and the next run
-     deletes a dealer pod a killed run left;
+     and waits until it is gone, and removes the ceremony's files from the cosigners' `/tmp` and
+     its local work dir, even when the script was killed; the pod also has a 30-minute deadline of
+     its own, and the next run first deletes what a killed run left;
    - a run that passed but could not remove its files from the pods' `/tmp` (or the dealer's
      NetworkPolicy) fails; after a failed run, a node that had installed its share keeps it, under
      the run's own key id;

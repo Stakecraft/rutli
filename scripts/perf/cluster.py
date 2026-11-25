@@ -61,6 +61,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -284,11 +285,27 @@ class Suite(base.Runner):
         result_path = os.path.join(a.work, f"migration-{prefix.rstrip('-')}.json")
         stage = {}
 
-        def delete_dealer():
-            """The dealer pod (and the memory-backed work dir it holds) once, whatever happened to the
-            script; then its NetworkPolicy, only once the API confirms the pod is gone. In a session
-            of its own, so that a signal to this process group cannot cut the deletion short."""
+        # The script's local work dir (the export, the dealer's output) is made here, so that this
+        # side can remove it even when the script was killed before its own cleanup.
+        scratch = tempfile.mkdtemp(prefix="rutli-e2e-migration-k8s.")
+
+        def remove_leftovers():
+            """Whatever happened to the script, once: the local work dir, the ceremony's files in the
+            cosigners' /tmp (bundles, founding backups), the dealer pod (and the memory-backed work
+            dir it holds), then its NetworkPolicy once the API confirms the pod is gone. Each call in
+            a session of its own, so that a signal to this process group cannot cut it short."""
+            shutil.rmtree(scratch, ignore_errors=True)
             argv = ["kubectl", "-n", self.cluster.ns]
+            for n in NODES:
+                try:
+                    rm = subprocess.run(argv + ["exec", self.cluster.pod(n), "-c", "cosigner", "--", "sh", "-c",
+                                                "rm -rf /tmp/r[0-9].json /tmp/share-*.json /tmp/backup-founding-node*"],
+                                        capture_output=True, timeout=60, start_new_session=True, check=False)
+                    removed = rm.returncode == 0
+                except subprocess.TimeoutExpired:
+                    removed = False
+                if not removed:
+                    log(f"  WARNING: the ceremony's files in {n}'s /tmp could not be removed. Remove them by hand.")
             try:
                 subprocess.run(argv + ["delete", "pod", DEALER_POD, "--wait=true", "--timeout=120s",
                                        "--ignore-not-found"], capture_output=True, timeout=180, start_new_session=True, check=False)
@@ -306,7 +323,7 @@ class Suite(base.Runner):
         def body():
             env = dict(os.environ, E2E_ENV="k8s", E2E_STAGES="ceremony", E2E_PREFIX=prefix,
                        RUTLI_NAMESPACE=self.cluster.ns, E2E_CERTS=os.path.join(a.work, "certs"),
-                       E2E_DEALER_IMAGE=image, E2E_RESULT=result_path)
+                       E2E_DEALER_IMAGE=image, E2E_RESULT=result_path, E2E_SCRATCH=scratch)
             # Set either way: an inherited E2E_ALLOW_UNISOLATED_DEALER must not decide it, nor an
             # inherited KEEP keep the export on disk.
             env["E2E_ALLOW_UNISOLATED_DEALER"] = "1" if a.allow_unisolated_dealer else "0"
@@ -334,7 +351,7 @@ class Suite(base.Runner):
                     raise
                 return [{"failed": "the split ceremony on the cluster did not finish within 30 minutes"}]
             finally:
-                delete_dealer()
+                remove_leftovers()
             stage.update({"seconds": round(time.time() - started, 1), "dealer_image": image,
                           "steps": [line[4:] for line in out.stdout.splitlines() if line.startswith("==> ")]})
             for line in out.stdout.splitlines():
