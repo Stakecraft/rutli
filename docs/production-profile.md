@@ -113,6 +113,12 @@ Its exit codes are those of `check-config` above.
 Placement is not a config setting and the profile cannot check it: each cosigner in its own cluster
 or cloud account is a go-live gate ([audit-prep.md](audit-prep.md#operator-go-live-gates-post-audit)).
 
+Encryption at rest for Kubernetes Secrets is the same kind of item: turn it on in the cluster
+([Kubernetes: encrypt data at rest](https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/)).
+It covers a stolen control-plane disk or an etcd backup. It does not cover someone who is allowed
+to read Secrets through the API. The cosigner cannot check it from inside the cluster, so it is on
+the operator's list (issue #334).
+
 ## Process hardening (every profile)
 
 At start, before it opens a key store, the cosigner daemon turns core dumps off: `RLIMIT_CORE = 0`
