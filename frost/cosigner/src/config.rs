@@ -404,7 +404,8 @@ pub struct SigningPolicyConfig {
     /// Sign journal (`data_dir/journal/<key_id>/`): segments older than this are deleted...
     #[serde(default = "default_journal_retention_days")]
     pub journal_retention_days: u32,
-    /// ...and so are the oldest segments of a key past this total size.
+    /// ...and so are the oldest segments of a key past this total size, except those that hold
+    /// entries of the last 24 h (the rate limit is rebuilt from them after a restart).
     #[serde(default = "default_journal_max_mib_per_key")]
     pub journal_max_mib_per_key: u32,
     /// Approval rules, as the driver's `approval.rules` (key-id prefix, first match wins): a key a

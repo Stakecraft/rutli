@@ -87,6 +87,13 @@ pub const SIGNER_ACL_ABSENT: &str = "rutli_signer_acl_absent_total";
 pub const SIGN_JOURNAL_ENTRIES: &str = "rutli_sign_journal_entries_total";
 /// Sign journal failures (corrupt on open, append failed): the share was refused.
 pub const SIGN_JOURNAL_ERRORS: &str = "rutli_sign_journal_errors_total";
+/// Sign journal sweeps that left a key's journal above `signing_policy.journal_max_mib_per_key`,
+/// because its oldest segment still holds entries of the last 24 h (the size cap never removes
+/// those: the rate-limit ledger is rebuilt from them after a restart).
+pub const SIGN_JOURNAL_OVER_CAP: &str = "rutli_sign_journal_over_cap_total";
+/// Sign journal segments found on open that restart the hash chain (`prev` = genesis) although
+/// they are not the key's first segment. Logged and counted; the journal still opens.
+pub const SIGN_JOURNAL_CHAIN_RESTARTS: &str = "rutli_sign_journal_chain_restarts_total";
 /// Counter, label `reason`: DKG/refresh ceremony intents and hosted-key generate intents this node
 /// refused — at the fence or part 1 of a ceremony a peer leads, at the fence of a generation, or as
 /// leader on Signer.Dkg/Refresh/GenerateKey (certificate, signer, pin, signature, cluster, purpose,
@@ -599,6 +606,8 @@ fn prime_hosted_and_policy_series() {
     metrics::counter!(SIGNER_ACL_ABSENT).absolute(0);
     metrics::counter!(SIGN_JOURNAL_ENTRIES).absolute(0);
     metrics::counter!(SIGN_JOURNAL_ERRORS).absolute(0);
+    metrics::counter!(SIGN_JOURNAL_OVER_CAP).absolute(0);
+    metrics::counter!(SIGN_JOURNAL_CHAIN_RESTARTS).absolute(0);
     for reason in SIGN_POLICY_REASONS {
         metrics::counter!(SIGN_POLICY_REFUSALS, "reason" => *reason).absolute(0);
     }
@@ -737,6 +746,14 @@ pub fn describe() {
     describe_counter!(
         SIGN_JOURNAL_ERRORS,
         "Sign journal failures; the share was refused"
+    );
+    describe_counter!(
+        SIGN_JOURNAL_OVER_CAP,
+        "Sign journal sweeps that kept a key above journal_max_mib_per_key: its oldest segment holds entries of the last 24 h"
+    );
+    describe_counter!(
+        SIGN_JOURNAL_CHAIN_RESTARTS,
+        "Sign journal segments that restart the hash chain although they are not the key's first"
     );
     describe_counter!(
         EPOCH_MISMATCH,

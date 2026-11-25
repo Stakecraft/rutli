@@ -434,8 +434,9 @@ backup:
   # The sidecar's work directory: a memory-backed emptyDir, so the tar of the sealed key files and
   # journals never reaches the Kubernetes node's disk. The tar is all it holds (the run links the
   # files, it does not copy them first), so size it for the key files plus the journals (a few kB per
-  # key file; journals up to signing_policy.journal_max_mib_per_key, 64 MiB, per key). A run that does
-  # not fit logs BACKUP_FAILED reason=work-dir-full. Counted in `resources.limits.memory` below.
+  # key file; journals up to signing_policy.journal_max_mib_per_key, 64 MiB, per key, or one day's
+  # entries if more). A run that does not fit logs BACKUP_FAILED reason=work-dir-full. Counted in
+  # `resources.limits.memory` below.
   workSizeLimit: 128Mi
   destination:
     # pvc (default): a per-node backup PVC (<fullname>-backup-n<id>, or nodes[].backupClaim), mounted

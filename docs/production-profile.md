@@ -64,6 +64,7 @@ live config. It works under any `profile`.
 | `hosted_keys.delete_approval_threshold` (with `delete_allowlist`) | 0 | at least 1 | A delete needs a human approval. |
 | `hosted_keys.commitment_key` (hosted keys on) | derived on the legacy master | set | The per-node seal bundle needs it. |
 | `signing_policy.rules` | empty | **advisory**: a `quorum` rule whose prefix covers a namespace key (`<prefix>frost-namespace` from a Splice validator, `<prefix>frost-<node>-namespace` from Canton's auto-init) | Human approval of namespace-key signatures ([approval-quorum.md](approval-quorum.md)). A deployment decision, so it is reported and never refuses. |
+| `signing_policy.journal_max_mib_per_key` | 64 | **advisory**: at least about 600 bytes × the highest daily sign limit (`sign_rate_limit_per_day` or a `rate_limits` rule) + 8 MiB | The size cap never deletes the last 24 h of a key's journal (the rate limit is rebuilt from it after a restart), so on a busy day the journal grows past a smaller cap. A sizing estimate for typical entries, so it is reported and never refuses. |
 
 The intent rows are not listed separately for a node without TLS: the `tls` row covers them.
 
