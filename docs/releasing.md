@@ -116,7 +116,9 @@ step shows before tag day.
 | `ghcr.io/stakecraft/rutli-cosigner:<version>` | `publish-image.yml` | In the image: `/usr/share/doc/rutli-cosigner/THIRD-PARTY-LICENSES.txt` |
 
 The workflow also stores a GitHub build provenance attestation for every file (from `SHA256SUMS`).
-Release builds use no build cache. A binary for another platform (for example macOS) is not built by
+Release builds use no build cache, so they download sbt, the dependencies and the tools on every run;
+Maven Central sometimes rate-limits the hosted runners (HTTP 429). Such a failure happens in a build
+job, before anything is signed: re-run the failed jobs. A binary for another platform (for example macOS) is not built by
 the workflow: if the maintainer attaches one by hand it is unsigned and the notes say so. A binary
 without its license file next to it is not a complete release: the MIT and BSD licenses of the
 bundled crates require their notices to travel with the binary.
