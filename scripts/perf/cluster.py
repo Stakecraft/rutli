@@ -320,6 +320,9 @@ class Suite(base.Runner):
                         done = False
                     if not done and step[0] == "sh":
                         log(f"  WARNING: the ceremony's files in {n}'s /tmp could not be removed. Remove them by hand.")
+                    elif not done:
+                        log(f"  WARNING: abort-import on {n} failed: its sealed recipient secret for {key_id} may "
+                            f"remain. Run abort-import --key-id {key_id} --ceremony-id {ceremony} there by hand.")
             try:
                 subprocess.run(argv + ["delete", "pod", DEALER_POD, "--wait=true", "--timeout=120s",
                                        "--ignore-not-found"], capture_output=True, timeout=180, start_new_session=True, check=False)
