@@ -22,7 +22,9 @@ them to the GitHub release (see "Release assets").
    section by hand when you assemble the final one. The release pull request carries the label
    `no-changelog` (it changes the version files and `CHANGELOG.md` itself).
 4. "Latest release" references name the new version: `SECURITY.md` (status and supported-versions
-   table) and the version placeholder in `.github/ISSUE_TEMPLATE/bug_report.yml`.
+   table), the version placeholder in `.github/ISSUE_TEMPLATE/bug_report.yml`, and the public
+   explorer page `docs/explorer/index.html` (the release named in "Evidence so far" and in the footer;
+   a release candidate is named as a candidate, never as the release).
 5. Tag only after the release PR is merged, and tag the merge commit by its SHA
    (`git tag -a v<version> -m v<version> <sha>`), never a branch head that still carries the old versions.
 6. The "Image build check" workflow is green on `main` (it builds both platforms the way the release
