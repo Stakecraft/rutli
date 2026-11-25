@@ -235,8 +235,7 @@ v0.4.0.
 | **1.0** | Emergency recovery | A designed answer to "every cosigner is lost at once": shares encrypted to offline keys held by several recovery officers. It is a path to the whole key, so the design (who, how many, which ceremony) comes before the code |
 | **0.6** | Sealing-key rotation tied to the refresh schedule | Rotating each node's seal key (and dropping the old one) as part of the refresh cadence, so an old copy of a share stops opening without an operator step. Today it is a manual step ([key-material-handling.md](key-material-handling.md)) |
 | **0.6** | Sealing secret from an external key manager (issue #333) | The secret that seals the key files can come from an external key manager instead of a Kubernetes Secret. The chart gets an example, the docs a page, and the node authenticates with its workload identity |
-| **2.0** | Confidential computing | Cosigners in AWS Nitro Enclaves, AMD SEV-SNP or Intel TDX, so even root on the host or a memory snapshot does not reveal a share (today a documented residual, audit L7) |
-| **After 1.0** | Cosigner in an attested environment (issue #335) | The cosigner runs in an environment that proves what it runs, and a share is decrypted only there, so a copy of the key files and the sealing secret is not enough to open it |
+| **2.0** | Confidential computing (issue #335) | Cosigners in AWS Nitro Enclaves, AMD SEV-SNP or Intel TDX, so even root on the host or a memory snapshot does not reveal a share, and a share is decrypted only inside the attested environment (today a documented residual, audit L7) |
 
 **Consequence for the audit.** Threshold ECIES was moved to 2.0 on 2026-11-02 and brought back into
 1.0 on 2026-11-19: without it one compromised cosigner can still read the encryption key. Like the
