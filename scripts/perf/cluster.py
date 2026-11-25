@@ -56,8 +56,6 @@ import contextlib
 import json
 import math
 import os
-import re
-import secrets
 import shlex
 import shutil
 import signal
@@ -72,6 +70,7 @@ import diagnose  # noqa: E402  (the diagnostic pass's parsers and verdicts)
 import run as base  # noqa: E402  (the compose suite: Runner, scenarios, key names)
 
 NODES = base.NODES
+DEALER_POD = "rutli-perf-dealer"  # scripts/e2e-migration-env-k8s.sh: one suite run per namespace
 HERE = os.path.dirname(os.path.abspath(__file__))
 # The driver's deadlines (#196): 5 s a sign attempt, 10 s an attempt of any other call, 30 s a
 # call. The key-class spot checks use them whatever the run's own policy is.
@@ -282,68 +281,36 @@ class Suite(base.Runner):
         image = a.dealer_image or self.cluster.kubectl(
             "get", "pod", "rutli-perf-loadgen", "-o", "jsonpath={.spec.containers[0].image}").stdout.strip()
         prefix = f"perf-mig{int(time.time())}-"
-        dealer = f"rutli-perf-dealer-{secrets.token_hex(4)}"  # this run's own: never another run's
         result_path = os.path.join(a.work, f"migration-{prefix.rstrip('-')}.json")
         stage = {}
 
-        # A SIGTERM while the ceremony is being stopped or cleaned up is held until that is done.
-        deferred_term, held_term = [], {}
-
-        def hold_term():
-            if "previous" not in held_term:
-                held_term["previous"] = signal.signal(signal.SIGTERM, lambda signum, _f: deferred_term.append(signum))
-
-        def fallback_cleanup():
+        def delete_dealer():
+            """The dealer pod (and the memory-backed work dir it holds) once, whatever happened to the
+            script; then its NetworkPolicy, only once the API confirms the pod is gone. In a session
+            of its own, so that a signal to this process group cannot cut the deletion short."""
+            argv = ["kubectl", "-n", self.cluster.ns]
             try:
-                self.cluster.kubectl("delete", "pod", dealer, "--wait=true", "--timeout=120s",
-                                     "--ignore-not-found", timeout=180, check=False)
-                # Its deny-all NetworkPolicy goes only once the API confirms the pod is gone (an
-                # error of `get` keeps the policy).
-                left = self.cluster.kubectl("get", "pod", dealer, "--ignore-not-found", "-o",
-                                            "name", timeout=60, check=False)
-                gone = left.returncode == 0 and not left.stdout.strip()
+                subprocess.run(argv + ["delete", "pod", DEALER_POD, "--wait=true", "--timeout=120s",
+                                       "--ignore-not-found"], capture_output=True, timeout=180, start_new_session=True, check=False)
+                left = subprocess.run(argv + ["get", "pod", DEALER_POD, "--ignore-not-found", "-o", "name"],
+                                      capture_output=True, text=True, timeout=60, start_new_session=True, check=False)
+                if left.returncode == 0 and not left.stdout.strip():
+                    subprocess.run(argv + ["delete", "networkpolicy", DEALER_POD, "--ignore-not-found"],
+                                   capture_output=True, timeout=60, start_new_session=True, check=False)
+                    return
             except subprocess.TimeoutExpired:
-                gone = False
-            deleted = False
-            if gone:
-                # A hung API here must not hide the ceremony's result: the policy then stays.
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    deleted = self.cluster.kubectl("delete", "networkpolicy", dealer,
-                                                   "--ignore-not-found", timeout=60, check=False).returncode == 0
-                if not deleted:
-                    log("  WARNING: the dealer's NetworkPolicy could not be deleted. Delete it by hand.")
-            else:
-                log("  WARNING: the dealer pod may still be there; its NetworkPolicy is kept. Delete it by hand.")
-            # The ceremony's files in the cosigners' memory-backed /tmp (requests, bundles,
-            # founding backups), once more: the script's own cleanup may not have reached them.
-            for n in NODES:
-                try:
-                    gone_tmp = self.cluster.kubectl(
-                        "exec", self.cluster.pod(n), "-c", "cosigner", "--", "sh", "-c",
-                        "rm -rf /tmp/r[0-9].json /tmp/share-*.json /tmp/backup-founding-node*",
-                        timeout=60, check=False).returncode == 0
-                except subprocess.TimeoutExpired:
-                    gone_tmp = False
-                if not gone_tmp:
-                    log(f"  WARNING: the ceremony's files in {n}'s /tmp could not be removed. Remove them by hand.")
-            try:
-                gone_tmp = self.cluster.kubectl(
-                    "exec", "rutli-perf-loadgen", "--", "rm", "-f", "/tmp/e2e-operator.json",
-                    "/tmp/e2e-refresher.json", timeout=60, check=False).returncode == 0
-            except subprocess.TimeoutExpired:
-                gone_tmp = False
-            if not gone_tmp:
-                log("  WARNING: the client configs in the load generator's /tmp could not be removed.")
+                pass
+            log(f"  WARNING: the dealer pod {DEALER_POD} may still be there (it stops at its 30-minute deadline). "
+                "Delete it and its NetworkPolicy by hand.")
 
         def body():
             env = dict(os.environ, E2E_ENV="k8s", E2E_STAGES="ceremony", E2E_PREFIX=prefix,
                        RUTLI_NAMESPACE=self.cluster.ns, E2E_CERTS=os.path.join(a.work, "certs"),
-                       E2E_DEALER_IMAGE=image, E2E_DEALER_POD=dealer, E2E_RESULT=result_path)
+                       E2E_DEALER_IMAGE=image, E2E_RESULT=result_path)
             # Set either way: an inherited E2E_ALLOW_UNISOLATED_DEALER must not decide it, nor an
-            # inherited KEEP keep the export on disk, nor another probe address weaken the check.
+            # inherited KEEP keep the export on disk.
             env["E2E_ALLOW_UNISOLATED_DEALER"] = "1" if a.allow_unisolated_dealer else "0"
             env["KEEP"] = "0"
-            env.pop("E2E_DEALER_PROBE_EXTERNAL", None)
             started = time.time()
             proc = subprocess.Popen(["bash", os.path.join(HERE, "..", "e2e-migration.sh")], env=env,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -352,15 +319,12 @@ class Suite(base.Runner):
                 stdout, stderr = proc.communicate(timeout=1800)
                 out = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
             except BaseException as e:
-                hold_term()
-                # A timeout, Ctrl-C or any other error here: stop the script before the pod goes.
-                # SIGTERM to its whole group first (a kubectl in flight stops too); bash then runs its
-                # EXIT trap, which shreds its work dir and removes the dealer pod. SIGKILL after 10 min.
+                # A timeout, Ctrl-C or any other error: SIGTERM to the script's group, so that its EXIT
+                # trap cleans up (work dir, dealer pod, the pods' files); SIGKILL after 5 minutes.
                 try:
                     os.killpg(proc.pid, signal.SIGTERM)
-                    proc.communicate(timeout=600)
+                    proc.communicate(timeout=300)
                 except subprocess.TimeoutExpired:
-                    # The group may have exited between the timeout and the kill.
                     with contextlib.suppress(ProcessLookupError):
                         os.killpg(proc.pid, signal.SIGKILL)
                     proc.communicate()
@@ -370,26 +334,18 @@ class Suite(base.Runner):
                     raise
                 return [{"failed": "the split ceremony on the cluster did not finish within 30 minutes"}]
             finally:
-                # Whatever happened to the script (a timeout kills it before its own cleanup), the
-                # dealer pod and what its memory holds go now, not at its 30-minute deadline. A
-                # SIGTERM meanwhile waits until this cleanup is done, then ends the run.
-                hold_term()
-                try:
-                    fallback_cleanup()
-                finally:
-                    signal.signal(signal.SIGTERM, held_term["previous"])
-                if deferred_term:
-                    raise SystemExit(128 + deferred_term[0])
+                delete_dealer()
             stage.update({"seconds": round(time.time() - started, 1), "dealer_image": image,
                           "steps": [line[4:] for line in out.stdout.splitlines() if line.startswith("==> ")]})
             for line in out.stdout.splitlines():
                 if line.startswith("==> "):
                     log(f"  {line[4:]}")
             if out.returncode != 0:
-                # Only the procedure's own FAIL lines, masked, then cut: never a command's raw output.
-                fails = [line for line in (out.stderr + out.stdout).splitlines() if line.startswith("FAIL:")]
-                why = redact("; ".join(fails) or "no FAIL line")[-1500:]
-                return [{"failed": f"the split ceremony on the cluster failed (exit {out.returncode}): {why}"}]
+                # The step it failed in and its exit code, never the script's output: nothing a
+                # command printed reaches cluster.json or the log. To see it, run the script by hand
+                # (docs/cluster-suite.md).
+                last = stage["steps"][-1] if stage["steps"] else "before the first step"
+                return [{"failed": f"the split ceremony on the cluster failed in: {last} (exit {out.returncode})"}]
             with open(result_path) as f:
                 stage.update(json.load(f))
             self.imported_key = stage["key_id"]
@@ -1194,13 +1150,6 @@ class Diagnosis:
             out["keys_verdict"] = diagnose.keys_verdict(results)
             log(f"diagnose: {out['keys_verdict']}")
         return out
-
-
-def redact(text):
-    """Text on its way into cluster.json and the log: long hex or base64 runs (key bytes, shares,
-    sealed secrets) masked, should a failing ceremony ever print them."""
-    text = re.sub(r"[0-9A-Fa-f]{32,}", "[hex]", text)
-    return re.sub(r"[A-Za-z0-9+/_-]{32,}={0,2}", "[base64]", text)
 
 
 def terminated(signum, _frame):

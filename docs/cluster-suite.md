@@ -271,13 +271,12 @@ as the Compose end-to-end test, not a second copy:
 2. **Recipient requests and Gate 0.** `share-recipient` and `recipient-sas` run in each cosigner
    pod (`kubectl exec … -c cosigner`, never a second mount of its volume). The SAS of each request
    must equal the one read back from the node's sealed state.
-3. **The dealer** runs in a pod of its own, `rutli-perf-dealer-<random>` (one name per run, so two
-   runs in one namespace never touch each other's dealer):
+3. **The dealer** runs in a pod of its own, `rutli-perf-dealer`:
    - no service account token, no network (a NetworkPolicy denies every connection), its work
      directory in memory, a new pod every run;
    - the NetworkPolicy holds only where the network plugin enforces policies, and other policies
      in the namespace add to it. Before anything is copied in, the pod tries to reach cosigner 1,
-     the API service, its nameserver and an address outside the cluster, and to
+     the API service, its nameserver and `1.1.1.1:443`, and to
      resolve a name through its resolver; only a timeout or no answer on every one counts as
      isolated, and anything reachable fails the suite. The kind
      job passes `--allow-unisolated-dealer`: kind's default plugin enforces no policies, and its
@@ -285,11 +284,13 @@ as the Compose end-to-end test, not a second copy:
    - the cosigner pods' and the load generator's `/tmp`, where the requests, bundles and founding
      backups go, must be memory-backed, or the suite stops before copying anything;
    - after the ceremony (or a timeout, or a SIGTERM to the suite) the suite deletes the dealer pod
-     and waits until it is gone; the pod also has a 30-minute deadline of its own. A dealer left by
-     a run killed outright carries the label `rutli-perf/dealer` and is deleted by hand;
+     and waits until it is gone; the pod also has a 30-minute deadline of its own, and the next run
+     deletes a dealer pod a killed run left;
    - a run that passed but could not remove its files from the pods' `/tmp` (or the dealer's
-     NetworkPolicy) fails, and the suite tries the pods' `/tmp` once more whatever happened; after
-     a failed run, a node that had installed its share keeps it, under the run's own key id;
+     NetworkPolicy) fails; after a failed run, a node that had installed its share keeps it, under
+     the run's own key id;
+   - a failure is recorded as the step it happened in and the exit code, never the script's
+     output; to see that, run `scripts/e2e-migration.sh` by hand with `E2E_ENV=k8s KEEP=1`;
    - one suite run per namespace: two runs share the cosigners and their `/tmp`;
    - the export password reaches the dealer through stdin, never in a command line;
    - files reach it and leave it through the machine that runs the suite;

@@ -151,21 +151,12 @@ verify_key() { # extra args; prints the report as JSON with the command's exit c
 # A sign test that passed: the command succeeded, and every one of the three 2-of-3 quorums signed.
 ALL_QUORUMS='.exit_code == 0 and (.sign_test | length == 3)
   and ([.sign_test[].signers | sort] | unique) == [[1, 2], [1, 3], [2, 3]] and all(.sign_test[]; .ok)'
-# A command's output on its way to a log: the export password and long hex or base64 runs (key
-# bytes, shares, sealed secrets) masked, should a regression ever print them.
-redact() {
-  # Left to right, never rescanning what was put in: a password inside "[password]" cannot loop.
-  PW="${EXPORT_PW:-}" awk '{ pw = ENVIRON["PW"]; if (pw == "") { print; next }
-    out = ""; rest = $0
-    while ((i = index(rest, pw)) > 0) { out = out substr(rest, 1, i - 1) "[password]"; rest = substr(rest, i + length(pw)) }
-    print out rest }' \
-    | sed -E 's/[0-9A-Fa-f]{32,}/[hex]/g; s#[A-Za-z0-9+/_-]{40,}={0,2}#[base64]#g'
-}
 refused() { # what  expected-message  command…
   local what=$1 expect=$2
   shift 2
   if "$@" >"$WORK/refused.out" 2>&1; then fail "$what: accepted"; fi
-  grep -q -- "$expect" "$WORK/refused.out" || fail "$what: refused for the wrong reason: $(tail -n 20 "$WORK/refused.out" | redact)"
+  # The output stays out of the message (a log may be kept): KEEP=1 keeps it in the work dir.
+  grep -q -- "$expect" "$WORK/refused.out" || fail "$what: refused, but not with '$expect' (output: \$WORK/refused.out, KEEP=1)"
   echo "$what -> refused"
 }
 # Lessons f: on macOS GNU coreutils can shadow /bin/rm, which has -P. Files on the operator's machine.

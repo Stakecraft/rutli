@@ -22,15 +22,10 @@
 #   E2E_LOADGEN_POD     the load generator pod (default rutli-perf-loadgen)
 #   E2E_ALLOW_UNISOLATED_DEALER=1  go on when the dealer pod reaches the network (its NetworkPolicy
 #                       not enforced: kind's default network plugin); otherwise that is a failure
-#   E2E_DEALER_POD      the dealer pod's name (default rutli-perf-dealer-<random>): one per run, so
-#                       that two runs in one namespace never touch each other's dealer
-#   E2E_DEALER_PROBE_EXTERNAL  an address outside the cluster the isolation probe must not reach
-#                       (default 1.1.1.1/443; none: not probed)
 
 NS="${RUTLI_NAMESPACE:?RUTLI_NAMESPACE is required for E2E_ENV=k8s}"
 LOADGEN_POD="${E2E_LOADGEN_POD:-rutli-perf-loadgen}"
-DEALER_POD="${E2E_DEALER_POD:-rutli-perf-dealer-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')}"
-[[ "$DEALER_POD" =~ ^rutli-perf-dealer-[0-9a-z-]+$ ]] || fail "E2E_DEALER_POD '$DEALER_POD' is not a dealer pod name"
+DEALER_POD=rutli-perf-dealer # one suite run per namespace
 CLEANUP_FAILED=""
 
 _k() { kubectl -n "$NS" "$@"; }
@@ -46,24 +41,16 @@ env_init() {
   [ "${E2E_STAGES:-all}" = ceremony ] || fail "E2E_ENV=k8s runs only E2E_STAGES=ceremony: there is no Canton on the cluster"
   [ -n "${E2E_DEALER_IMAGE:-}" ] || fail "E2E_DEALER_IMAGE is required for E2E_ENV=k8s"
   [ -f "${E2E_CERTS:-}/ca.crt" ] || fail "E2E_CERTS must name the installation's certificate directory (no ca.crt in '${E2E_CERTS:-}')"
-  # The export and the dealer's output pass through here: memory-backed where the host has it.
-  local scratch="${TMPDIR:-/tmp}" fs
-  [ -d /dev/shm ] && [ -w /dev/shm ] && scratch=/dev/shm
-  fs="$(stat -f -c %T "$scratch" 2>/dev/null || echo unknown)"
-  case "$fs" in
-    tmpfs | ramfs) ;;
-    *) echo "WARNING: $scratch is not memory-backed ($fs): the export passes through this machine's disk" >&2 ;;
-  esac
-  WORK="$(mktemp -d "$scratch/rutli-e2e-migration-k8s.XXXXXX")"
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rutli-e2e-migration-k8s.XXXXXX")"
   SYNC="$WORK/sync"
   mkdir -p "$SYNC" "$WORK/certs"
   cp "$E2E_CERTS/ca.crt" "$WORK/certs/ca.crt"
   # shellcheck disable=SC2034  # the procedure runs "$DEALER" split-key …
   DEALER=_dealer_in_pod
   DEALER_STARTED=0
-  # Another run's dealer is never touched (each run names its own). One left by a run that was
-  # killed outright stops at its activeDeadlineSeconds; its pod and NetworkPolicy, labelled
-  # rutli-perf/dealer, are then deleted by hand.
+  # A dealer pod left by a run that was killed outright (and whatever its memory held) goes first.
+  _kq delete pod "$DEALER_POD" --wait=true --timeout=120s --ignore-not-found >/dev/null
+  _kq delete networkpolicy "$DEALER_POD" --ignore-not-found >/dev/null
 
   step "Cluster in namespace $NS: every cosigner healthy, the load generator ready"
   local i role
@@ -150,7 +137,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: $DEALER_POD
-  labels: { rutli-perf/suite: "1", rutli-perf/dealer: "1" }
+  labels: { rutli-perf/suite: "1" }
 spec:
   podSelector: { matchLabels: { app: $DEALER_POD } }
   policyTypes: [Ingress, Egress]
@@ -159,7 +146,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: $DEALER_POD
-  labels: { app: $DEALER_POD, rutli-perf/suite: "1", rutli-perf/dealer: "1" }
+  labels: { app: $DEALER_POD, rutli-perf/suite: "1" }
 spec:
   automountServiceAccountToken: false
   enableServiceLinks: false
@@ -202,20 +189,16 @@ YAML
   # Cosigner 1's pod (gRPC), the Kubernetes API service, the pod's own nameserver (TCP) and an
   # address outside the cluster; then a DNS lookup through the pod's resolver (UDP first). Not the
   # pod's own node: network plugins may exempt it from policies, and a conforming cluster would fail.
-  # On an IPv6-only cluster set E2E_DEALER_PROBE_EXTERNAL (IP/port, bare IPv6) or none. Inside the pod a connection exits 10, a
+  # The external address is IPv4: on an IPv6-only cluster it cannot be reached either way. Inside the pod a connection exits 10, a
   # refusal 11, a timeout 124; any other exit is kubectl's or a missing tool's, and stops the run.
-  local ip api ns target rc reachable="" targets=() external="${E2E_DEALER_PROBE_EXTERNAL:-1.1.1.1/443}"
+  local ip api ns target rc reachable=""
   ip="$(_k get pod "$(_pod 1)" -o jsonpath='{.status.podIP}')"
   api="$(kubectl -n default get service kubernetes -o jsonpath='{.spec.clusterIP}')"
   ns="$(_k exec "$DEALER_POD" -- sed -n 's/^nameserver[[:space:]]*//p' /etc/resolv.conf | head -n 1)"
   [[ "$ip" =~ ^[0-9a-fA-F.:]+$ ]] || fail "no pod IP for cosigner 1 to probe the dealer's isolation with"
   [[ "$api" =~ ^[0-9a-fA-F.:]+$ ]] || fail "no API service IP to probe the dealer's isolation with"
   [[ "$ns" =~ ^[0-9a-fA-F.:]+$ ]] || fail "no nameserver in the dealer pod's resolv.conf to probe its isolation with"
-  [[ "$external" =~ ^[0-9a-fA-F.:]+/[0-9]+$ || "$external" = none ]] \
-    || fail "E2E_DEALER_PROBE_EXTERNAL must be IP/port or none, not '$external' (a name would need the DNS the pod must not have)"
-  targets=("$ip/9101" "$api/443" "$ns/53")
-  [ "$external" = none ] || targets+=("$external")
-  for target in "${targets[@]}"; do
+  for target in "$ip/9101" "$api/443" "$ns/53" 1.1.1.1/443; do
     rc=0
     # shellcheck disable=SC2016  # expanded by the pod's shell
     _k exec "$DEALER_POD" -- bash -c \
@@ -238,7 +221,7 @@ YAML
   esac
   if [ -z "$reachable" ]; then
     DEALER_ISOLATED=true
-    echo "the dealer pod reaches none of ${targets[*]} and resolves no name: its NetworkPolicy holds"
+    echo "the dealer pod reaches neither cosigner 1, the API service, its nameserver nor 1.1.1.1, and resolves no name: its NetworkPolicy holds"
   else
     DEALER_ISOLATED=false
     [ "${E2E_ALLOW_UNISOLATED_DEALER:-0}" = 1 ] || fail "the dealer pod reaches$reachable: its NetworkPolicy is not enforced here"
