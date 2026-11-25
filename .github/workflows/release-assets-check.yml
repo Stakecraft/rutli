@@ -44,10 +44,14 @@ jobs:
         with:
           persist-credentials: false
 
+      # The sbt launcher, sbt itself and the driver's dependencies come from a cache (as in ci.yml):
+      # Maven Central rate-limits the shared runner addresses (HTTP 429), and a check that downloads
+      # all of it on every run fails for that reason, not for the change it checks.
       - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: "17"
+          cache: sbt
       - uses: sbt/setup-sbt@7e114eae4f32ec3f93c851c2793376a77f384409 # v1.5.15
       # Cached as ci.yml does (same key): this check only, the release build uses no cache.
       - name: Cache Canton API artifacts (ivy local)
