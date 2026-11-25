@@ -1,0 +1,1 @@
+- **The nonce store and the sign journal sync their parent directory on the first open in each process.** Until now the parent was synced only when the directory had just been created, so a failed sync, or a process that stopped before it, was not retried on the next open. An error from the sync is now returned.

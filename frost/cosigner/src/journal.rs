@@ -142,6 +142,34 @@ pub struct ReadReport {
     pub segments: usize,
 }
 
+/// Journal directories whose parent has been synced in this process.
+static PARENT_SYNCED: std::sync::OnceLock<Mutex<std::collections::HashSet<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+/// fsync the parent of `dir` on the first open of `dir` in this process, whether or not `dir` was
+/// just created: an earlier process may have died, or its sync failed, before the entry reached
+/// disk. A failed sync is returned and not recorded, so the next open tries again. (A key's
+/// journal is reopened after an eviction, a directory's parent is still synced only once.)
+fn sync_parent_once(dir: &Path) -> std::io::Result<()> {
+    let set = PARENT_SYNCED.get_or_init(Default::default);
+    if set.lock().unwrap_or_else(|p| p.into_inner()).contains(dir) {
+        return Ok(());
+    }
+    if let Some(parent) = dir.parent() {
+        // A bare relative name has an empty parent: the current directory.
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    set.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(dir.to_path_buf());
+    Ok(())
+}
+
 /// The sign journal of one node.
 pub struct SignJournal {
     dir: PathBuf,
@@ -200,6 +228,7 @@ impl SignJournal {
     pub fn open(dir: impl Into<PathBuf>, node: u16, retention: Retention) -> Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
+        sync_parent_once(&dir)?;
         Ok(Self {
             dir,
             node,
@@ -364,13 +393,8 @@ impl SignJournal {
 
 impl KeyJournal {
     fn open(dir: &Path, now_ms: u64, retention: Retention) -> Result<Self> {
-        let created = !dir.exists();
         std::fs::create_dir_all(dir)?;
-        if created {
-            if let Some(parent) = dir.parent() {
-                std::fs::File::open(parent)?.sync_all()?;
-            }
-        }
+        sync_parent_once(dir)?;
         let mut segs = segments(dir)?;
         // A torn tail can only be in the last segment: truncate it (it was never fsynced, so no
         // share was released for it).
@@ -1493,6 +1517,41 @@ mod tests {
         let again = SignJournal::open(&root, 1, FOREVER).unwrap();
         again
             .append_charged(entry("k", &format!("{:032x}", 3)), UNLIMITED, T + 1)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_failed_parent_sync_is_retried_on_the_next_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("journal");
+        // The journal directory exists before the first open in this process, and so does the
+        // key's: the parent of each is still synced on that first open.
+        std::fs::create_dir_all(root.join("k")).unwrap();
+        let _restore = RestoreMode(root.clone());
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).unwrap();
+        if std::fs::File::open(&root).is_ok() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "this test needs file permissions to be enforced, but the CI job runs as root"
+            );
+            eprintln!("skipped: permissions are not enforced here (running as root)");
+            return;
+        }
+        let j = SignJournal::open(&root, 1, FOREVER).unwrap();
+        assert!(j
+            .append_charged(entry("k", &format!("{:032x}", 1)), UNLIMITED, T)
+            .is_err());
+        // The failure was not recorded: the parent still cannot be synced, so it fails again.
+        assert!(j
+            .append_charged(entry("k", &format!("{:032x}", 2)), UNLIMITED, T + 1)
+            .is_err());
+        // Once the parent can be opened, the retry succeeds, and later opens do not sync again.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        j.append_charged(entry("k", &format!("{:032x}", 3)), UNLIMITED, T + 2)
+            .unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).unwrap();
+        j.append_charged(entry("k", &format!("{:032x}", 4)), UNLIMITED, T + 3)
             .unwrap();
     }
 }

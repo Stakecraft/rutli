@@ -57,6 +57,33 @@ use crate::{CoreError, Result};
 /// metrics; the daemon passes one that records them.
 pub type ConsumeObserver = fn(Duration, bool);
 
+/// Store directories whose parent has been synced in this process.
+static PARENT_SYNCED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+/// fsync the parent of `dir` on the first open of `dir` in this process, whether or not `dir` was
+/// just created: an earlier process may have died, or its sync failed, before the entry reached
+/// disk. A failed sync is returned and not recorded, so the next open tries again.
+fn sync_parent_once(dir: &Path) -> std::io::Result<()> {
+    let set = PARENT_SYNCED.get_or_init(Default::default);
+    if set.lock().unwrap_or_else(|p| p.into_inner()).contains(dir) {
+        return Ok(());
+    }
+    if let Some(parent) = dir.parent() {
+        // A bare relative name has an empty parent: the current directory.
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        File::open(parent)?.sync_all()?;
+    }
+    set.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(dir.to_path_buf());
+    Ok(())
+}
+
 pub struct NonceStore {
     dir: PathBuf,
     observer: Option<ConsumeObserver>,
@@ -67,6 +94,7 @@ impl NonceStore {
     pub fn open(dir: impl Into<PathBuf>) -> Result<Self> {
         let dir = dir.into();
         fs::create_dir_all(&dir)?;
+        sync_parent_once(&dir)?;
         Ok(Self {
             dir,
             observer: None,
@@ -286,6 +314,40 @@ mod tests {
             .open(store.dir.join(format!("{session}.used")))
             .unwrap();
         f.set_modified(SystemTime::now() - by).unwrap();
+    }
+
+    /// Restores a directory's permissions when dropped, so a failed assertion cannot leave a temp
+    /// directory the cleanup cannot remove.
+    struct RestoreMode(PathBuf);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    #[test]
+    fn a_failed_parent_sync_is_retried_on_the_next_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("keys");
+        let dir = parent.join("k.nonces");
+        // The directory already exists: the first open in this process still syncs its parent.
+        fs::create_dir_all(&dir).unwrap();
+        let _restore = RestoreMode(parent.clone());
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o300)).unwrap();
+        if File::open(&parent).is_ok() {
+            eprintln!("skipped: permissions not enforced");
+            return;
+        }
+        assert!(
+            NonceStore::open(&dir).is_err(),
+            "the sync error is returned"
+        );
+        // The failure was not recorded: the next open tries again, and succeeds.
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(NonceStore::open(&dir).is_ok());
+        // Once synced, later opens in this process do not sync again.
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o300)).unwrap();
+        assert!(NonceStore::open(&dir).is_ok());
     }
 
     #[test]
