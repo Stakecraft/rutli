@@ -3,70 +3,71 @@
 
 //! Filesystem helpers shared by the stores that must survive a crash.
 
-use std::collections::HashSet;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::path::{Component, Path};
 
-/// Canonical store directories that existed, and whose parent was synced, in this process.
-static PARENT_SYNCED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-
-/// Open (creating if needed) the store directory `dir` and make its name durable in its parent.
-/// Returns the canonical path of `dir`.
+/// Open (creating if needed) the store directory `dir`, and make the name of every level this call
+/// creates durable in its parent before the directory is used.
 ///
-/// - A directory that did not exist is created, and the parent of EVERY level this call created
-///   (`create_dir_all` may make several) is fsynced, top-down, so each new name reaches disk. This
-///   always happens, whatever was synced before: a directory deleted and created again at the same
-///   path is a new entry.
-/// - A directory that already existed has its parent synced on the first successful open in this
-///   process: an earlier process may have died, or its sync failed, before the entry reached disk.
-///   Later opens of it skip the sync. The set is keyed by the canonical path, so `.`, `..`,
-///   symlinks and a changed working directory do not make one directory look like two.
-/// - A failed sync is returned and not recorded, so the next open tries again.
+/// - The missing levels are created one by one, top-down, and the parent of each is fsynced right
+///   after. A level another thread or process created in the meantime is not ours, but its parent is
+///   synced too: the creator's own sync may still be pending.
+/// - If a create or a sync fails, the levels THIS call created are removed again, deepest first
+///   (`remove_dir` only succeeds on an empty directory, and its errors are ignored), and the original
+///   error is returned. The next open creates and syncs them again.
+/// - A directory that already exists is left alone: no sync.
 ///
-/// The process needs read permission on the parent (a directory is opened to be synced).
-pub fn open_dir_durably(dir: &Path) -> io::Result<PathBuf> {
-    let existed = dir.try_exists()?;
-    // The levels `create_dir_all` is about to create, deepest first.
+/// `dir` must not contain `..` components. The process needs read permission on the parent of every
+/// directory it creates (a directory is opened to be synced).
+pub fn open_dir_durably(dir: &Path) -> io::Result<()> {
+    if dir.components().any(|c| c == Component::ParentDir) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a store directory path must not contain `..`",
+        ));
+    }
+    // The levels to create, deepest first.
     let mut missing: Vec<&Path> = Vec::new();
-    if !existed {
-        for a in dir.ancestors() {
-            if a.as_os_str().is_empty() || a.try_exists()? {
-                break;
+    for a in dir.ancestors() {
+        if a.as_os_str().is_empty() || a.try_exists()? {
+            break;
+        }
+        missing.push(a);
+    }
+    if missing.is_empty() && !dir.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the store directory path exists and is not a directory",
+        ));
+    }
+    let mut created: Vec<&Path> = Vec::new();
+    for level in missing.iter().rev() {
+        let step = match fs::create_dir(level) {
+            Ok(()) => {
+                created.push(level);
+                sync_parent_of(level)
             }
-            missing.push(a);
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && level.is_dir() => {
+                sync_parent_of(level)
+            }
+            Err(e) => Err(e),
+        };
+        if let Err(e) = step {
+            for l in created.iter().rev() {
+                let _ = fs::remove_dir(l);
+            }
+            return Err(e);
         }
     }
-    fs::create_dir_all(dir)?;
-    let canonical = fs::canonicalize(dir)?;
-    let set = PARENT_SYNCED.get_or_init(Default::default);
-    if existed
-        && set
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .contains(&canonical)
-    {
-        return Ok(canonical);
-    }
-    // Top-down: the shallowest new name first.
-    for level in missing.iter().rev() {
-        let level = fs::canonicalize(level)?;
-        sync_parent_of(&level)?;
-    }
-    if existed {
-        sync_parent_of(&canonical)?;
-    }
-    set.lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(canonical.clone());
-    Ok(canonical)
+    Ok(())
 }
 
-/// fsync the directory that holds `canonical`.
-fn sync_parent_of(canonical: &Path) -> io::Result<()> {
-    match canonical.parent() {
-        Some(parent) => sync_dir(parent),
+/// fsync the directory that holds `path`.
+fn sync_parent_of(path: &Path) -> io::Result<()> {
+    match path.parent() {
+        Some(p) if p.as_os_str().is_empty() => sync_dir(Path::new(".")),
+        Some(p) => sync_dir(p),
         None => Ok(()),
     }
 }
@@ -78,7 +79,7 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
     handle.sync_all()
 }
 
-/// Test seam: records directory syncs and makes the next one fail after the directory was opened.
+/// Test seam: records directory syncs and can make one fail after the directory was opened.
 /// Thread-local, so parallel tests do not see each other.
 #[cfg(test)]
 mod seam {
@@ -87,20 +88,32 @@ mod seam {
     use std::path::{Path, PathBuf};
 
     thread_local! {
-        static FAIL_NEXT: Cell<bool> = const { Cell::new(false) };
+        static FAIL_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
         static SYNCED: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
     }
 
     pub(super) fn before_sync(dir: &Path) -> io::Result<()> {
-        if FAIL_NEXT.with(|f| f.replace(false)) {
+        let fail = FAIL_AFTER.with(|f| match f.get() {
+            Some(0) => {
+                f.set(None);
+                true
+            }
+            Some(n) => {
+                f.set(Some(n - 1));
+                false
+            }
+            None => false,
+        });
+        if fail {
             return Err(io::Error::other("injected sync_all failure"));
         }
         SYNCED.with(|s| s.borrow_mut().push(dir.to_path_buf()));
         Ok(())
     }
 
-    pub(super) fn fail_next_sync() {
-        FAIL_NEXT.with(|f| f.set(true));
+    /// Let `n` syncs succeed, then fail the next one.
+    pub(super) fn fail_sync_after(n: usize) {
+        FAIL_AFTER.with(|f| f.set(Some(n)));
     }
 
     /// The directories synced since the last call.
@@ -112,6 +125,7 @@ mod seam {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn fresh() -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
@@ -121,80 +135,87 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_sync_is_reported_and_retried() {
-        let (_tmp, base) = fresh();
-        let dir = base.join("keys").join("k.nonces");
-        fs::create_dir_all(&dir).unwrap();
-        seam::fail_next_sync();
-        let err = open_dir_durably(&dir).expect_err("the sync error is returned");
-        assert_eq!(err.to_string(), "injected sync_all failure");
-        assert!(seam::take_synced().is_empty());
-        // Not recorded: the next open syncs again, and succeeds.
-        assert_eq!(open_dir_durably(&dir).unwrap(), dir);
-        assert_eq!(seam::take_synced(), vec![base.join("keys")]);
-    }
-
-    #[test]
-    fn a_failed_sync_of_a_new_directory_is_retried_too() {
+    fn creating_a_missing_directory_syncs_its_parent_once() {
         let (_tmp, base) = fresh();
         let dir = base.join("d");
-        seam::fail_next_sync();
-        assert!(open_dir_durably(&dir).is_err());
-        // The directory exists now but its name may not be durable: it is synced on the next open.
         open_dir_durably(&dir).unwrap();
-        assert_eq!(seam::take_synced(), vec![base.clone()]);
+        assert!(dir.is_dir());
+        assert_eq!(seam::take_synced(), vec![base]);
     }
 
     #[test]
-    fn a_success_is_cached_for_an_existing_directory() {
-        let (_tmp, base) = fresh();
-        let dir = base.join("keys").join("k.nonces");
-        fs::create_dir_all(&dir).unwrap();
-        open_dir_durably(&dir).unwrap();
-        assert_eq!(seam::take_synced(), vec![base.join("keys")]);
-        open_dir_durably(&dir).unwrap();
-        // The same directory spelled differently is the same directory.
-        open_dir_durably(&dir.join("..").join("k.nonces")).unwrap();
-        assert!(seam::take_synced().is_empty());
-    }
-
-    #[test]
-    fn a_recreated_directory_is_synced_again_although_cached() {
+    fn creating_several_levels_syncs_the_parent_of_each_top_down_and_only_those() {
         let (_tmp, base) = fresh();
         let dir = base.join("keys").join("k.nonces");
         open_dir_durably(&dir).unwrap();
-        seam::take_synced();
-        open_dir_durably(&dir).unwrap();
-        assert!(seam::take_synced().is_empty(), "cached while it exists");
-        fs::remove_dir(&dir).unwrap();
-        open_dir_durably(&dir).unwrap();
-        assert_eq!(seam::take_synced(), vec![base.join("keys")]);
-    }
-
-    #[test]
-    fn creating_several_levels_syncs_the_parent_of_each_top_down() {
-        let (_tmp, base) = fresh();
-        let dir = base.join("keys").join("k.nonces");
-        assert_eq!(open_dir_durably(&dir).unwrap(), dir);
         assert_eq!(
             seam::take_synced(),
             vec![base.clone(), base.join("keys")],
             "base holds keys/, keys/ holds k.nonces"
         );
-        // Only the levels that were missing: keys/ exists now.
-        let other = base.join("keys").join("j.nonces");
-        open_dir_durably(&other).unwrap();
+        // keys/ exists now: only the new level is synced.
+        open_dir_durably(&base.join("keys").join("j.nonces")).unwrap();
         assert_eq!(seam::take_synced(), vec![base.join("keys")]);
     }
 
     #[test]
-    fn dot_dot_spellings_resolve_to_one_directory() {
+    fn an_existing_directory_syncs_nothing() {
         let (_tmp, base) = fresh();
-        let dir = base.join("a").join("..").join("b");
-        let canonical = open_dir_durably(&dir).unwrap();
-        assert_eq!(canonical, base.join("b"));
+        let dir = base.join("keys").join("k.nonces");
+        fs::create_dir_all(&dir).unwrap();
+        open_dir_durably(&dir).unwrap();
+        open_dir_durably(&dir).unwrap();
+        assert!(seam::take_synced().is_empty());
+    }
+
+    #[test]
+    fn a_failed_sync_removes_the_new_directory_and_the_retry_syncs_it_again() {
+        let (_tmp, base) = fresh();
+        let dir = base.join("d");
+        seam::fail_sync_after(0);
+        let err = open_dir_durably(&dir).expect_err("the sync error is returned");
+        assert_eq!(err.to_string(), "injected sync_all failure");
+        assert!(!dir.exists(), "the directory this call created is removed");
+        assert!(seam::take_synced().is_empty());
+        open_dir_durably(&dir).unwrap();
+        assert!(dir.is_dir());
+        assert_eq!(seam::take_synced(), vec![base]);
+    }
+
+    #[test]
+    fn a_failure_in_a_multi_level_create_removes_every_level_and_the_retry_syncs_both() {
+        let (_tmp, base) = fresh();
+        let dir = base.join("keys").join("k.nonces");
+        // The sync of base succeeds, the sync of keys/ fails.
+        seam::fail_sync_after(1);
+        assert!(open_dir_durably(&dir).is_err());
+        assert!(!base.join("keys").exists(), "both levels are removed");
+        assert_eq!(seam::take_synced(), vec![base.clone()]);
+        // A failure on the very first sync leaves nothing either.
+        seam::fail_sync_after(0);
+        assert!(open_dir_durably(&dir).is_err());
+        assert!(!base.join("keys").exists());
         seam::take_synced();
-        open_dir_durably(&base.join("b")).unwrap();
+        open_dir_durably(&dir).unwrap();
+        assert_eq!(seam::take_synced(), vec![base.clone(), base.join("keys")]);
+    }
+
+    #[test]
+    fn a_failure_keeps_levels_that_existed_before_the_call() {
+        let (_tmp, base) = fresh();
+        fs::create_dir(base.join("keys")).unwrap();
+        seam::fail_sync_after(0);
+        assert!(open_dir_durably(&base.join("keys").join("k.nonces")).is_err());
+        assert!(base.join("keys").is_dir());
+        assert!(!base.join("keys").join("k.nonces").exists());
+    }
+
+    #[test]
+    fn a_path_with_dot_dot_is_refused() {
+        let (_tmp, base) = fresh();
+        let err = open_dir_durably(&base.join("a").join("..").join("b")).expect_err("refused");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(!base.join("a").exists() && !base.join("b").exists());
         assert!(seam::take_synced().is_empty());
     }
 }

@@ -298,12 +298,12 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_parent_sync_is_retried_on_the_next_open() {
+    fn a_failed_parent_sync_removes_the_new_directory_and_the_next_open_syncs_again() {
         let tmp = tempfile::tempdir().unwrap();
         let parent = tmp.path().join("keys");
         let dir = parent.join("k.nonces");
-        // The directory already exists: the first open in this process still syncs its parent.
-        fs::create_dir_all(&dir).unwrap();
+        // The parent exists and can be written into but not opened to be synced.
+        fs::create_dir_all(&parent).unwrap();
         let _restore = RestoreMode(parent.clone());
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o300)).unwrap();
         if File::open(&parent).is_ok() {
@@ -321,10 +321,11 @@ mod tests {
             matches!(&err, CoreError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
             "{err}"
         );
-        // The failure was not recorded: the next open tries again, and succeeds.
+        assert!(!dir.exists(), "the new directory is removed again");
+        // The next open creates and syncs it again, and succeeds.
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(NonceStore::open(&dir).is_ok());
-        // Once synced, later opens in this process do not sync again.
+        // An existing directory is not synced: the parent need not be readable.
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o300)).unwrap();
         assert!(NonceStore::open(&dir).is_ok());
     }

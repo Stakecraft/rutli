@@ -1472,7 +1472,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_key_directory_always_syncs_its_parent_and_a_fresh_open_of_a_cached_one_does_not() {
+    fn a_new_key_directory_syncs_its_parent_and_an_existing_one_does_not() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("journal");
@@ -1487,39 +1487,26 @@ mod tests {
             j.append_charged(entry("k", &format!("{:032x}", 1)), UNLIMITED, T),
             "a new key directory must be synced into its parent, which cannot be opened",
         );
-        // The failed attempt did create the key directory before the parent could not be synced.
-        // Remove it again: with the parent readable, a genuinely new key directory is created and
-        // synced into it, although the same path was used before.
+        assert!(!root.join("k").exists(), "the new key directory is removed");
+        // With the parent readable, the key directory is created and synced.
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::remove_dir_all(root.join("k")).unwrap();
         j.append_charged(entry("k", &format!("{:032x}", 2)), UNLIMITED, T)
             .unwrap();
-        // From here on it exists and is cached. A FRESH journal has no key cache, so `KeyJournal::open`
-        // runs; in a parent that cannot be opened it must not try to sync the parent again.
+        // A fresh open of the now existing key directory does not sync: the parent need not be
+        // readable.
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).unwrap();
         let again = SignJournal::open(&root, 1, FOREVER).unwrap();
         again
             .append_charged(entry("k", &format!("{:032x}", 3)), UNLIMITED, T + 1)
             .unwrap();
-        // A key directory recreated at a cached path is a new entry and syncs again.
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::remove_dir_all(root.join("k")).unwrap();
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).unwrap();
-        let fresh = SignJournal::open(&root, 1, FOREVER).unwrap();
-        assert_denied(
-            fresh.append_charged(entry("k", &format!("{:032x}", 4)), UNLIMITED, T + 2),
-            "a recreated key directory is synced although its path was cached",
-        );
     }
 
     #[test]
-    fn a_failed_key_parent_sync_is_retried_on_the_next_open() {
+    fn a_failed_key_parent_sync_removes_the_new_directory_and_the_next_attempt_syncs_again() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("journal");
-        // The journal directory exists before the first open in this process, and so does the
-        // key's: the parent of each is still synced on that first open.
-        std::fs::create_dir_all(root.join("k")).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
         let _restore = RestoreMode(root.clone());
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).unwrap();
         if !permissions_enforced(&root) {
@@ -1530,29 +1517,26 @@ mod tests {
             j.append_charged(entry("k", &format!("{:032x}", 1)), UNLIMITED, T),
             "first attempt",
         );
-        // The failure was not recorded: the parent still cannot be synced, so it fails again.
+        assert!(!root.join("k").exists(), "the new key directory is removed");
+        // Nothing was kept: the parent still cannot be synced, so it fails again.
         assert_denied(
             j.append_charged(entry("k", &format!("{:032x}", 2)), UNLIMITED, T + 1),
             "second attempt",
         );
-        // Once the parent can be opened, the retry succeeds, and later opens do not sync again.
+        // Once the parent can be opened, the retry creates, syncs and succeeds.
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
         j.append_charged(entry("k", &format!("{:032x}", 3)), UNLIMITED, T + 2)
             .unwrap();
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).unwrap();
-        let again = SignJournal::open(&root, 1, FOREVER).unwrap();
-        again
-            .append_charged(entry("k", &format!("{:032x}", 4)), UNLIMITED, T + 3)
-            .unwrap();
+        assert!(root.join("k").is_dir());
     }
 
     #[test]
-    fn the_journal_directory_syncs_its_own_parent_on_the_first_open() {
+    fn the_journal_directory_syncs_its_parent_when_it_creates_it() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let data = tmp.path().join("data");
         let root = data.join("journal");
-        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
         let _restore = RestoreMode(data.clone());
         std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o300)).unwrap();
         if !permissions_enforced(&data) {
@@ -1562,11 +1546,12 @@ mod tests {
             SignJournal::open(&root, 1, FOREVER),
             "the parent of the journal directory cannot be opened",
         );
-        // Not recorded: it fails again, and succeeds once the parent can be opened.
+        assert!(!root.exists(), "the new journal directory is removed");
+        // It fails again, and succeeds once the parent can be opened.
         assert_denied(SignJournal::open(&root, 1, FOREVER), "second attempt");
         std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
         SignJournal::open(&root, 1, FOREVER).unwrap();
-        // Cached now: a later open does not need the parent to be readable.
+        // The directory exists now: a later open does not need the parent to be readable.
         std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o300)).unwrap();
         SignJournal::open(&root, 1, FOREVER).unwrap();
     }
