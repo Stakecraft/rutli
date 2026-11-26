@@ -55,13 +55,27 @@ else
   echo "addSbtPlugin(\"org.scoverage\" % \"sbt-scoverage\" % \"$SCOVERAGE_VERSION\")" >"$W/scoverage.sbt"
   SBT=("--addPluginSbtFile=$W/scoverage.sbt" clean coverage driver/test driver/coverageReport)
 fi
+# A repository that rate-limits the runner (HTTP 429) is retried after a pause; any other
+# failure is not.
 rc=0
-(cd "$Q_ROOT" && sbt -batch -no-colors "${SBT[@]}") >"$W/sbt.log" 2>&1 || rc=$?
+for attempt in 1 2 3; do
+  rc=0
+  (cd "$Q_ROOT" && sbt -batch -no-colors "${SBT[@]}") >"$W/sbt.log" 2>&1 || rc=$?
+  if [ "$rc" = 0 ] || ! grep -q 'response code: 429' "$W/sbt.log"; then
+    break
+  fi
+  q_log "sbt: a repository answered HTTP 429 (attempt $attempt); retrying in $((attempt * 60)) s"
+  [ "$attempt" = 3 ] || sleep $((attempt * 60))
+done
 q_info scala.sbt "sbt exit $rc, sbt-scoverage $SCOVERAGE_VERSION"
 
 if ! grep -qiE 'compiling [0-9]+ Scala source' "$W/sbt.log" || grep -q 'Compilation failed' "$W/sbt.log"; then
   tail -30 "$W/sbt.log" >&2
-  for k in "${SBT_KEYS[@]}"; do q_null "$k" "sbt could not compile the driver (Canton artifacts missing?)"; done
+  why="sbt could not compile the driver (Canton artifacts missing?)"
+  if grep -q 'ResolveException' "$W/sbt.log"; then
+    why="sbt could not download a dependency (see the sbt log: a repository error or rate limit)"
+  fi
+  for k in "${SBT_KEYS[@]}"; do q_null "$k" "$why"; done
   exit 0
 fi
 

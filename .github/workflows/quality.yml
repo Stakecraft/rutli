@@ -152,6 +152,16 @@ jobs:
           path: ~/.ivy2/local/com.daml
           key: canton-api-${{ runner.os }}-${{ runner.arch }}-${{ env.CANTON_TAG }}-v1
 
+      # sbt-scoverage is added for the coverage run only (scripts/quality/scala.sh), so the sbt
+      # cache above, keyed on the build files, never holds it: without this, every run downloads
+      # it again and a rate-limited repository leaves the Scala metrics empty.
+      - name: Cache sbt-scoverage
+        if: steps.plan.outputs.scala == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/coursier/v1/https/repo1.maven.org/maven2/org/scoverage
+          key: scoverage-${{ runner.os }}-${{ hashFiles('scripts/quality/scala.sh') }}-v1
+
       - name: Publish Canton kms-driver-api locally
         if: steps.plan.outputs.scala == 'true' && steps.canton-cache.outputs.cache-hit != 'true'
         run: scripts/publish-canton-deps.sh "$CANTON_TAG"

@@ -2978,10 +2978,13 @@ fn two_tenants() -> SigningPolicyConfig {
     }
 }
 
+/// A `CeremonySignTest` request as a 0.5 `verify-key` sends it: with a 32-byte challenge, so the
+/// version 2 path is the one checked.
 fn sign_test_of(key_id: &str) -> pb::CeremonySignTestRequest {
     pb::CeremonySignTestRequest {
         key_id: key_id.into(),
         signers: vec![1, 2],
+        challenge: vec![0x5a; 32],
     }
 }
 
