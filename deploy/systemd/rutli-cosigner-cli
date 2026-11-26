@@ -20,8 +20,14 @@
 #   sudo runuser -u rutli -- rutli-cosigner --config /etc/rutli-cosigner/cosigner.json health
 set -eu
 
-[ "$(id -u)" = 0 ] || { echo "rutli-cosigner-cli: run as root (sudo)" >&2; exit 1; }
-[ "$#" -gt 0 ] || { echo "usage: rutli-cosigner-cli <rutli-cosigner arguments>" >&2; exit 1; }
+[ "$(id -u)" = 0 ] || {
+  echo "rutli-cosigner-cli: run as root (sudo)" >&2
+  exit 1
+}
+[ "$#" -gt 0 ] || {
+  echo "usage: rutli-cosigner-cli <rutli-cosigner arguments>" >&2
+  exit 1
+}
 
 io=--pipe
 [ -t 0 ] && [ -t 1 ] && io=--pty

@@ -37,7 +37,10 @@ RETENTION="${RETENTION:-true}"
 MIN_PROOF_AGE_DAYS="${MIN_PROOF_AGE_DAYS:-7}"
 KEEP_OLDER_EPOCHS="${KEEP_OLDER_EPOCHS:-0}"
 
-fail() { echo "BACKUP_FAILED node=${NODE_ID:-unset} $*"; exit 1; }
+fail() {
+  echo "BACKUP_FAILED node=${NODE_ID:-unset} $*"
+  exit 1
+}
 
 [ -n "${NODE_ID:-}" ] || fail "reason=NODE_ID-not-set"
 if [ -z "$WORK_DIR" ] || [ ! -d "$WORK_DIR" ]; then fail "reason=no-work-dir"; fi

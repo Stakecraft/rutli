@@ -55,8 +55,8 @@ ansible-playbook -i inventory/lab.example.yml playbooks/install.yml playbooks/up
 echo "== render the config for both example inventories"
 for inv in lab production; do
   mkdir -p "$WORK/render/$inv"
-  ansible-playbook -i "inventory/$inv.example.yml" tests/render.yml -e "rutli_cosigner_test_out=$WORK/render/$inv" >"$WORK/render-$inv.log" 2>&1 ||
-    {
+  ansible-playbook -i "inventory/$inv.example.yml" tests/render.yml -e "rutli_cosigner_test_out=$WORK/render/$inv" >"$WORK/render-$inv.log" 2>&1 \
+    || {
       cat "$WORK/render-$inv.log"
       exit 1
     }
