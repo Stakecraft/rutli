@@ -147,6 +147,17 @@ With `backend = "frost"` (the production path):
 
 ### Compatibility
 
+Rütli releases and the Canton / Splice versions they were built against and run with. The full table, with every
+release and the source of each cell, is in [docs/compatibility.md](docs/compatibility.md); each release adds its row.
+
+| Rütli | Built against | Tested | Expected to work, not tested |
+|---|---|---|---|
+| `0.5.0-rc.1` | Canton v3.6.1 | CI: conformance suite on Canton 3.6.1; end to end on Canton 3.6.1 and, for the migration, on Canton 3.7.2. DevNet validators: **not tested** yet | Splice 0.10.x / Canton 3.7.x, protocol version 37; Canton 3.5.x |
+| `0.4.1` | Canton v3.6.1 | CI: conformance suite on Canton 3.6.1. DevNet validators: cosigners on Splice 0.10.1 / Canton 3.7.2 (protocol version 37) since 2026-11-20, with the `0.4.0-rc.6` driver jar | Splice 0.9.0 / Canton 3.6.1; Canton 3.5.x |
+| `0.4.0` | Canton v3.6.1 | CI: conformance suite on Canton 3.6.1. DevNet validators: cosigners on Splice 0.9.0 / Canton 3.6.1, then on Splice 0.10.1 / Canton 3.7.2 from 2026-11-15, across the upgrade to protocol version 37; with the `0.4.0-rc.6` driver jar | Canton 3.5.x |
+
+Canton KMS driver SPI `v1`; Java 17; Kubernetes 1.29+ and Helm 3.8+ for the chart. By component:
+
 | Component | Version | Status |
 |---|---|---|
 | Canton | 3.7.x | **Tested:** 3.7.2 on two DevNet validators since 2026-11-15; the KMS driver SPI and conformance suite are byte-identical to 3.6.1 (v3.7.0–v3.7.3); operator changes in [docs/splice-0.10.md](docs/splice-0.10.md) |
@@ -223,6 +234,7 @@ Before protecting a real key, run the witnessed **[key ceremony](docs/key-ceremo
 | [docs/ca-rotation.md](docs/ca-rotation.md) | Rotating the cluster CA, and rolling a cosigner's TLS key |
 | [docs/migration.md](docs/migration.md) | Moving an existing validator onto Rütli (new participant); [in-place runbook](docs/runbook-migration-inplace.md) |
 | [docs/splice-0.10.md](docs/splice-0.10.md) | Splice 0.10 / Canton 3.7: what changes for a Rütli validator and its migrations |
+| [docs/compatibility.md](docs/compatibility.md) | Each Rütli release with the Canton and Splice versions it was built against and run with |
 | [docs/approval-quorum.md](docs/approval-quorum.md) | M-of-N signing approval, and switching enforcement on |
 | [docs/disaster-recovery.md](docs/disaster-recovery.md) | Backup, restore, recovery |
 | [docs/key-material-handling.md](docs/key-material-handling.md) | What delete does and does not do, where copies of key material can be, how to destroy them, rotating the sealing key |

@@ -25,9 +25,12 @@ them to the GitHub release (see "Release assets").
    table), the version placeholder in `.github/ISSUE_TEMPLATE/bug_report.yml`, and the public
    explorer page `docs/explorer/index.html` (the release named in "Evidence so far" and in the footer;
    a release candidate is named as a candidate, never as the release).
-5. Tag only after the release PR is merged, and tag the merge commit by its SHA
+5. Compatibility matrix: add the row for the new release to [compatibility.md](compatibility.md) and update the short
+   table in the README (the latest three releases). Take each cell from the repository, as that page's last section
+   says; a cell without a record says "not tested". This applies to a release candidate too.
+6. Tag only after the release PR is merged, and tag the merge commit by its SHA
    (`git tag -a v<version> -m v<version> <sha>`), never a branch head that still carries the old versions.
-6. The "Image build check" workflow is green on `main` (it builds both platforms the way the release
+7. The "Image build check" workflow is green on `main` (it builds both platforms the way the release
    does, without pushing; run it by hand if its last run is old).
 
 ## Upgrading a cluster to a release
