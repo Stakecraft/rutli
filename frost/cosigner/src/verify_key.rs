@@ -26,15 +26,26 @@
 //! ([`sign_test_plan`], `Signer.CeremonySignTest`, leader rotating), each verified with
 //! `verify_strict` under the Canton key — the end-to-end proof that every quorum that may ever
 //! have to sign can. (A "first `t` responders" quorum would use the same `t` nodes every time and
-//! never touch the others' shares.) The cosigner computes the message itself from the key's
-//! recorded provenance, `0x1220 ‖ SHA-256("rutli-verify-key/" ‖ ceremony_id ‖ key_id)`
-//! ([`verify_message`]), and only for imported keys: Canton-shaped (the cosigners sign nothing
-//! else), never chosen by the caller, and domain-separated from every hash Canton builds. Canton
-//! hashes `be_i32(HashPurpose.id) ‖ content` (`HashBuilder.scala:192-205`), and every purpose
-//! Canton 3.6.1 defines is 1–68, or −1 for test hashes (`HashPurpose.scala:52-123`); this
-//! preimage starts with the ASCII bytes `rutl`, which as a purpose would be 0x7275746C =
+//! never touch the others' shares.) The message is the version 2 sign-test message
+//! ([`SignTestV2`]): `0x1220 ‖ SHA-256` over the domain tag `rutli-verify-key-v2/` followed by the
+//! length-prefixed ceremony id, key id, epoch, PKP digest, sorted signer set and a 32-byte
+//! challenge that this command draws fresh for every call. The leader and every member compute it
+//! themselves from their own live share (the caller supplies only the quorum and the challenge),
+//! each member refuses a quorum it is not in or that is not exactly `t` distinct cosigners of the
+//! key's roster, and this
+//! command recomputes it from the epoch and sharing every node reported: a signature that verifies
+//! is bound to that quorum, that sharing and this run. Only imported keys have one. It is
+//! Canton-shaped (the cosigners sign nothing else) and domain-separated from every hash Canton
+//! builds: Canton hashes `be_i32(HashPurpose.id) ‖ content` (`HashBuilder.scala:192-205`), and
+//! every purpose Canton 3.6.1 defines is 1–68, or −1 for test hashes (`HashPurpose.scala:52-123`);
+//! this preimage starts with the ASCII bytes `rutl`, which as a purpose would be 0x7275746C =
 //! 1 920 300 140. Equal digests would take a SHA-256 collision. That is what lets the **operator**
 //! role (`operator_allowlist`) run it without a credential that can `Sign`.
+//!
+//! A request without a challenge gets the version 1 message, `0x1220 ‖ SHA-256("rutli-verify-key/"
+//! ‖ ceremony_id ‖ key_id)` ([`verify_message`]), so that a 0.4.x `verify-key` keeps working while
+//! a cluster upgrades; it goes in 0.6 (issue #325). This command accepts only version 2: a leader
+//! that answers with version 1 predates it, and the report fails.
 
 use std::collections::BTreeSet;
 
@@ -47,6 +58,19 @@ use crate::pb::KeyStatusReply;
 
 /// Length in bytes of an Ed25519 public key (the FROST group verifying key).
 const ED25519_KEY_BYTES: usize = 32;
+
+/// The version of the sign-test message this `verify-key` asks for and accepts.
+pub const SIGN_TEST_MESSAGE_VERSION: u8 = 2;
+
+/// Length in bytes of a sign-test challenge.
+pub const SIGN_TEST_CHALLENGE_LEN: usize = 32;
+
+/// The domain tag that starts the preimage of a version 2 sign-test message.
+pub const SIGN_TEST_V2_DOMAIN: &[u8] = b"rutli-verify-key-v2/";
+
+/// Why a sign test fails when the cluster answered with the version 1 message.
+pub const VERSION_1_ANSWER: &str = "the cluster answered a version 1 sign test — run --sign-test \
+after every cosigner runs 0.5 or later";
 
 /// One node's answer (or the error asking it), as collected by the caller.
 pub struct NodeView {
@@ -82,6 +106,8 @@ pub struct SignRow {
     pub leader: u16,
     /// The exact quorum that signed.
     pub signers: Vec<u16>,
+    /// Hex: the challenge this call sent.
+    pub challenge: String,
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -112,12 +138,23 @@ pub struct VerifyReport {
     pub epoch: Option<u64>,
     pub nodes: Vec<NodeRow>,
     pub sign_test: Vec<SignRow>,
+    /// The sign-test message version every row of `sign_test` was checked against
+    /// ([`SIGN_TEST_MESSAGE_VERSION`]); absent when no sign test ran. A report without it predates
+    /// version 2 (`keyfile prove` reads it as version 1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sign_test_message_version: Option<u8>,
+    /// Whether the nodes' views agreed ([`check_views`] found no problem). Unlike `ok`, a failed
+    /// sign-test row leaves it set, so every row is still checked under the agreed group key and
+    /// records its own reason.
+    #[serde(skip)]
+    pub views_ok: bool,
 }
 
 impl VerifyReport {
-    /// The group key, once [`check_views`] found every node agreeing on the expected one.
+    /// The group key, once [`check_views`] found every node agreeing on the expected one
+    /// (`views_ok`), whatever sign-test rows found since.
     pub fn agreed_group_key(&self) -> Option<[u8; 32]> {
-        if !self.ok {
+        if !self.views_ok {
             return None;
         }
         self.group_verifying_key
@@ -126,29 +163,21 @@ impl VerifyReport {
     }
 
     /// Record one `CeremonySignTest` result: `(message, signature)` as the cluster returned them
-    /// (or the error), for quorum `signers` led by `leader`. The message must be the one this side
-    /// computes independently ([`verify_message`] over the agreed ceremony id), and the signature
-    /// must pass `verify_strict` under the agreed (expected) group key.
+    /// (or the error), for quorum `signers` led by `leader`, asked with `challenge`. The message
+    /// must be the version 2 message this side computes independently ([`SignTestV2`] over the
+    /// agreed ceremony id, epoch and sharing, `signers` and `challenge`), and the signature must
+    /// pass `verify_strict` under the agreed (expected) group key. A version 1 answer fails with
+    /// [`VERSION_1_ANSWER`].
     pub fn record_signature(
         &mut self,
         leader: u16,
         signers: &[u16],
+        challenge: &[u8; SIGN_TEST_CHALLENGE_LEN],
         result: std::result::Result<(Vec<u8>, Vec<u8>), String>,
     ) {
-        let expected = verify_message(self.ceremony_id.as_deref().unwrap_or(""), &self.key_id);
-        let outcome = result.and_then(|(message, sig)| {
-            let group = self.agreed_group_key().ok_or("no agreed group key")?;
-            if message != expected {
-                return Err(
-                    "the cluster signed a different message than the ceremony test digest".into(),
-                );
-            }
-            if signature_verifies(&group, &expected, &sig) {
-                Ok(())
-            } else {
-                Err("signature does not verify (verify_strict) under the Canton key".to_string())
-            }
-        });
+        self.sign_test_message_version = Some(SIGN_TEST_MESSAGE_VERSION);
+        let outcome =
+            result.and_then(|(message, sig)| self.check_answer(signers, challenge, &message, &sig));
         if let Err(e) = &outcome {
             self.ok = false;
             // A report with a problem names no fingerprint as the cluster's.
@@ -160,9 +189,60 @@ impl VerifyReport {
         self.sign_test.push(SignRow {
             leader,
             signers: signers.to_vec(),
+            challenge: hex::encode(challenge),
             ok: outcome.is_ok(),
             error: outcome.err(),
         });
+    }
+
+    /// The version 2 message the cluster must sign for `signers` and `challenge`, from what every
+    /// node agreed on (ceremony id, epoch, sharing).
+    pub fn expected_message(
+        &self,
+        signers: &[u16],
+        challenge: &[u8; SIGN_TEST_CHALLENGE_LEN],
+    ) -> std::result::Result<[u8; 34], String> {
+        let epoch = self.epoch.ok_or("no agreed epoch")?;
+        let pkp_digest: [u8; 32] = self
+            .pkp_digest
+            .as_ref()
+            .and_then(|h| hex::decode(h).ok()?.try_into().ok())
+            .ok_or("no agreed sharing digest")?;
+        Ok(SignTestV2 {
+            ceremony_id: self.ceremony_id.as_deref().unwrap_or(""),
+            key_id: &self.key_id,
+            epoch,
+            pkp_digest: &pkp_digest,
+            signers,
+            challenge,
+        }
+        .message())
+    }
+
+    /// Whether one answer is the expected version 2 message, signed under the agreed group key.
+    fn check_answer(
+        &self,
+        signers: &[u16],
+        challenge: &[u8; SIGN_TEST_CHALLENGE_LEN],
+        message: &[u8],
+        sig: &[u8],
+    ) -> std::result::Result<(), String> {
+        let group = self.agreed_group_key().ok_or("no agreed group key")?;
+        let expected = self.expected_message(signers, challenge)?;
+        if message != expected {
+            let v1 = verify_message(self.ceremony_id.as_deref().unwrap_or(""), &self.key_id);
+            return Err(if message == v1 {
+                VERSION_1_ANSWER.to_string()
+            } else {
+                "the cluster signed a different message than the version 2 sign-test message"
+                    .to_string()
+            });
+        }
+        if signature_verifies(&group, &expected, sig) {
+            Ok(())
+        } else {
+            Err("signature does not verify (verify_strict) under the Canton key".to_string())
+        }
     }
 }
 
@@ -192,13 +272,100 @@ pub fn sign_test_plan(roster: &[u16], t: u16) -> Vec<(u16, Vec<u16>)> {
         .collect()
 }
 
-/// The `--sign-test` message for a key: `0x1220 ‖ SHA-256("rutli-verify-key/" ‖ ceremony_id ‖
-/// key_id)`. `ceremony_id` is empty for a DKG key.
+/// The version 1 sign-test message for a key: `0x1220 ‖ SHA-256("rutli-verify-key/" ‖
+/// ceremony_id ‖ key_id)`. `ceremony_id` is empty for a DKG key. Answered only to a request
+/// without a challenge (a 0.4.x `verify-key`); goes in 0.6 (issue #325).
 pub fn verify_message(ceremony_id: &str, key_id: &str) -> [u8; 34] {
     let mut label = b"rutli-verify-key/".to_vec();
     label.extend_from_slice(ceremony_id.as_bytes());
     label.extend_from_slice(key_id.as_bytes());
     rutli_frost_core::dealer::canton_test_message(&label)
+}
+
+/// What the version 2 sign-test message binds: the key and its ceremony, the sharing that signs
+/// (epoch, PKP digest), the quorum and the caller's challenge.
+#[derive(Debug, Clone, Copy)]
+pub struct SignTestV2<'a> {
+    pub ceremony_id: &'a str,
+    pub key_id: &'a str,
+    pub epoch: u64,
+    pub pkp_digest: &'a [u8; 32],
+    /// Configured identifiers, in any order: the message is over the sorted set.
+    pub signers: &'a [u16],
+    pub challenge: &'a [u8; SIGN_TEST_CHALLENGE_LEN],
+}
+
+impl SignTestV2<'_> {
+    /// `0x1220 ‖ SHA-256(domain ‖ field…)`: [`SIGN_TEST_V2_DOMAIN`], then each field as its length
+    /// (u64, big-endian) and its bytes — ceremony id, key id, epoch (u64, big-endian), PKP digest,
+    /// the sorted signer identifiers (u16 each, big-endian), challenge. The length prefixes keep a
+    /// byte from moving between fields; the fixed domain tag comes first, unprefixed, so the
+    /// preimage starts with the ASCII bytes `rutl` like version 1's.
+    pub fn message(&self) -> [u8; 34] {
+        let mut signers = self.signers.to_vec();
+        signers.sort_unstable();
+        let signer_bytes: Vec<u8> = signers.iter().flat_map(|s| s.to_be_bytes()).collect();
+        let epoch = self.epoch.to_be_bytes();
+        let fields: [&[u8]; 6] = [
+            self.ceremony_id.as_bytes(),
+            self.key_id.as_bytes(),
+            &epoch,
+            self.pkp_digest,
+            &signer_bytes,
+            self.challenge,
+        ];
+        let mut preimage = SIGN_TEST_V2_DOMAIN.to_vec();
+        for field in fields {
+            preimage.extend_from_slice(&(field.len() as u64).to_be_bytes());
+            preimage.extend_from_slice(field);
+        }
+        rutli_frost_core::dealer::canton_test_message(&preimage)
+    }
+}
+
+/// A sign-test challenge as it arrives on the wire: empty is none (a version 1 request), 32 bytes
+/// is one, any other length is refused.
+pub fn challenge_from_wire(
+    bytes: &[u8],
+) -> std::result::Result<Option<[u8; SIGN_TEST_CHALLENGE_LEN]>, String> {
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    <[u8; SIGN_TEST_CHALLENGE_LEN]>::try_from(bytes)
+        .map(Some)
+        .map_err(|_| {
+            format!(
+                "a sign-test challenge is {SIGN_TEST_CHALLENGE_LEN} bytes, got {}",
+                bytes.len()
+            )
+        })
+}
+
+/// Whether `me` may join the version 2 sign-test quorum `signers`: exactly `threshold` distinct
+/// cosigners of the key's `roster`, `me` among them.
+pub fn check_sign_test_quorum(
+    me: u16,
+    signers: &[u16],
+    threshold: u16,
+    roster: &BTreeSet<u16>,
+) -> std::result::Result<(), String> {
+    let set: BTreeSet<u16> = signers.iter().copied().collect();
+    if set.len() != signers.len() || set.len() != usize::from(threshold) {
+        return Err(format!(
+            "a sign-test quorum is exactly {threshold} distinct cosigners, got {signers:?}"
+        ));
+    }
+    if !set.is_subset(roster) {
+        return Err(format!(
+            "the sign-test quorum {signers:?} is not within the key's roster {roster:?}"
+        ));
+    }
+    if !set.contains(&me) {
+        return Err(format!(
+            "this node ({me}) is not in the sign-test quorum {signers:?}"
+        ));
+    }
+    Ok(())
 }
 
 /// `verify_strict` of a 64-byte Ed25519 signature under a 32-byte public key.
@@ -389,6 +556,7 @@ fn build_report(
             ),
             _ => (None, None, None, None, None),
         };
+    let views_ok = acc.problems.is_empty();
     let group_verifying_key = single_value(&acc.groups);
     let fingerprint = group_verifying_key
         .as_ref()
@@ -415,6 +583,8 @@ fn build_report(
             .flatten(),
         nodes: rows,
         sign_test: Vec::new(),
+        sign_test_message_version: None,
+        views_ok,
     }
 }
 
@@ -723,21 +893,228 @@ mod tests {
     fn signatures_are_checked_strictly_and_failures_fail_the_report() {
         let (v, fp) = views([1u8; 32]);
         let mut r = check_views(KEY, Some(&fp), &[1, 2, 3], 2, &v);
-        let msg = verify_message("c", KEY);
+        let c = [3u8; 32];
+        let msg = r.expected_message(&[1, 3], &c).unwrap();
         assert_eq!(r.fingerprint.as_deref(), Some(fp.as_str()));
-        r.record_signature(1, &[1, 2], Err("UNAVAILABLE".into()));
+        r.record_signature(1, &[1, 2], &c, Err("UNAVAILABLE".into()));
         assert!(!r.ok && r.fingerprint.is_none());
-        r.record_signature(2, &[1, 3], Ok((msg.to_vec(), vec![0u8; 64])));
+        r.record_signature(2, &[1, 3], &c, Ok((msg.to_vec(), vec![0u8; 64])));
         // A valid-looking reply over a message the operator did not expect is a failure too.
         r.record_signature(
             3,
             &[2, 3],
+            &c,
             Ok((verify_message("other", KEY).to_vec(), vec![0u8; 64])),
         );
         assert!(!r.ok);
-        assert_eq!(r.sign_test.iter().filter(|s| !s.ok).count(), 3);
+        // Each row keeps its own reason: an earlier failure masks nothing.
+        let errors: Vec<&str> = r
+            .sign_test
+            .iter()
+            .map(|s| s.error.as_deref().unwrap_or("ok"))
+            .collect();
+        assert_eq!(errors[0], "UNAVAILABLE");
+        assert!(errors[1].contains("does not verify"), "{errors:?}");
+        assert!(
+            errors[2].contains("different message than the version 2"),
+            "{errors:?}"
+        );
+        assert_eq!(r.problems.len(), 3, "{:?}", r.problems);
+        assert_eq!(r.sign_test[0].challenge, hex::encode(c));
         assert_eq!(&msg[..2], &[0x12, 0x20]);
         assert_ne!(verify_message("c", KEY), verify_message("d", KEY));
+    }
+
+    /// `message` signed by the quorum `ids` of `seed`'s split (what the cluster returns).
+    fn signed(seed: [u8; 32], ids: &[u16], message: &[u8]) -> Vec<u8> {
+        let (shares, pkp) =
+            rutli_frost_core::dealer::split_ed25519_seed(&seed, &[1, 2, 3], 2).unwrap();
+        let kps: std::collections::BTreeMap<Identifier, frost::keys::KeyPackage> = shares
+            .into_iter()
+            .map(|s| frost::keys::KeyPackage::try_from(s).unwrap())
+            .map(|kp| (*kp.identifier(), kp))
+            .filter(|(id, _)| ids.iter().any(|&i| Identifier::try_from(i).unwrap() == *id))
+            .collect();
+        let mut rng = rand::rngs::OsRng;
+        let mut nonces = std::collections::BTreeMap::new();
+        let mut commitments = std::collections::BTreeMap::new();
+        for (id, kp) in &kps {
+            let (n, c) = frost::round1::commit(kp.signing_share(), &mut rng);
+            nonces.insert(*id, n);
+            commitments.insert(*id, c);
+        }
+        let package = frost::SigningPackage::new(commitments, message);
+        let shares = kps
+            .iter()
+            .map(|(id, kp)| (*id, frost::round2::sign(&package, &nonces[id], kp).unwrap()))
+            .collect();
+        frost::aggregate(&package, &shares, &pkp)
+            .unwrap()
+            .serialize()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_valid_version_2_signature_passes_and_a_version_1_answer_fails_with_a_clear_reason() {
+        let seed = [1u8; 32];
+        let (v, fp) = views(seed);
+        let c = [9u8; 32];
+        let mut r = check_views(KEY, Some(&fp), &[1, 2, 3], 2, &v);
+        assert_eq!(r.sign_test_message_version, None);
+        let v2 = r.expected_message(&[1, 2], &c).unwrap();
+        r.record_signature(
+            1,
+            &[1, 2],
+            &c,
+            Ok((v2.to_vec(), signed(seed, &[1, 2], &v2))),
+        );
+        assert!(r.ok, "{:?}", r.problems);
+        assert_eq!(r.sign_test_message_version, Some(SIGN_TEST_MESSAGE_VERSION));
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["sign_test_message_version"], 2);
+
+        // The same cluster, answering a challenged request with the version 1 digest: a valid
+        // signature, but not of the message this side asked for.
+        let v1 = verify_message("c", KEY);
+        r.record_signature(
+            2,
+            &[1, 3],
+            &c,
+            Ok((v1.to_vec(), signed(seed, &[1, 3], &v1))),
+        );
+        assert!(!r.ok && r.fingerprint.is_none());
+        assert_eq!(r.sign_test[1].error.as_deref(), Some(VERSION_1_ANSWER));
+        assert!(r.problems.iter().any(|p| p.contains(VERSION_1_ANSWER)));
+        // A version 2 message of another challenge is not this call's either.
+        let mut r = check_views(KEY, Some(&fp), &[1, 2, 3], 2, &v);
+        let other = r.expected_message(&[1, 3], &[8u8; 32]).unwrap();
+        r.record_signature(
+            3,
+            &[1, 3],
+            &c,
+            Ok((other.to_vec(), signed(seed, &[1, 3], &other))),
+        );
+        assert!(!r.ok);
+        assert!(r.sign_test[0]
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("version 2 sign-test message")));
+    }
+
+    fn sample<'a>(signers: &'a [u16], challenge: &'a [u8; 32]) -> SignTestV2<'a> {
+        SignTestV2 {
+            ceremony_id: "ceremony",
+            key_id: KEY,
+            epoch: 4,
+            pkp_digest: &[6u8; 32],
+            signers,
+            challenge,
+        }
+    }
+
+    #[test]
+    fn the_version_2_message_binds_every_field_and_keeps_them_apart() {
+        let c = [1u8; 32];
+        let base = sample(&[1, 2], &c);
+        let m = base.message();
+        assert_eq!(&m[..2], &[0x12, 0x20]);
+        assert_ne!(
+            m,
+            verify_message("ceremony", KEY),
+            "not the version 1 digest"
+        );
+        // Signer order does not matter: the message is over the set.
+        assert_eq!(sample(&[2, 1], &c).message(), m);
+        // Every field changes it.
+        let other_c = [2u8; 32];
+        let changed = [
+            SignTestV2 {
+                ceremony_id: "ceremonx",
+                ..base
+            },
+            SignTestV2 {
+                key_id: "frost-import-y",
+                ..base
+            },
+            SignTestV2 { epoch: 5, ..base },
+            SignTestV2 {
+                pkp_digest: &[7u8; 32],
+                ..base
+            },
+            SignTestV2 {
+                signers: &[1, 3],
+                ..base
+            },
+            SignTestV2 {
+                challenge: &other_c,
+                ..base
+            },
+        ];
+        for (i, v) in changed.iter().enumerate() {
+            assert_ne!(v.message(), m, "field {i}");
+        }
+        // Length prefixes: bytes cannot move between the ceremony id and the key id.
+        let shifted = SignTestV2 {
+            ceremony_id: "ceremonyfrost",
+            key_id: "-import-x",
+            ..base
+        };
+        assert_eq!(
+            format!("{}{}", base.ceremony_id, base.key_id),
+            format!("{}{}", shifted.ceremony_id, shifted.key_id)
+        );
+        assert_ne!(shifted.message(), m);
+        let empty_ceremony = SignTestV2 {
+            ceremony_id: "",
+            key_id: "ceremonyfrost-import-x",
+            ..base
+        };
+        assert_ne!(empty_ceremony.message(), m);
+        // The preimage is the domain tag, then each field length-prefixed (u64, big-endian).
+        assert_eq!(SIGN_TEST_V2_DOMAIN, b"rutli-verify-key-v2/");
+        let mut preimage = SIGN_TEST_V2_DOMAIN.to_vec();
+        let epoch = 4u64.to_be_bytes();
+        let fields: [&[u8]; 6] = [
+            b"ceremony",
+            KEY.as_bytes(),
+            &epoch,
+            &[6u8; 32],
+            &[0, 1, 0, 2],
+            &c,
+        ];
+        for f in fields {
+            preimage.extend_from_slice(&(f.len() as u64).to_be_bytes());
+            preimage.extend_from_slice(f);
+        }
+        assert_eq!(m, rutli_frost_core::dealer::canton_test_message(&preimage));
+        assert!(preimage.starts_with(b"rutl"));
+        // Not an extension of the version 1 tag.
+        assert!(!preimage.starts_with(b"rutli-verify-key/"));
+    }
+
+    #[test]
+    fn a_challenge_is_32_bytes_or_absent() {
+        assert_eq!(challenge_from_wire(&[]), Ok(None));
+        assert_eq!(challenge_from_wire(&[4u8; 32]), Ok(Some([4u8; 32])));
+        for len in [1usize, 31, 33, 64] {
+            let err = challenge_from_wire(&vec![0u8; len]).unwrap_err();
+            assert!(err.contains(&len.to_string()), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_member_joins_only_a_quorum_of_exactly_t_distinct_cosigners_that_holds_it() {
+        let roster: BTreeSet<u16> = [1, 2, 3].into();
+        assert_eq!(check_sign_test_quorum(1, &[1, 2], 2, &roster), Ok(()));
+        assert_eq!(check_sign_test_quorum(2, &[2, 1], 2, &roster), Ok(()));
+        let not_in = check_sign_test_quorum(3, &[1, 2], 2, &roster).unwrap_err();
+        assert!(not_in.contains("not in the sign-test quorum"), "{not_in}");
+        for bad in [&[1u16][..], &[1, 2, 3], &[1, 1], &[]] {
+            let err = check_sign_test_quorum(1, bad, 2, &roster).unwrap_err();
+            assert!(err.contains("exactly 2 distinct"), "{bad:?}: {err}");
+        }
+        let stranger = check_sign_test_quorum(1, &[1, 4], 2, &roster).unwrap_err();
+        assert!(stranger.contains("roster"), "{stranger}");
     }
 
     #[test]

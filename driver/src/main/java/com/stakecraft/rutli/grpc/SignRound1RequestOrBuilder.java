@@ -144,4 +144,19 @@ public interface SignRound1RequestOrBuilder extends
    */
   com.google.protobuf.ByteString
       getPurposeBytes();
+
+  /**
+   * <pre>
+   * purpose "sign-test" since 0.5.0: the caller's challenge (CeremonySignTestRequest.challenge),
+   * forwarded unchanged. The node then accepts only the version 2 sign-test message it computes
+   * from its own share (epoch, PKP digest), the declared signer set and this challenge, and only
+   * when that set has exactly `threshold` distinct members including this node. Empty: the version
+   * 1 test digest. Any other length, or a challenge on another purpose, is refused
+   * (INVALID_ARGUMENT).
+   * </pre>
+   *
+   * <code>bytes sign_test_challenge = 9;</code>
+   * @return The signTestChallenge.
+   */
+  com.google.protobuf.ByteString getSignTestChallenge();
 }

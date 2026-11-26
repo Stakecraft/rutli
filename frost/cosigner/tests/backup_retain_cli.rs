@@ -189,11 +189,19 @@ fn old_epochs_go_only_after_the_new_one_is_proven_and_never_on_a_dry_run() {
         ],
     );
     assert!(proved.status.success(), "{}", text(&proved));
+    // A report that states no sign-test message version comes from an older verify-key.
+    assert!(
+        text(&proved).contains("sign-test message version 1") && text(&proved).contains("WARNING"),
+        "{}",
+        text(&proved)
+    );
 
     // The proof is seconds old: with the default 7 days nothing goes.
     let young = cosigner(&cfg, &["backup-retain", "--dir", dir]);
     assert!(young.status.success(), "{}", text(&young));
     assert_eq!(tars(&backups), all, "a young proof deletes nothing");
+    let warning = format!("BACKUP_RETENTION_WARNING node=1 key={KEY} epoch=3 proof=version-1");
+    assert!(text(&young).contains(&warning), "{}", text(&young));
 
     let dry = cosigner(
         &cfg,
@@ -226,6 +234,48 @@ fn old_epochs_go_only_after_the_new_one_is_proven_and_never_on_a_dry_run() {
         vec!["node-1-20261103T000000Z.tar"],
         "{}",
         text(&real)
+    );
+    // A version 1 proof still counted; it was named in a warning.
+    assert!(text(&real).contains(&warning), "{}", text(&real));
+
+    // The same epoch proven again from a 0.5 report (version 2): the warning is gone.
+    let mut v2 = report;
+    v2["sign_test_message_version"] = 2.into();
+    for (i, row) in v2["sign_test"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        row["challenge"] = hex::encode([i as u8 + 1; 32]).into();
+    }
+    std::fs::write(&report_path, v2.to_string()).unwrap();
+    let reproved = cosigner(
+        &cfg,
+        &[
+            "keyfile",
+            "prove",
+            "--key-id",
+            KEY,
+            "--epoch",
+            "3",
+            "--report",
+            report_path.to_str().unwrap(),
+        ],
+    );
+    assert!(reproved.status.success(), "{}", text(&reproved));
+    assert!(
+        text(&reproved).contains("sign-test message version 2")
+            && !text(&reproved).contains("WARNING"),
+        "{}",
+        text(&reproved)
+    );
+    let after = cosigner(&cfg, &["backup-retain", "--dir", dir, "--dry-run"]);
+    assert!(after.status.success(), "{}", text(&after));
+    assert!(
+        !text(&after).contains("BACKUP_RETENTION_WARNING"),
+        "{}",
+        text(&after)
     );
 }
 

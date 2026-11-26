@@ -1577,19 +1577,91 @@ impl Node {
         Ok(reply)
     }
 
-    /// The split-ceremony test digest for `key_id`, computed from the key's recorded provenance —
-    /// never from caller input — or `Ceremony` if the key was not installed by the split ceremony.
-    pub fn ceremony_test_message(&self, key_id: &str) -> Result<[u8; 34]> {
+    /// The split ceremony that installed `key_id`, from the key's recorded provenance, or
+    /// `Ceremony` if the key was not installed by the split ceremony.
+    fn split_ceremony_id(&self, key_id: &str) -> Result<String> {
         let share = self.keystore.load(key_id)?;
         match &share.origin {
-            Some(o) if o.kind == crate::keystore::ORIGIN_DEALER_SPLIT => {
-                Ok(crate::verify_key::verify_message(&o.ceremony_id, key_id))
-            }
+            Some(o) if o.kind == crate::keystore::ORIGIN_DEALER_SPLIT => Ok(o.ceremony_id.clone()),
             _ => Err(DaemonError::Ceremony(format!(
                 "{key_id} has no split-ceremony provenance — the ceremony sign test only signs \
                  for imported keys"
             ))),
         }
+    }
+
+    /// The version 1 split-ceremony test digest for `key_id`, computed from the key's recorded
+    /// provenance — never from caller input — or `Ceremony` if the key was not installed by the
+    /// split ceremony. Signed only for a sign test without a challenge (issue #325).
+    pub fn ceremony_test_message(&self, key_id: &str) -> Result<[u8; 34]> {
+        Ok(crate::verify_key::verify_message(
+            &self.split_ceremony_id(key_id)?,
+            key_id,
+        ))
+    }
+
+    /// The version 2 sign-test message for `key_id` ([`crate::verify_key::SignTestV2`]): its
+    /// ceremony from the key's provenance, the sharing `view` (epoch, PKP digest) this node signs
+    /// with, the quorum `signers` and the caller's `challenge`.
+    pub fn ceremony_test_message_v2(
+        &self,
+        key_id: &str,
+        view: KeyVersion,
+        signers: &[u16],
+        challenge: &[u8; crate::verify_key::SIGN_TEST_CHALLENGE_LEN],
+    ) -> Result<[u8; 34]> {
+        let ceremony_id = self.split_ceremony_id(key_id)?;
+        Ok(crate::verify_key::SignTestV2 {
+            ceremony_id: &ceremony_id,
+            key_id,
+            epoch: view.0,
+            pkp_digest: &view.1,
+            signers,
+            challenge,
+        }
+        .message())
+    }
+
+    /// A version 2 sign-test round 1 of `key_id` (one with a challenge), checked against this
+    /// node's own share (`cached`) whether or not a signing policy is configured: the declared
+    /// signer set is exactly `t` distinct cosigners of the key's roster and holds this node, and the
+    /// declared message is the version 2 message this node computes itself. Returns that message,
+    /// or `None` for a round without a challenge (the version 1 test digest, checked by the signing
+    /// policy; kept for a 0.4.x `verify-key` until 0.6, issue #325).
+    fn check_sign_test_v2(
+        &self,
+        key_id: &str,
+        cached: &CachedKey,
+        ctx: &Round1Ctx,
+    ) -> Result<Option<[u8; 34]>> {
+        let Some(challenge) = &ctx.sign_test_challenge else {
+            return Ok(None);
+        };
+        let refuse = |e: String| crate::intent::refused("sign-test", format!("{key_id}: {e}"));
+        let signers = ctx.signers.as_deref().unwrap_or_default();
+        let me = crate::hosted::identifier_index(self.identifier)?;
+        let roster = cached
+            .cosigner
+            .public_key_package()
+            .verifying_shares()
+            .keys()
+            .map(|id| crate::hosted::identifier_index(*id))
+            .collect::<Result<std::collections::BTreeSet<u16>>>()?;
+        crate::verify_key::check_sign_test_quorum(
+            me,
+            signers,
+            cached.cosigner.min_signers(),
+            &roster,
+        )
+        .map_err(refuse)?;
+        let mine = self.ceremony_test_message_v2(key_id, cached.view, signers, challenge)?;
+        if ctx.message.as_deref() != Some(mine.as_slice()) {
+            return Err(refuse(
+                "the declared message is not the version 2 sign-test message this node computes"
+                    .into(),
+            ));
+        }
+        Ok(Some(mine))
     }
 
     pub fn threshold_for(&self, key_id: &str) -> Result<u16> {
@@ -1677,11 +1749,14 @@ impl Node {
         }
         self.check_epoch(key_id, &cached, ctx)?;
         let mut binding = ctx.binding(key_id)?;
+        // A version 2 sign test, before any nonce exists and with or without a signing policy.
+        let sign_test_v2 = self.check_sign_test_v2(key_id, &cached, ctx)?;
         // The signing policy (audit C2), before any nonce exists: what authorizes this session.
         let auth = match &self.sign_guard {
-            Some(g) => {
-                Some(g.authorize_round1(key_id, ctx, || self.ceremony_test_message(key_id))?)
-            }
+            Some(g) => Some(g.authorize_round1(key_id, ctx, || match sign_test_v2 {
+                Some(mine) => Ok(mine),
+                None => self.ceremony_test_message(key_id),
+            })?),
             None => None,
         };
         let mut request = None;
@@ -3888,12 +3963,28 @@ pub struct Round1Ctx {
     pub intent: Option<crate::pb::SignedIntent>,
     /// A split-ceremony sign test (`purpose = "sign-test"`): no intent, the node's own test digest.
     pub sign_test: bool,
+    /// A sign test's challenge (`sign_test_challenge`): the node then accepts only the version 2
+    /// sign-test message it computes from its own share, the declared signers and this challenge
+    /// ([`crate::verify_key::SignTestV2`]). `None`: the version 1 test digest (issue #325).
+    pub sign_test_challenge: Option<[u8; crate::verify_key::SIGN_TEST_CHALLENGE_LEN]>,
 }
 
 impl Round1Ctx {
     /// The session binding this context declares for `key_id` (see
     /// [`rutli_frost_core::session::SessionBinding`]). Intents (audit C2) plug in here.
     fn binding(&self, key_id: &str) -> Result<SessionBinding> {
+        let conflict = if self.sign_test_challenge.is_some() && !self.sign_test {
+            Some("a sign-test challenge on a round that is not a sign test")
+        } else if self.intent.is_some() && (self.sign_test || self.sign_test_challenge.is_some()) {
+            Some("a sign-test round carries no signing intent")
+        } else {
+            None
+        };
+        if let Some(conflict) = conflict {
+            return Err(DaemonError::Core(
+                rutli_frost_core::CoreError::InvalidBinding(conflict.into()),
+            ));
+        }
         let mut b = SessionBinding::new(key_id);
         if let Some(m) = &self.message {
             if m.len() != crate::orchestrator::CANTON_DIGEST_LEN {

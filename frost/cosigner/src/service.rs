@@ -359,8 +359,9 @@ impl Signer for SignerSvc {
         Ok(Response::new(reply))
     }
 
-    // The operator role may call this: the message is computed here from the key's provenance, so
-    // the caller chooses only WHICH cosigners sign the one fixed test digest, never what is signed.
+    // The operator role may call this: the message is computed here from the key's provenance and
+    // live sharing, so the caller chooses only WHICH cosigners sign and the challenge the message
+    // binds, never what is signed.
     async fn ceremony_sign_test(
         &self,
         req: Request<pb::CeremonySignTestRequest>,
@@ -384,10 +385,18 @@ impl Signer for SignerSvc {
                 u16::try_from(s).map_err(|_| Status::invalid_argument("signer id out of range"))
             })
             .collect::<Result<_, _>>()?;
-        let (message, signature) =
-            orchestrator::ceremony_sign_test(&self.node, &self.peers, &r.key_id, &signers)
-                .await
-                .map_err(Status::from)?;
+        // Empty: a 0.4.x verify-key, answered with the version 1 message until 0.6 (issue #325).
+        let challenge = crate::verify_key::challenge_from_wire(&r.challenge)
+            .map_err(Status::invalid_argument)?;
+        let (message, signature) = orchestrator::ceremony_sign_test(
+            &self.node,
+            &self.peers,
+            &r.key_id,
+            &signers,
+            challenge,
+        )
+        .await
+        .map_err(Status::from)?;
         Ok(Response::new(pb::CeremonySignTestReply {
             message: message.to_vec(),
             signature: signature.to_vec(),
@@ -1398,12 +1407,21 @@ impl Peer for PeerSvc {
                 )))
             }
         };
+        // Empty: no challenge (a version 1 sign test, or not a sign test).
+        let sign_test_challenge = crate::verify_key::challenge_from_wire(&r.sign_test_challenge)
+            .map_err(Status::invalid_argument)?;
+        if sign_test_challenge.is_some() && !sign_test {
+            return Err(Status::invalid_argument(
+                "a sign-test challenge on a round that is not a sign test",
+            ));
+        }
         let ctx = crate::node::Round1Ctx {
             leader_view,
             message: (!r.message.is_empty()).then(|| r.message.clone()),
             signers: (!signers.is_empty()).then_some(signers),
             intent: r.intent.clone(),
             sign_test,
+            sign_test_challenge,
         };
         let result = self
             .node

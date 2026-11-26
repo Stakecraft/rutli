@@ -33,6 +33,7 @@ private static final long serialVersionUID = 0L;
     message_ = com.google.protobuf.ByteString.EMPTY;
     signers_ = emptyIntList();
     purpose_ = "";
+    signTestChallenge_ = com.google.protobuf.ByteString.EMPTY;
   }
 
   public static final com.google.protobuf.Descriptors.Descriptor
@@ -305,6 +306,26 @@ private static final long serialVersionUID = 0L;
     }
   }
 
+  public static final int SIGN_TEST_CHALLENGE_FIELD_NUMBER = 9;
+  private com.google.protobuf.ByteString signTestChallenge_ = com.google.protobuf.ByteString.EMPTY;
+  /**
+   * <pre>
+   * purpose "sign-test" since 0.5.0: the caller's challenge (CeremonySignTestRequest.challenge),
+   * forwarded unchanged. The node then accepts only the version 2 sign-test message it computes
+   * from its own share (epoch, PKP digest), the declared signer set and this challenge, and only
+   * when that set has exactly `threshold` distinct members including this node. Empty: the version
+   * 1 test digest. Any other length, or a challenge on another purpose, is refused
+   * (INVALID_ARGUMENT).
+   * </pre>
+   *
+   * <code>bytes sign_test_challenge = 9;</code>
+   * @return The signTestChallenge.
+   */
+  @java.lang.Override
+  public com.google.protobuf.ByteString getSignTestChallenge() {
+    return signTestChallenge_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -347,6 +368,9 @@ private static final long serialVersionUID = 0L;
     }
     for (int i = 0; i < signers_.size(); i++) {
       output.writeUInt32NoTag(signers_.getInt(i));
+    }
+    if (!signTestChallenge_.isEmpty()) {
+      output.writeBytes(9, signTestChallenge_);
     }
     getUnknownFields().writeTo(output);
   }
@@ -396,6 +420,10 @@ private static final long serialVersionUID = 0L;
       }
       signersMemoizedSerializedSize = dataSize;
     }
+    if (!signTestChallenge_.isEmpty()) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeBytesSize(9, signTestChallenge_);
+    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -430,6 +458,8 @@ private static final long serialVersionUID = 0L;
         .equals(other.getSignersList())) return false;
     if (!getPurpose()
         .equals(other.getPurpose())) return false;
+    if (!getSignTestChallenge()
+        .equals(other.getSignTestChallenge())) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -462,6 +492,8 @@ private static final long serialVersionUID = 0L;
     }
     hash = (37 * hash) + PURPOSE_FIELD_NUMBER;
     hash = (53 * hash) + getPurpose().hashCode();
+    hash = (37 * hash) + SIGN_TEST_CHALLENGE_FIELD_NUMBER;
+    hash = (53 * hash) + getSignTestChallenge().hashCode();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -611,6 +643,7 @@ private static final long serialVersionUID = 0L;
       message_ = com.google.protobuf.ByteString.EMPTY;
       signers_ = emptyIntList();
       purpose_ = "";
+      signTestChallenge_ = com.google.protobuf.ByteString.EMPTY;
       return this;
     }
 
@@ -673,6 +706,9 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000080) != 0)) {
         result.purpose_ = purpose_;
       }
+      if (((from_bitField0_ & 0x00000100) != 0)) {
+        result.signTestChallenge_ = signTestChallenge_;
+      }
       result.bitField0_ |= to_bitField0_;
     }
 
@@ -725,6 +761,9 @@ private static final long serialVersionUID = 0L;
         purpose_ = other.purpose_;
         bitField0_ |= 0x00000080;
         onChanged();
+      }
+      if (other.getSignTestChallenge() != com.google.protobuf.ByteString.EMPTY) {
+        setSignTestChallenge(other.getSignTestChallenge());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -805,6 +844,11 @@ private static final long serialVersionUID = 0L;
               input.popLimit(limit);
               break;
             } // case 66
+            case 74: {
+              signTestChallenge_ = input.readBytes();
+              bitField0_ |= 0x00000100;
+              break;
+            } // case 74
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -1479,6 +1523,65 @@ private static final long serialVersionUID = 0L;
       checkByteStringIsUtf8(value);
       purpose_ = value;
       bitField0_ |= 0x00000080;
+      onChanged();
+      return this;
+    }
+
+    private com.google.protobuf.ByteString signTestChallenge_ = com.google.protobuf.ByteString.EMPTY;
+    /**
+     * <pre>
+     * purpose "sign-test" since 0.5.0: the caller's challenge (CeremonySignTestRequest.challenge),
+     * forwarded unchanged. The node then accepts only the version 2 sign-test message it computes
+     * from its own share (epoch, PKP digest), the declared signer set and this challenge, and only
+     * when that set has exactly `threshold` distinct members including this node. Empty: the version
+     * 1 test digest. Any other length, or a challenge on another purpose, is refused
+     * (INVALID_ARGUMENT).
+     * </pre>
+     *
+     * <code>bytes sign_test_challenge = 9;</code>
+     * @return The signTestChallenge.
+     */
+    @java.lang.Override
+    public com.google.protobuf.ByteString getSignTestChallenge() {
+      return signTestChallenge_;
+    }
+    /**
+     * <pre>
+     * purpose "sign-test" since 0.5.0: the caller's challenge (CeremonySignTestRequest.challenge),
+     * forwarded unchanged. The node then accepts only the version 2 sign-test message it computes
+     * from its own share (epoch, PKP digest), the declared signer set and this challenge, and only
+     * when that set has exactly `threshold` distinct members including this node. Empty: the version
+     * 1 test digest. Any other length, or a challenge on another purpose, is refused
+     * (INVALID_ARGUMENT).
+     * </pre>
+     *
+     * <code>bytes sign_test_challenge = 9;</code>
+     * @param value The signTestChallenge to set.
+     * @return This builder for chaining.
+     */
+    public Builder setSignTestChallenge(com.google.protobuf.ByteString value) {
+      if (value == null) { throw new NullPointerException(); }
+      signTestChallenge_ = value;
+      bitField0_ |= 0x00000100;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * purpose "sign-test" since 0.5.0: the caller's challenge (CeremonySignTestRequest.challenge),
+     * forwarded unchanged. The node then accepts only the version 2 sign-test message it computes
+     * from its own share (epoch, PKP digest), the declared signer set and this challenge, and only
+     * when that set has exactly `threshold` distinct members including this node. Empty: the version
+     * 1 test digest. Any other length, or a challenge on another purpose, is refused
+     * (INVALID_ARGUMENT).
+     * </pre>
+     *
+     * <code>bytes sign_test_challenge = 9;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearSignTestChallenge() {
+      bitField0_ = (bitField0_ & ~0x00000100);
+      signTestChallenge_ = getDefaultInstance().getSignTestChallenge();
       onChanged();
       return this;
     }

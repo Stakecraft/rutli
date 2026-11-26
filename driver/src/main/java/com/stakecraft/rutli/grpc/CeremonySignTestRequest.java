@@ -29,6 +29,7 @@ private static final long serialVersionUID = 0L;
   private CeremonySignTestRequest() {
     keyId_ = "";
     signers_ = emptyIntList();
+    challenge_ = com.google.protobuf.ByteString.EMPTY;
   }
 
   public static final com.google.protobuf.Descriptors.Descriptor
@@ -125,6 +126,25 @@ private static final long serialVersionUID = 0L;
   }
   private int signersMemoizedSerializedSize = -1;
 
+  public static final int CHALLENGE_FIELD_NUMBER = 3;
+  private com.google.protobuf.ByteString challenge_ = com.google.protobuf.ByteString.EMPTY;
+  /**
+   * <pre>
+   * Since 0.5.0: 32 fresh random bytes from the caller. With one, the signed message is the version
+   * 2 sign-test message, 0x1220 ‖ SHA-256 over the key id, its ceremony, the sharing (epoch and PKP
+   * digest), this quorum and this challenge (docs/split-ceremony.md, step 5); every member
+   * recomputes it from its own share. Empty: the version 1 message (kept for 0.4.x clients until
+   * 0.6). Any other length is refused (INVALID_ARGUMENT).
+   * </pre>
+   *
+   * <code>bytes challenge = 3;</code>
+   * @return The challenge.
+   */
+  @java.lang.Override
+  public com.google.protobuf.ByteString getChallenge() {
+    return challenge_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -149,6 +169,9 @@ private static final long serialVersionUID = 0L;
     }
     for (int i = 0; i < signers_.size(); i++) {
       output.writeUInt32NoTag(signers_.getInt(i));
+    }
+    if (!challenge_.isEmpty()) {
+      output.writeBytes(3, challenge_);
     }
     getUnknownFields().writeTo(output);
   }
@@ -176,6 +199,10 @@ private static final long serialVersionUID = 0L;
       }
       signersMemoizedSerializedSize = dataSize;
     }
+    if (!challenge_.isEmpty()) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeBytesSize(3, challenge_);
+    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -195,6 +222,8 @@ private static final long serialVersionUID = 0L;
         .equals(other.getKeyId())) return false;
     if (!getSignersList()
         .equals(other.getSignersList())) return false;
+    if (!getChallenge()
+        .equals(other.getChallenge())) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -212,6 +241,8 @@ private static final long serialVersionUID = 0L;
       hash = (37 * hash) + SIGNERS_FIELD_NUMBER;
       hash = (53 * hash) + getSignersList().hashCode();
     }
+    hash = (37 * hash) + CHALLENGE_FIELD_NUMBER;
+    hash = (53 * hash) + getChallenge().hashCode();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -345,6 +376,7 @@ private static final long serialVersionUID = 0L;
       bitField0_ = 0;
       keyId_ = "";
       signers_ = emptyIntList();
+      challenge_ = com.google.protobuf.ByteString.EMPTY;
       return this;
     }
 
@@ -385,6 +417,9 @@ private static final long serialVersionUID = 0L;
         signers_.makeImmutable();
         result.signers_ = signers_;
       }
+      if (((from_bitField0_ & 0x00000004) != 0)) {
+        result.challenge_ = challenge_;
+      }
     }
 
     @java.lang.Override
@@ -414,6 +449,9 @@ private static final long serialVersionUID = 0L;
           signers_.addAll(other.signers_);
         }
         onChanged();
+      }
+      if (other.getChallenge() != com.google.protobuf.ByteString.EMPTY) {
+        setChallenge(other.getChallenge());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -462,6 +500,11 @@ private static final long serialVersionUID = 0L;
               input.popLimit(limit);
               break;
             } // case 18
+            case 26: {
+              challenge_ = input.readBytes();
+              bitField0_ |= 0x00000004;
+              break;
+            } // case 26
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -659,6 +702,62 @@ private static final long serialVersionUID = 0L;
     public Builder clearSigners() {
       signers_ = emptyIntList();
       bitField0_ = (bitField0_ & ~0x00000002);
+      onChanged();
+      return this;
+    }
+
+    private com.google.protobuf.ByteString challenge_ = com.google.protobuf.ByteString.EMPTY;
+    /**
+     * <pre>
+     * Since 0.5.0: 32 fresh random bytes from the caller. With one, the signed message is the version
+     * 2 sign-test message, 0x1220 ‖ SHA-256 over the key id, its ceremony, the sharing (epoch and PKP
+     * digest), this quorum and this challenge (docs/split-ceremony.md, step 5); every member
+     * recomputes it from its own share. Empty: the version 1 message (kept for 0.4.x clients until
+     * 0.6). Any other length is refused (INVALID_ARGUMENT).
+     * </pre>
+     *
+     * <code>bytes challenge = 3;</code>
+     * @return The challenge.
+     */
+    @java.lang.Override
+    public com.google.protobuf.ByteString getChallenge() {
+      return challenge_;
+    }
+    /**
+     * <pre>
+     * Since 0.5.0: 32 fresh random bytes from the caller. With one, the signed message is the version
+     * 2 sign-test message, 0x1220 ‖ SHA-256 over the key id, its ceremony, the sharing (epoch and PKP
+     * digest), this quorum and this challenge (docs/split-ceremony.md, step 5); every member
+     * recomputes it from its own share. Empty: the version 1 message (kept for 0.4.x clients until
+     * 0.6). Any other length is refused (INVALID_ARGUMENT).
+     * </pre>
+     *
+     * <code>bytes challenge = 3;</code>
+     * @param value The challenge to set.
+     * @return This builder for chaining.
+     */
+    public Builder setChallenge(com.google.protobuf.ByteString value) {
+      if (value == null) { throw new NullPointerException(); }
+      challenge_ = value;
+      bitField0_ |= 0x00000004;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * Since 0.5.0: 32 fresh random bytes from the caller. With one, the signed message is the version
+     * 2 sign-test message, 0x1220 ‖ SHA-256 over the key id, its ceremony, the sharing (epoch and PKP
+     * digest), this quorum and this challenge (docs/split-ceremony.md, step 5); every member
+     * recomputes it from its own share. Empty: the version 1 message (kept for 0.4.x clients until
+     * 0.6). Any other length is refused (INVALID_ARGUMENT).
+     * </pre>
+     *
+     * <code>bytes challenge = 3;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearChallenge() {
+      bitField0_ = (bitField0_ & ~0x00000004);
+      challenge_ = getDefaultInstance().getChallenge();
       onChanged();
       return this;
     }

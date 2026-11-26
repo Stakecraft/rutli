@@ -49,4 +49,18 @@ public interface CeremonySignTestRequestOrBuilder extends
    * @return The signers at the given index.
    */
   int getSigners(int index);
+
+  /**
+   * <pre>
+   * Since 0.5.0: 32 fresh random bytes from the caller. With one, the signed message is the version
+   * 2 sign-test message, 0x1220 ‖ SHA-256 over the key id, its ceremony, the sharing (epoch and PKP
+   * digest), this quorum and this challenge (docs/split-ceremony.md, step 5); every member
+   * recomputes it from its own share. Empty: the version 1 message (kept for 0.4.x clients until
+   * 0.6). Any other length is refused (INVALID_ARGUMENT).
+   * </pre>
+   *
+   * <code>bytes challenge = 3;</code>
+   * @return The challenge.
+   */
+  com.google.protobuf.ByteString getChallenge();
 }

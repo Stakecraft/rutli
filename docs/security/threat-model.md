@@ -432,8 +432,9 @@ Backups must follow every refresh (disaster-recovery.md).
 
 ### Holder of the operator certificate
 
-`KeyStatus`, `HostedKeyStatus`, `CeremonySignTest` (fixed, server-computed test digest, rate
-limited): public values and test signatures only. If the operator CN is also on the delete role, it
+`KeyStatus`, `HostedKeyStatus`, `CeremonySignTest` (server-computed sign-test message, bound to
+the quorum, the sharing and the caller's challenge; rate limited): public values and test
+signatures only. If the operator CN is also on the delete role, it
 can delete hosted keys — recoverably, and subject to delete approvals.
 
 The operator role is not key-scoped: it reaches these three RPCs for every key on the cluster. The
