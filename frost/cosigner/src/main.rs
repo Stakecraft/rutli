@@ -277,8 +277,8 @@ enum Command {
     /// expected Canton fingerprint; with --sign-test (imported keys), also that EVERY t-subset of
     /// cosigners signs the ceremony test digest, verified under it. Runs against the live cluster
     /// with an operator certificate (`operator_allowlist`: KeyStatus, HostedKeyStatus and
-    /// CeremonySignTest only, no Sign); the driver certificate also works. Exits non-zero on any
-    /// problem.
+    /// CeremonySignTest only, no Sign); the driver certificate also works, for a key its
+    /// `signer_acl` lets it use. Exits non-zero on any problem.
     VerifyKey {
         #[arg(long)]
         key_id: String,
@@ -296,7 +296,8 @@ enum Command {
     /// node (no read-repair), byte-identical public key — and that its Canton fingerprint is the
     /// expected one. Run after `import-key` and before registering the key with the participant.
     /// Public values only: the operator certificate (`operator_allowlist`) suffices; the driver
-    /// certificate also works. Exits non-zero on any problem.
+    /// certificate also works, for a key its `signer_acl` lets it use. Exits non-zero on any
+    /// problem.
     VerifyHosted {
         /// The hosted key, e.g. `<frost.key-prefix>rutli-enc-imported-1220afe2`.
         #[arg(long)]

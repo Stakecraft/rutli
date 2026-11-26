@@ -387,7 +387,9 @@ cosigners off this mesh; nothing else separates them. Never reuse a CA.
 
 **Can:** sign with non-gated keys inside its `signer_acl` prefixes, within the per-node rate limits,
 with every share journaled on every participating node (`audit-cross-check` exposes signatures the
-driver audit log lacks); decrypt with hosted keys within `decrypt_rate_limit_per_min` per node.
+driver audit log lacks); decrypt with hosted keys within `decrypt_rate_limit_per_min` per node;
+call the status RPCs below (`KeyStatus`, `HostedKeyStatus`, `CeremonySignTest`) for keys inside those
+prefixes (0.5.0; before, for every key id on the cluster).
 
 **Can also** run a DKG of a new id inside its `signer_acl` prefixes (it signs the ceremony intent
 every node verifies), and create hosted keys inside those prefixes (it signs the generate intent;
@@ -433,6 +435,11 @@ Backups must follow every refresh (disaster-recovery.md).
 `KeyStatus`, `HostedKeyStatus`, `CeremonySignTest` (fixed, server-computed test digest, rate
 limited): public values and test signatures only. If the operator CN is also on the delete role, it
 can delete hosted keys — recoverably, and subject to delete approvals.
+
+The operator role is not key-scoped: it reaches these three RPCs for every key on the cluster. The
+driver role reaches them too, for the keys its `signer_acl` lets it use (0.5.0; a CN without an
+entry is refused only under `signer_acl_required`), and the refresher role has `KeyStatus` for every
+key.
 
 ### Holder of a delete-role certificate
 
