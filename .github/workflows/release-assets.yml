@@ -235,7 +235,7 @@ jobs:
     name: Build cosigner linux-x86_64
     needs: [guard, precheck]
     # An older distribution than the dealer's, on purpose: the binary then starts on glibc 2.35
-    # and newer (Debian 12 and 13, Ubuntu 22.04 and 24.04). The step after the build checks it.
+    # and newer (Debian 12 and 13). The step after the build checks it.
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -288,7 +288,7 @@ jobs:
     name: Build cosigner linux-aarch64
     needs: [guard, precheck]
     # An older distribution than the dealer's, on purpose: the binary then starts on glibc 2.35
-    # and newer (Debian 12 and 13, Ubuntu 22.04 and 24.04). The step after the build checks it.
+    # and newer (Debian 12 and 13). The step after the build checks it.
     runs-on: ubuntu-22.04-arm
     permissions:
       contents: read

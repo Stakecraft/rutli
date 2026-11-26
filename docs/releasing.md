@@ -199,8 +199,7 @@ release: a repeated run for a tag whose draft already carries `SHA256SUMS` is re
 workflow file, whose jobs all run on the hosted runners that file lists; `--deny-self-hosted-runners`
 checks the runner of the signing job.
 
-The cosigner binaries are built on `ubuntu-22.04` and need glibc 2.35 or newer (Debian 12 and 13,
-Ubuntu 22.04 and 24.04); the release job fails if a build needs a newer one. They are for hosts
+The cosigner binaries are built on `ubuntu-22.04` and need glibc 2.35 or newer (Debian 12 and 13); the release job fails if a build needs a newer one. They are for hosts
 without a container runtime; the image stays the default way to run a cosigner.
 
 The dealer binaries are built on `ubuntu-24.04`, so they need glibc 2.39 or newer (Ubuntu 24.04,
