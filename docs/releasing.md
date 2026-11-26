@@ -4,7 +4,8 @@ What a Rütli release consists of and what has to ship with each artifact. Taggi
 `.github/workflows/publish-image.yml` on GitHub-hosted runners (never the self-hosted CI runners):
 it builds the cosigner image for amd64 and arm64 natively, pushes the multi-arch index, signs it
 with cosign (keyless) and attests its build provenance. `.github/workflows/release-assets.yml` does
-the same for the driver jar and the dealer binary (build, SBOM, signature, provenance) and attaches
+the same for the driver jar, the dealer binary and, from 0.6.0, the cosigner binary (build, SBOM,
+signature, provenance) and attaches
 them to the GitHub release (see "Release assets").
 
 ## Before tagging
@@ -112,7 +113,8 @@ step shows before tag day.
 |---|---|---|
 | `rutli-driver-<version>.jar` | `sbt driver/assembly` | Inside the jar: `META-INF/rutli/LICENSE`, `NOTICE`, `THIRD-PARTY-LICENSES.txt` |
 | `rutli-dealer-<version>-linux-x86_64`, `-linux-aarch64` | `cargo build --release --locked -p rutli-cosigner --bin rutli-dealer`, each on a native runner | `THIRD-PARTY-LICENSES-rust.txt` (a copy of `frost/THIRD-PARTY-LICENSES.txt`) and `LICENSE`, attached by the workflow |
-| `rutli-driver-<version>.spdx.json`, `rutli-dealer-<version>.spdx.json` | SPDX SBOMs: the driver's from the assembled jar, the dealer's from `frost/Cargo.lock` | — |
+| `rutli-cosigner-<version>-linux-x86_64`, `-linux-aarch64` (from 0.6.0) | `cargo build --release --locked -p rutli-cosigner --bin rutli-cosigner`, each on a native runner: the cosigner daemon as a file, for hosts without a container runtime | The same two files as the dealer |
+| `rutli-driver-<version>.spdx.json`, `rutli-dealer-<version>.spdx.json` | SPDX SBOMs: the driver's from the assembled jar, the dealer's from `frost/Cargo.lock`. The cosigner binary is built from the same workspace and lock file, so the dealer's SBOM is also its SBOM | — |
 | `SHA256SUMS` | `sha256sum` of every file above (not of the bundles) | — |
 | `<file>.sigstore.json` | the keyless cosign signature of `<file>`, one bundle per file above, `SHA256SUMS` included | — |
 | `ghcr.io/stakecraft/rutli-cosigner:<version>` | `publish-image.yml` | In the image: `/usr/share/doc/rutli-cosigner/THIRD-PARTY-LICENSES.txt` |
@@ -148,7 +150,7 @@ CLI (`gh`, 2.103 or newer, logged in with `gh auth login`: it queries GitHub's a
 ```bash
 TAG=v0.5.0
 ID="https://github.com/Stakecraft/rutli/.github/workflows/release-assets.yml@refs/tags/$TAG"
-FILE=rutli-dealer-0.5.0-linux-x86_64        # or rutli-driver-0.5.0.jar, an .spdx.json (SHA256SUMS: signature only)
+FILE=rutli-dealer-0.5.0-linux-x86_64        # or rutli-driver-0.5.0.jar, a rutli-cosigner-… binary (0.6.0 on), an .spdx.json (SHA256SUMS: signature only)
 
 # Signature: made by release-assets.yml in Stakecraft/rutli, run on that tag
 cosign verify-blob --bundle "$FILE.sigstore.json" \
@@ -196,6 +198,10 @@ release: a repeated run for a tag whose draft already carries `SHA256SUMS` is re
 `replace_published`) before repeating a run. The provenance names the tagged
 workflow file, whose jobs all run on the hosted runners that file lists; `--deny-self-hosted-runners`
 checks the runner of the signing job.
+
+The cosigner binaries are built on `ubuntu-22.04` and need glibc 2.35 or newer (Debian 12 and 13,
+Ubuntu 22.04 and 24.04); the release job fails if a build needs a newer one. They are for hosts
+without a container runtime; the image stays the default way to run a cosigner.
 
 The dealer binaries are built on `ubuntu-24.04`, so they need glibc 2.39 or newer (Ubuntu 24.04,
 Debian 13, RHEL 10). On an older system, build them from the tag (`cargo build --release --locked -p
