@@ -85,7 +85,10 @@ A key is refreshed at most once per 72 hours (`signing_policy.refresh_min_interv
 the limit holds as soon as one node runs 0.5.0.
 
 - Scripts, drills and runbooks that refresh twice in a row will fail. Give test configs
-  `refresh_min_interval_secs: 0`.
+  `refresh_min_interval_secs: 0`, with `profile: lab`: under `production` a node refuses to start
+  with `0` or any interval under 72 h (259200), and `check-config` lists it. This check is new
+  after 0.5.0-rc.1: a `production` config from rc.1 that sets the key lower must remove it or raise
+  it before the upgrade.
 - Set `signer_may_refresh: false`. While it is on, a stolen driver certificate can still refresh once
   per interval.
 - Backups follow refreshes: the chart's backup sidecar backs up within `backup.checkEverySecs`

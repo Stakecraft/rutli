@@ -16,7 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Config, SigningPolicyConfig};
+use crate::config::{Config, SigningPolicyConfig, DEFAULT_REFRESH_MIN_INTERVAL_SECS};
 use crate::journal::{SEGMENT_BYTES, TYPICAL_ENTRY_BYTES};
 
 /// `profile`: what the operator says this node is.
@@ -64,6 +64,10 @@ impl std::fmt::Display for Finding {
     }
 }
 
+/// The shortest `signing_policy.refresh_min_interval_secs` the production profile accepts: the
+/// default, 72 hours. See [`refresh_interval_findings`].
+pub const MIN_REFRESH_INTERVAL_SECS: u64 = DEFAULT_REFRESH_MIN_INTERVAL_SECS;
+
 /// Where the refusal message and `check-config` send the operator.
 pub const DOC: &str = "docs/production-profile.md";
 
@@ -80,6 +84,7 @@ pub fn findings(cfg: &Config) -> Vec<Finding> {
     signing_policy_switch_findings(p, tls, &mut out);
     signer_binding_findings(p, &signers, &mut out);
     rate_limit_findings(cfg, &mut out);
+    refresh_interval_findings(p, &mut out);
     keyfile_and_cluster_findings(cfg, &mut out);
     hosted_keys_findings(cfg, &mut out);
     namespace_rule_advisory(p, &mut out);
@@ -285,6 +290,32 @@ fn rate_limit_findings(cfg: &Config, out: &mut Vec<Finding>) {
             "ceremony_sign_test_rate_limit_per_min",
             "0 (off)".into(),
             "a limit above 0",
+        );
+    }
+}
+
+/// The `signing_policy.refresh_min_interval_secs` row.
+///
+/// The rule: under production the interval is at least [`MIN_REFRESH_INTERVAL_SECS`] (72 h, the
+/// default). `0` turns the limit off, and a shorter interval lets a stolen refresher certificate
+/// move a key to new epochs faster than the backup schedule the default is sized for (a weekly
+/// refresh, a daily backup), so both are required findings. A longer interval (up to the 30-day
+/// maximum the config check enforces) is accepted. There is no per-key override of the interval.
+/// `signing_policy.refresh_interval_waived_at` is not a finding: it is the documented incident
+/// path, lets one refresh of a key through, and lapses by itself after 24 h.
+fn refresh_interval_findings(p: &SigningPolicyConfig, out: &mut Vec<Finding>) {
+    let secs = p.refresh_min_interval_secs;
+    if secs < MIN_REFRESH_INTERVAL_SECS {
+        let found = if secs == 0 {
+            "0 (off)".into()
+        } else {
+            format!("{secs} (less than 72 h)")
+        };
+        push_required(
+            out,
+            "signing_policy.refresh_min_interval_secs",
+            found,
+            "at least 259200 (72 h, the default)",
         );
     }
 }
@@ -587,6 +618,17 @@ mod tests {
                 Level::Required,
                 |c| c.ceremony_sign_test_rate_limit_per_min = 0,
             ),
+            // The refresh interval turned off, and one second short of the floor.
+            (
+                "signing_policy.refresh_min_interval_secs",
+                Level::Required,
+                |c| c.signing_policy.refresh_min_interval_secs = 0,
+            ),
+            (
+                "signing_policy.refresh_min_interval_secs",
+                Level::Required,
+                |c| c.signing_policy.refresh_min_interval_secs = MIN_REFRESH_INTERVAL_SECS - 1,
+            ),
             ("keyfile.write_version", Level::Required, |c| {
                 c.keyfile.write_version = 1;
             }),
@@ -734,6 +776,72 @@ mod tests {
         a.signing_policy.rules.clear();
         assert_eq!(findings(&a).len(), 1);
         a.validate().expect("advisory only");
+    }
+
+    #[test]
+    fn production_requires_the_refresh_interval_at_72_hours_or_more() {
+        const SETTING: &str = "signing_policy.refresh_min_interval_secs";
+        // The text of the finding names the floor in seconds; keep the two in step.
+        assert_eq!(MIN_REFRESH_INTERVAL_SECS, 259_200);
+        // The default (the key left out of the file), the floor itself and the 30-day maximum pass.
+        let enforced_default = enforced();
+        assert_eq!(
+            enforced_default.signing_policy.refresh_min_interval_secs,
+            MIN_REFRESH_INTERVAL_SECS
+        );
+        enforced_default.validate().expect("the default starts");
+        let mut longest = enforced();
+        longest.signing_policy.refresh_min_interval_secs =
+            crate::config::MAX_REFRESH_MIN_INTERVAL_SECS;
+        assert_eq!(findings(&longest), vec![]);
+        longest.validate().expect("the 30-day maximum starts");
+
+        for (secs, found) in [
+            (0, "0 (off)"),
+            (3600, "3600 (less than 72 h)"),
+            (259_199, "259199 (less than 72 h)"),
+        ] {
+            let mut c = enforced();
+            c.signing_policy.refresh_min_interval_secs = secs;
+            let err = c.validate().unwrap_err().to_string();
+            assert!(
+                err.contains(&format!(
+                    "[required] {SETTING}: {found} — production requires at least 259200 (72 h, the default)"
+                )),
+                "{secs}: {err}"
+            );
+            // Lab and unset: the same finding is listed (and logged at startup), nothing refused.
+            for profile in [Some(Profile::Lab), None] {
+                c.profile = profile;
+                c.validate().expect("lab or unset: the finding does not refuse");
+                let f = required(&c);
+                assert_eq!(f.len(), 1, "{f:#?}");
+                assert_eq!(f[0].setting, SETTING);
+            }
+        }
+
+        // A waiver is the incident path, not a finding: neither while it is active (set a minute
+        // ago) nor once it has lapsed (set two days ago).
+        let now = crate::intent::now_ms();
+        for (age_ms, active) in [(60_000, true), (2 * 24 * 3600 * 1000, false)] {
+            let mut waived = enforced();
+            waived.signing_policy.refresh_interval_waived_at =
+                Some(crate::audit_check::fmt_ms(now - age_ms));
+            let at = waived
+                .signing_policy
+                .refresh_waiver_ms()
+                .expect("the waiver time parses");
+            assert_eq!(
+                now < at + crate::config::REFRESH_WAIVER_LIFETIME_MS,
+                active
+            );
+            assert_eq!(findings(&waived), vec![]);
+            waived.validate().expect("a waiver does not refuse");
+            // And it does not stand in for the interval: with the interval off the node refuses.
+            waived.signing_policy.refresh_min_interval_secs = 0;
+            let err = waived.validate().unwrap_err().to_string();
+            assert!(err.contains(SETTING), "{err}");
+        }
     }
 
     #[test]

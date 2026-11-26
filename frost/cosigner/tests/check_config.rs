@@ -108,6 +108,55 @@ fn check_config_lists_findings_under_any_profile_and_the_node_refuses_under_prod
 }
 
 #[test]
+fn the_refresh_interval_off_or_under_72_hours_is_a_required_finding() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (secs, found) in [(0, "0 (off)"), (86_400, "86400 (less than 72 h)")] {
+        let line = format!(
+            "[required] signing_policy.refresh_min_interval_secs: {found} — production requires at \
+             least 259200 (72 h, the default)"
+        );
+        let mut cfg = enforced();
+        cfg["signing_policy"]["refresh_min_interval_secs"] = secs.into();
+        let (code, out) = run(tmp.path(), &cfg, &["check-config"]);
+        assert_eq!(code, 1, "{out}");
+        assert!(
+            out.contains("profile production, 1 required") && out.contains(&line),
+            "{out}"
+        );
+        // The node refuses to load the config and names the setting.
+        let (code, out) = run(tmp.path(), &cfg, &["health"]);
+        assert_eq!(code, 1, "{out}");
+        assert!(
+            out.contains("profile is \"production\"") && out.contains(&line),
+            "{out}"
+        );
+        // As lab the finding is still listed, and it is no longer what stops the node.
+        cfg["profile"] = "lab".into();
+        let (code, out) = run(tmp.path(), &cfg, &["check-config"]);
+        assert_eq!(code, 1, "{out}");
+        assert!(
+            out.contains("profile lab, 1 required") && out.contains(&line),
+            "{out}"
+        );
+        // The config loads: `health` gets as far as the key store, which this config does not have.
+        let (code, out) = run(tmp.path(), &cfg, &["health"]);
+        assert_eq!(code, 1, "{out}");
+        assert!(
+            out.contains("not ready: keystore") && !out.contains("refresh_min_interval_secs"),
+            "{out}"
+        );
+    }
+    // The default written out, and a longer interval, meet the profile.
+    for secs in [259_200, 604_800] {
+        let mut cfg = enforced();
+        cfg["signing_policy"]["refresh_min_interval_secs"] = secs.into();
+        let (code, out) = run(tmp.path(), &cfg, &["check-config"]);
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("0 required"), "{out}");
+    }
+}
+
+#[test]
 fn check_config_rejects_peer_deadlines_outside_their_bounds() {
     let tmp = tempfile::tempdir().unwrap();
 

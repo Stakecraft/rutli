@@ -137,7 +137,8 @@ veto, and the split (DS-CR4) of a ceremony a client **did** ask for.
 
 Since 0.5.0 every node takes part in at most one refresh of a key per
 `signing_policy.refresh_min_interval_secs`: default 259200 (72 h), at most 30 days, `0` turns it
-off (the node then warns at startup).
+off (the node then warns at startup). Under `profile: production` a node refuses to start with
+`0` or an interval under 72 h ([production-profile.md](production-profile.md)).
 
 Why: a refresh moves every node to a new epoch, and from its commit a node's older backups no longer
 restore that node ([disaster-recovery.md](disaster-recovery.md#1-restore-a-single-cosigner-from-backup)).
