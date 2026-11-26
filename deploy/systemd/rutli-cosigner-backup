@@ -1,0 +1,154 @@
+#!/bin/sh
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# One backup of this node's committed, SEALED key files (keys/*.json; never dotfiles, nonce markers
+# or staged files), its cleared-delete-intent markers (keys/.cleared/*) and its sign journals
+# (journal/<key>/*.jsonl). The same content and the same log lines as the Helm chart's backup
+# sidecar (deploy/helm/rutli-cosigner/templates/backup-configmap.yaml); here systemd timers start
+# it (rutli-cosigner-backup.service, rutli-cosigner-backup-check.service).
+#
+#   rutli-cosigner-backup               back up now
+#   rutli-cosigner-backup --if-changed  back up only if the key files changed since the last good run
+#
+# Environment (/etc/rutli-cosigner/backup.env):
+#   NODE_ID             this node's identifier (required)
+#   KEEP                how many archives the local destination keeps at most (default 14)
+#   RETENTION           true: delete archives of an older epoch only once the newer epoch is proven
+#                       (`rutli-cosigner keyfile prove`), see docs/disaster-recovery.md (default true)
+#   MIN_PROOF_AGE_DAYS  with RETENTION (default 7)
+#   KEEP_OLDER_EPOCHS   with RETENTION (default 0)
+#
+# Destination: /var/backups/rutli-cosigner. If /etc/rutli-cosigner/backup-ship is executable it is
+# called instead, with $1 = the tar and $2 = the node id, and must exit non-zero on failure.
+#
+# One BACKUP_OK or BACKUP_FAILED line per run; exit 1 on failure.
+set -u
+
+DATA_DIR="${DATA_DIR:-/var/lib/rutli-cosigner}"
+DEST_DIR="${DEST_DIR:-/var/backups/rutli-cosigner}"
+WORK_DIR="${RUNTIME_DIRECTORY:-${WORK_DIR:-}}"
+STATE_DIR="${STATE_DIRECTORY:-${STATE_DIR:-}}"
+CONFIG="${CONFIG:-/etc/rutli-cosigner/cosigner.json}"
+SHIP_HOOK="${SHIP_HOOK:-/etc/rutli-cosigner/backup-ship}"
+COSIGNER="${COSIGNER:-/usr/local/bin/rutli-cosigner}"
+KEEP="${KEEP:-14}"
+RETENTION="${RETENTION:-true}"
+MIN_PROOF_AGE_DAYS="${MIN_PROOF_AGE_DAYS:-7}"
+KEEP_OLDER_EPOCHS="${KEEP_OLDER_EPOCHS:-0}"
+
+fail() { echo "BACKUP_FAILED node=${NODE_ID:-unset} $*"; exit 1; }
+
+[ -n "${NODE_ID:-}" ] || fail "reason=NODE_ID-not-set"
+if [ -z "$WORK_DIR" ] || [ ! -d "$WORK_DIR" ]; then fail "reason=no-work-dir"; fi
+if [ -z "$STATE_DIR" ] || [ ! -d "$STATE_DIR" ]; then fail "reason=no-state-dir"; fi
+case "$KEEP" in '' | *[!0-9]*) fail "reason=KEEP-not-a-number" ;; esac
+
+# The daily run and the change check never run at the same time.
+exec 9>"$STATE_DIR/lock" || fail "reason=lock"
+flock 9 || fail "reason=lock"
+
+# A fingerprint of the committed key files: names and checksums of keys/*.json, empty when there
+# are none. A refresh replaces a key's file only when it commits on this node, so a changed
+# fingerprint means a new epoch or a new or deleted key. Signing never changes it.
+keysig() {
+  list=$(cd "$DATA_DIR/keys" 2>/dev/null && find . -maxdepth 1 -type f -name '*.json' ! -name '.*' | sort)
+  [ -n "$list" ] && (cd "$DATA_DIR/keys" && echo "$list" | xargs cksum) | cksum
+}
+
+sig=$(keysig)
+if [ "${1:-}" = "--if-changed" ]; then
+  [ -n "$sig" ] || exit 0
+  [ "$sig" = "$(cat "$STATE_DIR/last-fingerprint" 2>/dev/null)" ] && exit 0
+  echo "BACKUP_TRIGGER node=${NODE_ID} reason=key-files-changed"
+fi
+
+ship() {
+  if [ -x "$SHIP_HOOK" ]; then
+    "$SHIP_HOOK" "$1" "$NODE_ID"
+    return
+  fi
+  # Write atomically.
+  cp "$1" "$DEST_DIR/.$(basename "$1").part" || return 1
+  mv "$DEST_DIR/.$(basename "$1").part" "$DEST_DIR/$(basename "$1")" || return 1
+  count_cap() {
+    find "$DEST_DIR" -maxdepth 1 -type f -name "node-${NODE_ID}-*.tar" | sort | head -n "-${KEEP}" | while read -r old; do rm -f "$old"; done
+  }
+  if [ "$RETENTION" = "true" ]; then
+    # It reads the key files' clear headers only and deletes nothing when it cannot read an epoch,
+    # when this node's live epoch is behind an archive's, or on any error. A failure here is logged
+    # and does not fail the backup: the archive is already in place.
+    rc=0
+    "$COSIGNER" --config "$CONFIG" backup-retain --dir "$DEST_DIR" \
+      --min-proof-age-days "$MIN_PROOF_AGE_DAYS" --keep-older-epochs "$KEEP_OLDER_EPOCHS" \
+      --keep-count "$KEEP" || rc=$?
+    if [ "$rc" != 0 ]; then
+      echo "BACKUP_RETENTION_FAILED node=${NODE_ID} rc=$rc (see the lines above; some archives may already have been deleted)" >&2
+    fi
+  else
+    count_cap
+  fi
+  return 0
+}
+
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+tar="$WORK_DIR/node-${NODE_ID}-${stamp}.tar"
+stage="$WORK_DIR/stage-${stamp}"
+cleanup() { rm -rf "$stage" "$tar"; }
+trap cleanup EXIT
+
+files=$(cd "$DATA_DIR/keys" 2>/dev/null && find . -maxdepth 1 -type f -name '*.json' ! -name '.*' | sed 's|^\./||' | sort)
+[ -n "$files" ] || fail "reason=no-key-files-in-$DATA_DIR/keys"
+rm -rf "$stage" || fail "reason=stage"
+mkdir -p "$stage" || fail "reason=stage"
+# The stage holds symbolic links, not copies: only the tar needs room in the work directory
+# (tar -h stores the files the links point to). Key ids are [A-Za-z0-9_-], so word splitting of
+# $files is safe.
+for f in $files; do
+  ln -s "$DATA_DIR/keys/$f" "$stage/$f" || fail "reason=copy"
+done
+journals=0
+if [ -d "$DATA_DIR/journal" ]; then
+  # A segment copied mid-append may end in a partial line: the journal reader treats a torn final
+  # line of the newest segment as an interrupted append.
+  if ! (cd "$DATA_DIR/journal" && find . -type f -name '*.jsonl' | while read -r j; do
+    mkdir -p "$stage/journal/$(dirname "$j")" || exit 1
+    ln -s "$DATA_DIR/journal/$j" "$stage/journal/$j" || exit 1
+  done); then
+    fail "reason=journal-copy"
+  fi
+  journals=$(find "$stage/journal" -type l -name '*.jsonl' 2>/dev/null | wc -l | tr -d ' ')
+fi
+cleared=0
+if [ -d "$DATA_DIR/keys/.cleared" ]; then
+  # Marker names are <key id>.<hex digest>, so word splitting is safe.
+  mkdir -p "$stage/.cleared" || fail "reason=stage"
+  for m in $(cd "$DATA_DIR/keys/.cleared" && find . -maxdepth 1 -type f ! -name '.*' | sed 's|^\./||'); do
+    ln -s "$DATA_DIR/keys/.cleared/$m" "$stage/.cleared/$m" || fail "reason=cleared-copy"
+  done
+  cleared=$(find "$stage/.cleared" -type l | wc -l | tr -d ' ')
+fi
+# tar exits 1 with "file changed as we read it" when a journal segment grew while it was read: the
+# archive then holds the segment as it was when tar began it, which a torn final line already
+# tolerates. Anything else it says is a failure.
+err=$(tar -h -C "$stage" -cf "$tar" . 2>&1)
+rc=$?
+# shellcheck disable=SC2143 # the output is compared, not the status: no output at all also counts
+if [ "$rc" = 1 ] && [ -z "$(printf '%s\n' "$err" | grep -v 'file changed as we read it')" ]; then rc=0; fi
+if [ "$rc" != 0 ]; then
+  reason=tar
+  case "$err" in *[Nn]o\ space*) reason=work-dir-full ;; esac
+  echo "$err" >&2
+  fail "reason=${reason}"
+fi
+rm -rf "$stage"
+n=$(echo "$files" | wc -l | tr -d ' ')
+bytes=$(wc -c <"$tar" | tr -d ' ')
+dest=dir
+[ -x "$SHIP_HOOK" ] && dest=script
+if ship "$tar"; then
+  echo "BACKUP_OK node=${NODE_ID} files=${n} journal_segments=${journals} cleared_markers=${cleared} bytes=${bytes} dest=${dest} stamp=${stamp}"
+  printf '%s\n' "$sig" >"$STATE_DIR/last-fingerprint"
+else
+  fail "reason=ship files=${n} bytes=${bytes} stamp=${stamp}"
+fi

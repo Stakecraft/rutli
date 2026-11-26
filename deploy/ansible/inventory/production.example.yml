@@ -1,0 +1,51 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+---
+# PRODUCTION example: the inventory of ONE cosigner host. Each host has its own inventory, its own
+# operator and its own SSH credential: a machine that can become root on two cosigner hosts is by
+# itself above the threshold (docs/bare-metal.md, "Production").
+#
+# No secret is named here. seal.json and tls.key are put into /etc/rutli-cosigner/secrets on the
+# host by a person, before the first run. Every value below is public; the roster, the pins, the
+# cluster id and the policy are the same on all three hosts. The names are placeholders.
+all:
+  children:
+    rutli_cosigners:
+      hosts:
+        cosigner1.example.internal:
+          rutli_cosigner_id: 1
+          rutli_cosigner_profile: production
+          rutli_cosigner_version: "0.6.0"
+          rutli_cosigner_binary_src: "{{ playbook_dir }}/../files/rutli-cosigner-0.6.0-linux-x86_64"
+          rutli_cosigner_binary_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+          rutli_cosigner_ca_cert_src: "{{ playbook_dir }}/../files/certs/ca.crt"
+          rutli_cosigner_cert_src: "{{ playbook_dir }}/../files/certs/cosigner1.crt"
+          rutli_cosigner_cluster_id: "0123456789abcdef"
+          rutli_cosigner_metrics_listen: "0.0.0.0:9200"
+          # tls_spki_sha256: the output of `rutli-cosigner tls spki cosigner<id>.crt` (the values here are
+          # placeholders of the right shape, like every id and hash in this file).
+          rutli_cosigner_peers:
+            - id: 1
+              endpoint: "https://cosigner1.example.internal:9101"
+              tls_spki_sha256: ["1111111111111111111111111111111111111111111111111111111111111111"]
+            - id: 2
+              endpoint: "https://cosigner2.example.internal:9101"
+              tls_spki_sha256: ["2222222222222222222222222222222222222222222222222222222222222222"]
+            - id: 3
+              endpoint: "https://cosigner3.example.internal:9101"
+              tls_spki_sha256: ["3333333333333333333333333333333333333333333333333333333333333333"]
+          rutli_cosigner_signer_allowlist: [driver]
+          rutli_cosigner_operator_allowlist: [operator]
+          rutli_cosigner_refresh_allowlist: [refresher]
+          # docs/production-profile.md lists what the profile requires; docs/approval-quorum.md
+          # explains each key.
+          rutli_cosigner_signing_policy:
+            signer_may_refresh: false
+            require_epoch_match: true
+            signer_acl_required: true
+            signer_acl: { driver: ["participant1-"] }
+            signer_pins: { driver: ["dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"] }
+          rutli_cosigner_keyfile:
+            cluster_uuid: "00000000-0000-4000-8000-000000000000"
+            write_version: 2
+            accept_v1: false

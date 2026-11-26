@@ -1,0 +1,107 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+---
+- name: Group rutli
+  ansible.builtin.group:
+    name: rutli
+    system: true
+
+- name: User rutli
+  ansible.builtin.user:
+    name: rutli
+    group: rutli
+    system: true
+    shell: /usr/sbin/nologin
+    home: /var/lib/rutli-cosigner
+    create_home: false
+    password_lock: true
+
+- name: Config directory
+  ansible.builtin.file:
+    path: /etc/rutli-cosigner
+    state: directory
+    owner: root
+    group: rutli
+    mode: "0750"
+
+- name: Secrets directory (root only; systemd hands the two files to the unit)
+  ansible.builtin.file:
+    path: /etc/rutli-cosigner/secrets
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+# The key shares live here. Created once; the role never removes it or anything in it.
+- name: Data directory
+  ansible.builtin.file:
+    path: /var/lib/rutli-cosigner
+    state: directory
+    owner: rutli
+    group: rutli
+    mode: "0700"
+
+- name: Directory of this release
+  ansible.builtin.file:
+    path: "/opt/rutli-cosigner/{{ rutli_cosigner_version }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Binary of this release
+  ansible.builtin.copy:
+    src: "{{ rutli_cosigner_binary_src }}"
+    dest: "/opt/rutli-cosigner/{{ rutli_cosigner_version }}/rutli-cosigner"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Read the checksum of the binary on the host
+  ansible.builtin.stat:
+    path: "/opt/rutli-cosigner/{{ rutli_cosigner_version }}/rutli-cosigner"
+    checksum_algorithm: sha256
+    get_checksum: true
+  register: rutli_cosigner__binary_remote
+  when: not ansible_check_mode
+
+- name: The binary on the host is the one named by rutli_cosigner_binary_sha256
+  ansible.builtin.assert:
+    that:
+      - rutli_cosigner__binary_remote.stat.checksum == rutli_cosigner_binary_sha256
+    quiet: true
+  when: not ansible_check_mode
+
+- name: Ask the binary for its version
+  ansible.builtin.command:
+    cmd: "/opt/rutli-cosigner/{{ rutli_cosigner_version }}/rutli-cosigner --version"
+  register: rutli_cosigner__reported
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: The binary reports the release it was installed as
+  ansible.builtin.assert:
+    that:
+      - (rutli_cosigner_version | string) in rutli_cosigner__reported.stdout
+    fail_msg: >-
+      The binary says "{{ rutli_cosigner__reported.stdout }}", not {{ rutli_cosigner_version }}.
+    quiet: true
+  when: not ansible_check_mode
+
+- name: CA certificate
+  ansible.builtin.copy:
+    src: "{{ rutli_cosigner_ca_cert_src }}"
+    dest: /etc/rutli-cosigner/ca.crt
+    owner: root
+    group: rutli
+    mode: "0644"
+  register: rutli_cosigner__ca
+
+- name: This node's certificate
+  ansible.builtin.copy:
+    src: "{{ rutli_cosigner_cert_src }}"
+    dest: /etc/rutli-cosigner/cosigner.crt
+    owner: root
+    group: rutli
+    mode: "0644"
+  register: rutli_cosigner__cert

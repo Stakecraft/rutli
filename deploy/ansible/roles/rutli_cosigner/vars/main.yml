@@ -1,0 +1,6 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+---
+# Where the unit files and scripts come from: deploy/systemd of this repository. The role is used
+# from a checkout of the repository at the release's tag.
+rutli_cosigner_systemd_src: "{{ role_path }}/../../../systemd"

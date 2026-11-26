@@ -1,0 +1,16 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+---
+# Install or update the files of a cosigner. A cosigner that is not running is started; a RUNNING
+# one is never restarted by this playbook (see upgrade.yml).
+#
+#   ansible-playbook -i inventory/<yours>.yml playbooks/install.yml --limit cosigner1
+#
+# Production: one host per run, with that host's own inventory and credentials
+# (docs/bare-metal.md, "Production").
+- name: Install the Rütli cosigner
+  hosts: rutli_cosigners
+  become: true
+  gather_facts: true
+  roles:
+    - role: rutli_cosigner

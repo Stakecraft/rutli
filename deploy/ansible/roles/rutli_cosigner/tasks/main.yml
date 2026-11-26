@@ -1,0 +1,22 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+---
+# This role installs one cosigner. It never creates, reads or moves key shares, seal bundles,
+# private keys or a CA, and it never runs a ceremony (DKG, refresh, restore, split).
+- name: Check the host and the variables
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Install the user, the directories and the binary
+  ansible.builtin.import_tasks: install.yml
+
+- name: Check the secrets on the host
+  ansible.builtin.import_tasks: secrets.yml
+
+- name: Install the config
+  ansible.builtin.import_tasks: config.yml
+
+- name: Install the units
+  ansible.builtin.import_tasks: units.yml
+
+- name: Start or restart the cosigner
+  ansible.builtin.import_tasks: service.yml

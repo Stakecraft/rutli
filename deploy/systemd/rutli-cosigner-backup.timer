@@ -1,0 +1,12 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+[Unit]
+Description=Daily Rütli cosigner backup
+
+[Timer]
+OnCalendar=*-*-* 03:17:00 UTC
+# A run missed while the host was down happens at the next boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

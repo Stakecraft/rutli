@@ -1,0 +1,79 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+---
+- name: Is the cosigner running
+  ansible.builtin.systemd_service:
+    name: rutli-cosigner.service
+  register: rutli_cosigner__unit_state
+  check_mode: false
+
+- name: Does it need a restart to pick up this run's changes
+  ansible.builtin.set_fact:
+    rutli_cosigner__running: "{{ rutli_cosigner__unit_state.status.ActiveState | default('inactive') in ['active', 'activating', 'reloading'] }}"
+    rutli_cosigner__stale: >-
+      {{ rutli_cosigner__link is changed or rutli_cosigner__config is changed
+         or rutli_cosigner__unit_files is changed or rutli_cosigner__ca is changed
+         or rutli_cosigner__cert is changed }}
+
+# First start, or a node that was down. Three fresh nodes may start together: there is no key yet.
+- name: Start the cosigner
+  ansible.builtin.systemd_service:
+    name: rutli-cosigner.service
+    state: started
+  register: rutli_cosigner__started
+  when:
+    - not rutli_cosigner__running
+    - rutli_cosigner_start | bool
+
+# A restart of a running node: only when asked for, and only while the other nodes answer.
+- name: Check that every other cosigner's gRPC port answers
+  ansible.builtin.wait_for:
+    host: "{{ item.endpoint | urlsplit('hostname') }}"
+    port: "{{ item.endpoint | urlsplit('port') }}"
+    timeout: 10
+  loop: "{{ rutli_cosigner_peers | rejectattr('id', 'equalto', rutli_cosigner_id | int) | list }}"
+  loop_control:
+    label: "cosigner {{ item.id }}"
+  when:
+    - rutli_cosigner__running
+    - rutli_cosigner_restart | bool
+    - not (rutli_cosigner_allow_degraded | bool)
+
+- name: Restart the cosigner
+  ansible.builtin.systemd_service:
+    name: rutli-cosigner.service
+    state: restarted
+  register: rutli_cosigner__restarted
+  when:
+    - rutli_cosigner__running
+    - rutli_cosigner_restart | bool
+
+- name: Wait until the cosigner is healthy (key store usable, gRPC port open)
+  ansible.builtin.command:
+    cmd: >-
+      runuser -u rutli -- /usr/local/bin/rutli-cosigner
+      --config /etc/rutli-cosigner/cosigner.json health
+  register: rutli_cosigner__health
+  changed_when: false
+  until: rutli_cosigner__health.rc == 0
+  retries: "{{ (rutli_cosigner_health_timeout_seconds | int / 5) | int }}"
+  delay: 5
+  when: rutli_cosigner__started is changed or rutli_cosigner__restarted is changed
+
+- name: Let the peer connections settle before the next host
+  ansible.builtin.pause:
+    seconds: "{{ rutli_cosigner_settle_seconds | int }}"
+  when:
+    - rutli_cosigner__restarted is changed
+    - rutli_cosigner_settle_seconds | int > 0
+
+- name: Say when a running cosigner still has the old binary or config
+  ansible.builtin.debug:
+    msg: >-
+      rutli-cosigner on {{ inventory_hostname }} was changed on disk and NOT restarted. Restart one
+      host at a time: playbooks/upgrade.yml, or this play with --limit <host> -e
+      rutli_cosigner_restart=true (docs/bare-metal.md, "Upgrade").
+  when:
+    - rutli_cosigner__running
+    - rutli_cosigner__stale
+    - not (rutli_cosigner_restart | bool)

@@ -1,0 +1,41 @@
+#!/bin/sh
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Run a rutli-cosigner command on this host with what the daemon has: its user, its data directory,
+# the seal bundle and the TLS key as credentials, /tmp in memory. For the commands that open the
+# key store or dial the cluster: restore, keyfile, seal inspect, verify-key, ceremony resolve, …
+#
+#   sudo rutli-cosigner-cli keyfile prove …
+#
+# It starts a transient unit named rutli-cosigner-cli.service, so the credentials are under
+# /run/credentials/rutli-cosigner-cli.service/ and the config is /etc/rutli-cosigner/cli.json: the
+# node's config with those two paths. One command at a time.
+#
+# The commands that need the daemon stopped take the instance lock and refuse while it runs: stop
+# it first (`systemctl stop rutli-cosigner`). The other two cosigners keep signing.
+#
+# `check-config` and `health` need no secret; run them directly:
+#   rutli-cosigner --config /etc/rutli-cosigner/cosigner.json check-config
+#   sudo runuser -u rutli -- rutli-cosigner --config /etc/rutli-cosigner/cosigner.json health
+set -eu
+
+[ "$(id -u)" = 0 ] || { echo "rutli-cosigner-cli: run as root (sudo)" >&2; exit 1; }
+[ "$#" -gt 0 ] || { echo "usage: rutli-cosigner-cli <rutli-cosigner arguments>" >&2; exit 1; }
+
+io=--pipe
+[ -t 0 ] && [ -t 1 ] && io=--pty
+
+exec systemd-run --quiet --wait --collect "$io" \
+  --unit=rutli-cosigner-cli \
+  --description="Rütli cosigner command" \
+  -p User=rutli -p Group=rutli \
+  -p LoadCredential=seal.json:/etc/rutli-cosigner/secrets/seal.json \
+  -p LoadCredential=tls.key:/etc/rutli-cosigner/secrets/tls.key \
+  -p StateDirectory=rutli-cosigner -p StateDirectoryMode=0700 -p UMask=0077 \
+  -p "TemporaryFileSystem=/tmp:mode=1777,size=64M,nosuid,nodev,noexec" \
+  -p MemorySwapMax=0 -p LimitCORE=0 \
+  -p ProtectSystem=strict -p ProtectHome=yes -p PrivateDevices=yes \
+  -p NoNewPrivileges=yes -p CapabilityBoundingSet= \
+  -p Environment=RUST_LOG="${RUST_LOG:-info}" \
+  /usr/local/bin/rutli-cosigner --config /etc/rutli-cosigner/cli.json "$@"

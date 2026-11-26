@@ -1,0 +1,7 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+---
+# Run from deploy/ansible: `ansible-lint`.
+profile: production
+exclude_paths:
+  - inventory/

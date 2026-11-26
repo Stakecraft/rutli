@@ -1,0 +1,16 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Every refresh moves this node to a new epoch, and its older backups no longer restore it. So a
+# backup has to follow every refresh without a manual step. Disable this timer for the window of a
+# split ceremony, where a new key file holds dealt shares until the first refresh
+# (docs/split-ceremony.md).
+[Unit]
+Description=Rütli cosigner backup after a change of the key files
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+
+[Install]
+WantedBy=timers.target
