@@ -43,11 +43,14 @@
     quiet: true
   when: rutli_cosigner_profile == 'production'
 
-- name: Debian or Ubuntu
+- name: Debian, or an untested distribution on request
   ansible.builtin.assert:
     that:
-      - ansible_facts['os_family'] == 'Debian'
-    fail_msg: "Written for Debian 12/13 and Ubuntu 24.04; this host is {{ ansible_facts['distribution'] }}."
+      - ansible_facts['distribution'] == 'Debian' or (rutli_cosigner_allow_untested_distribution | bool)
+    fail_msg: >-
+      Supported: Debian 12 and 13. This host is {{ ansible_facts['distribution'] }}. Other distributions
+      with systemd 250 or later should work and are not tested: set
+      rutli_cosigner_allow_untested_distribution=true to go on.
     quiet: true
 
 - name: Read the systemd version

@@ -16,7 +16,7 @@
 # names those paths:
 #   "tls":        { "key": "/run/credentials/rutli-cosigner.service/tls.key", ... }
 #   "share_seal": { "secret_file": "/run/credentials/rutli-cosigner.service/seal.json" }
-# Needs systemd 250 or later (Debian 12, Ubuntu 24.04).
+# Needs systemd 250 or later (Debian 12 and 13).
 [Unit]
 Description=Rütli cosigner
 Documentation=https://github.com/Stakecraft/rutli/blob/main/docs/bare-metal.md

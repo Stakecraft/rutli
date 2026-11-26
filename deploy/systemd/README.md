@@ -12,6 +12,7 @@ The full page is [docs/bare-metal.md](../../docs/bare-metal.md). The Ansible rol
 | `rutli-cosigner-cli` | `/usr/local/sbin/` | Runs a `rutli-cosigner` command with the daemon's user and credentials. |
 | `nftables.example.nft` | nowhere | An example of the firewall rules. Nothing installs it. |
 
-Needs systemd 250 or later. Written for Debian 12 and 13, Ubuntu 24.04.
+Supported: Debian 12 and 13. Other distributions with systemd 250 or later should work and are not
+tested.
 
 None of these files creates, copies or moves key material, and none starts a ceremony.

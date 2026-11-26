@@ -9,7 +9,8 @@ the role pass their linters and the config they write passes `check-config`; a f
 three hosts has not been recorded yet. Until it has, treat this page as a starting point and run it
 in a lab first.
 
-Written for Debian 12 and 13 and Ubuntu 24.04 (systemd 250 or later, cgroup v2), x86_64 and aarch64.
+Supported: Debian 12 and 13, x86_64 and aarch64. Other distributions with systemd 250 or later and
+cgroup v2 should work and are not tested.
 
 ## What this covers
 

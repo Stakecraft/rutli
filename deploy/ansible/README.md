@@ -14,7 +14,8 @@ tests/render.yml                renders the config for an inventory without touc
 
 The role installs the unit files and scripts of [`deploy/systemd/`](../systemd/), so use it from a
 checkout of the release tag. It needs ansible-core 2.16 or later on the control machine and
-Debian 12/13 or Ubuntu 24.04 with systemd 250 or later on the host.
+Debian 12 or 13 on the host. Other distributions with systemd 250 or later should work and are not
+tested; the role refuses them unless `rutli_cosigner_allow_untested_distribution` is true.
 
 What the role never does: create, read or move a key share, a seal bundle, a private key or a CA;
 run a ceremony; delete the data directory; change the firewall. Under the production profile it

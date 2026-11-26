@@ -51,6 +51,10 @@ rutli_cosigner_hosted_keys: {}
 # Any other config key, merged last (recursively: {tls: {allow_expired_ca: true}} adds one key).
 rutli_cosigner_extra_config: {}
 
+# Supported hosts are Debian 12 and 13. true lets the role run on another distribution with systemd
+# 250 or later; that should work and is not tested.
+rutli_cosigner_allow_untested_distribution: false
+
 # --- secrets ----------------------------------------------------------------------------------
 # The seal bundle and the TLS private key live on the host in /etc/rutli-cosigner/secrets
 # (root:root 0700), as seal.json and tls.key (root:root 0400). Under the production profile a
