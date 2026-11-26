@@ -55,13 +55,37 @@ else
   echo "addSbtPlugin(\"org.scoverage\" % \"sbt-scoverage\" % \"$SCOVERAGE_VERSION\")" >"$W/scoverage.sbt"
   SBT=("--addPluginSbtFile=$W/scoverage.sbt" clean coverage driver/test driver/coverageReport)
 fi
-rc=0
-(cd "$Q_ROOT" && sbt -batch -no-colors "${SBT[@]}") >"$W/sbt.log" 2>&1 || rc=$?
+# A repository that rate-limits the runner (HTTP 429) is retried after a pause; any other
+# failure is not.
+rate_limited() { grep -qiE '(response|status) code:? 429' "$W/sbt.log"; }
+for attempt in 1 2 3; do
+  rc=0
+  (cd "$Q_ROOT" && sbt -batch -no-colors "${SBT[@]}") >"$W/sbt.log" 2>&1 || rc=$?
+  if [ "$rc" = 0 ] || ! rate_limited; then
+    break
+  fi
+  if [ "$attempt" = 3 ]; then
+    q_log "sbt: a repository answered HTTP 429 (attempt $attempt); giving up"
+    break
+  fi
+  q_log "sbt: a repository answered HTTP 429 (attempt $attempt); retrying in $((attempt * 60)) s"
+  sleep $((attempt * 60))
+done
 q_info scala.sbt "sbt exit $rc, sbt-scoverage $SCOVERAGE_VERSION"
 
-if ! grep -qiE 'compiling [0-9]+ Scala source' "$W/sbt.log" || grep -q 'Compilation failed' "$W/sbt.log"; then
+# A failed download is named before the compile heuristic reads the log: the metrics are empty
+# because sbt never got that far, not because the driver failed to compile.
+why=""
+if [ "$rc" != 0 ] && rate_limited; then
+  why="sbt could not download a dependency: a repository rate-limited the runner (HTTP 429)"
+elif [ "$rc" != 0 ] && grep -q 'ResolveException' "$W/sbt.log" && ! grep -q 'com\.daml' "$W/sbt.log"; then
+  why="sbt could not download a dependency (see the sbt log)"
+elif ! grep -qiE 'compiling [0-9]+ Scala source' "$W/sbt.log" || grep -q 'Compilation failed' "$W/sbt.log"; then
+  why="sbt could not compile the driver (Canton artifacts missing?)"
+fi
+if [ -n "$why" ]; then
   tail -30 "$W/sbt.log" >&2
-  for k in "${SBT_KEYS[@]}"; do q_null "$k" "sbt could not compile the driver (Canton artifacts missing?)"; done
+  for k in "${SBT_KEYS[@]}"; do q_null "$k" "$why"; done
   exit 0
 fi
 

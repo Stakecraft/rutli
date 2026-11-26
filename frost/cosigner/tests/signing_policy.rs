@@ -2978,10 +2978,13 @@ fn two_tenants() -> SigningPolicyConfig {
     }
 }
 
+/// A `CeremonySignTest` request as a 0.5 `verify-key` sends it: with a 32-byte challenge, so the
+/// version 2 path is the one checked.
 fn sign_test_of(key_id: &str) -> pb::CeremonySignTestRequest {
     pb::CeremonySignTestRequest {
         key_id: key_id.into(),
         signers: vec![1, 2],
+        challenge: vec![0x5a; 32],
     }
 }
 
@@ -3108,6 +3111,21 @@ async fn a_sign_test_the_acl_refuses_spends_no_budget_and_leaves_no_marker() {
         let status = sign_test("tenant").await;
         assert_eq!(status.code(), tonic::Code::PermissionDenied, "{status:?}");
     }
+    // The ACL also comes before the challenge is read: a malformed one is still the ACL's refusal.
+    let malformed = c
+        .signer("tenant", 0)
+        .await
+        .ceremony_sign_test(pb::CeremonySignTestRequest {
+            challenge: vec![0x5a],
+            ..sign_test_of(KEY)
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        malformed.code(),
+        tonic::Code::PermissionDenied,
+        "{malformed:?}"
+    );
     assert_eq!(markers(&c), before);
     assert!((0..3).all(|i| c.journal(i).is_empty()));
 
