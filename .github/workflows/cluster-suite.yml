@@ -49,6 +49,7 @@ jobs:
           python3 -I scripts/perf/test_compare.py
           python3 -I scripts/perf/test_diagnose.py
           python3 -I scripts/perf/test_k8s_loadgen.py
+          python3 -I scripts/perf/test_migration_env_k8s.py
 
       - name: Tools (checksum-pinned)
         run: scripts/perf/install-tools.sh kind helm

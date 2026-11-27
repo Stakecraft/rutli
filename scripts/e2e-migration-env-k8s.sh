@@ -8,8 +8,11 @@
 #
 # Every cosigner command runs inside the live cosigner pod (`kubectl exec … -c cosigner`), as
 # docs/split-ceremony.md §4 does: no Job, no second mount of a cosigner volume. The operator's and
-# the refresher's commands (verify-key, refresh) run in the load generator pod, which holds their
-# certificates. The dealer runs in a pod of its own (`rutli-perf-dealer-…`): no service account
+# the refresher's commands (verify-key, refresh) run in a client pod of their own
+# (`rutli-perf-client`), started here from the image the cosigners run, with the installation's
+# client certificates: the cluster suite holds its ceremony on the previous release's cosigners, and
+# a `verify-key --sign-test` must be of the cosigners' release (a 0.5 one refuses the version 1
+# sign-test message a 0.4 cluster signs). The dealer runs in a pod of its own (`rutli-perf-dealer-…`): no service account
 # token, no network at all (a NetworkPolicy denies every connection), its work directory in
 # memory; files reach it and leave it only through this machine, and Step 8 deletes it.
 #
@@ -19,14 +22,16 @@
 #                       the dealer needs its ca.crt
 #   E2E_DEALER_IMAGE    the dealer's image: one with rutli-dealer of the cosigners' release
 #                       (frost/Dockerfile.perf, or frost/Dockerfile.dealer for an earlier tag)
-#   E2E_LOADGEN_POD     the load generator pod (default rutli-perf-loadgen)
+#   E2E_CLIENT_SECRET   the Secret with the operator's and the refresher's certificates and ca.crt
+#                       (default rutli-perf-driver, as k8s-deploy.sh creates it)
 #   E2E_SCRATCH         an empty directory for the local work dir (the suite passes one it removes
 #                       itself); default a new one under TMPDIR
 #   E2E_ALLOW_UNISOLATED_DEALER=1  go on when the dealer pod reaches the network (its NetworkPolicy
 #                       not enforced: kind's default network plugin); otherwise that is a failure
 
 NS="${RUTLI_NAMESPACE:?RUTLI_NAMESPACE is required for E2E_ENV=k8s}"
-LOADGEN_POD="${E2E_LOADGEN_POD:-rutli-perf-loadgen}"
+CLIENT_SECRET="${E2E_CLIENT_SECRET:-rutli-perf-driver}"
+CLIENT_POD=rutli-perf-client # one suite run per namespace
 DEALER_POD=rutli-perf-dealer # one suite run per namespace
 CLEANUP_FAILED=""
 
@@ -59,6 +64,7 @@ env_init() {
   # held) and the ceremony's files in the cosigners' /tmp.
   _kq delete pod "$DEALER_POD" --wait=true --timeout=120s --ignore-not-found >/dev/null
   _kq delete networkpolicy "$DEALER_POD" --ignore-not-found >/dev/null
+  _client_down || fail "the client pod of an earlier run is still there"
   local n
   for n in 1 2 3; do
     # shellcheck disable=SC2016  # expanded by the pod's shell
@@ -66,28 +72,29 @@ env_init() {
       || fail "could not clear cosigner $n's /tmp of an earlier run's ceremony files"
   done
 
-  step "Cluster in namespace $NS: every cosigner healthy, the load generator ready"
+  step "Cluster in namespace $NS: every cosigner healthy, the client pod started from their image"
   local i role
   for i in 1 2 3; do
     _in_node "$i" rutli-cosigner --config "/config/cosigner-$i.json" health >/dev/null \
       || fail "cosigner $i in $NS is not healthy"
   done
   # The operator's and the refresher's client configs: node 1's config with that role's
-  # certificate (the load generator pod mounts them at /certs) and the lab profile, as a client
-  # config is not a node's.
+  # certificate (the client pod mounts them at /certs) and the lab profile, as a client config is
+  # not a node's.
+  _client_up
   _in_node 1 cat /config/cosigner-1.json >"$WORK/node1.json"
   # Request files, bundles and founding backups go to each cosigner pod's /tmp, the client configs to
-  # the load generator's: both must be memory-backed (the chart's and loadgen.yaml's emptyDir with
+  # the client pod's: both must be memory-backed (the chart's and the client pod's emptyDir with
   # medium Memory), so that nothing of the ceremony reaches a node's disk.
   for i in 1 2 3; do
     _in_node "$i" grep -q ' /tmp tmpfs ' /proc/mounts || fail "cosigner $i's /tmp is not memory-backed"
   done
-  _k exec "$LOADGEN_POD" -- grep -q ' /tmp tmpfs ' /proc/mounts || fail "the load generator's /tmp is not memory-backed"
+  _k exec "$CLIENT_POD" -- grep -q ' /tmp tmpfs ' /proc/mounts || fail "the client pod's /tmp is not memory-backed"
   # shellcheck disable=SC2016  # expanded by the pod's shell (the cat below)
   for role in operator refresher; do
     jq --arg role "$role" '.tls.cert = "/certs/\($role).crt" | .tls.key = "/certs/\($role).key"
       | .tls.ca_cert = "/certs/ca.crt" | .profile = "lab"' "$WORK/node1.json" \
-      | _k exec -i "$LOADGEN_POD" -- sh -c 'umask 077; cat > "$1"' sh "/tmp/e2e-$role.json"
+      | _k exec -i "$CLIENT_POD" -- sh -c 'umask 077; cat > "$1"' sh "/tmp/e2e-$role.json"
   done
 
   # The dealer pod, started and its isolation checked here, before anything of the key reaches it
@@ -104,7 +111,7 @@ env_cosigner() {
 env_client() {
   local role=$1
   shift
-  _k exec "$LOADGEN_POD" -- env RUST_LOG=off rutli-cosigner --config "/tmp/e2e-$role.json" "$@"
+  _k exec "$CLIENT_POD" -- env RUST_LOG=off rutli-cosigner --config "/tmp/e2e-$role.json" "$@"
 }
 env_node_out() { printf '/tmp/%s\n' "$2"; }
 env_fetch() { _in_node "$1" cat "$2" >"$3"; }
@@ -140,6 +147,90 @@ env_node_shred() {
   shift
   _in_node "$n" rm -f -- "$@"
 } # memory-backed /tmp: gone with the pages
+
+# --- the client pod -----------------------------------------------------------------------------
+# The operator's and the refresher's machine: the image cosigner 1's pod runs (so `rutli-cosigner`
+# there is the cosigners' release, whatever built the load generator), the installation's client
+# certificates at /certs, a memory-backed /tmp for the two client configs. It carries the label the
+# chart's NetworkPolicy admits to the gRPC port; its own policy lets it reach the cosigners and DNS
+# on a cluster that denies all traffic by default, and nothing reach it.
+_client_up() {
+  local image pull
+  image="$(_k get pod "$(_pod 1)" -o jsonpath='{.spec.containers[?(@.name=="cosigner")].image}')"
+  [ -n "$image" ] || fail "cosigner 1's pod names no image for the client pod"
+  pull="$(_k get pod "$(_pod 1)" -o jsonpath='{.spec.imagePullSecrets}')"
+  _k apply -f - >/dev/null <<YAML
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: $CLIENT_POD
+  labels: { rutli-perf/suite: "1" }
+spec:
+  podSelector: { matchLabels: { app: $CLIENT_POD } }
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: rutli-cosigner }
+      ports:
+        - { protocol: TCP, port: 9101 }
+    - to: []
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $CLIENT_POD
+  labels: { app: $CLIENT_POD, rutli-perf/suite: "1", rutli.io/client: "true" }
+spec:
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  restartPolicy: Never
+  activeDeadlineSeconds: 1800
+  terminationGracePeriodSeconds: 1
+  imagePullSecrets: ${pull:-[]}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: client
+      image: "$image"
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "infinity"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: { drop: [ALL] }
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { cpu: 500m, memory: 128Mi }
+      volumeMounts:
+        - { name: certs, mountPath: /certs, readOnly: true }
+        - { name: tmp, mountPath: /tmp }
+  volumes:
+    - name: certs
+      secret: { secretName: $CLIENT_SECRET, defaultMode: 0440 }
+    - name: tmp
+      emptyDir: { medium: Memory, sizeLimit: 16Mi }
+YAML
+  _k wait --for=condition=Ready "pod/$CLIENT_POD" --timeout=300s >/dev/null || fail "the client pod did not start"
+  echo "the client pod runs $image, the image of cosigner 1"
+}
+
+# Delete the client pod and its NetworkPolicy. Returns 1 if the pod may still be there.
+_client_down() {
+  _kq delete pod "$CLIENT_POD" --wait=true --timeout=120s --ignore-not-found >/dev/null 2>&1 || true
+  local left
+  left="$(_kq get pod "$CLIENT_POD" --ignore-not-found -o name 2>/dev/null)" || return 1
+  [ -z "$left" ] || return 1
+  _kq delete networkpolicy "$CLIENT_POD" --ignore-not-found >/dev/null 2>&1 || true
+}
 
 # --- the dealer pod -----------------------------------------------------------------------------
 DEALER_STARTED=0
@@ -377,8 +468,11 @@ env_cleanup() {
     _kq exec "$(_pod "$i")" -c cosigner -- sh -c 'rm -rf /tmp/r[0-9].json /tmp/share-*.json /tmp/backup-founding-node*' \
       >/dev/null 2>&1 || CLEANUP_FAILED="$CLEANUP_FAILED cosigner-$i:/tmp"
   done
-  _kq exec "$LOADGEN_POD" -- sh -c 'rm -f /tmp/e2e-operator.json /tmp/e2e-refresher.json' >/dev/null 2>&1 \
-    || CLEANUP_FAILED="$CLEANUP_FAILED loadgen:/tmp"
+  # The client configs go with the client pod's memory-backed /tmp.
+  if ! _client_down; then
+    echo "WARNING: the client pod $CLIENT_POD is still there; delete it and its NetworkPolicy by hand" >&2
+    CLEANUP_FAILED="$CLEANUP_FAILED client-pod"
+  fi
   [ -z "$CLEANUP_FAILED" ] || echo "WARNING: the cleanup could not remove:$CLEANUP_FAILED" >&2
   if [ "$rc" -ne 0 ]; then
     for i in 1 2 3; do
