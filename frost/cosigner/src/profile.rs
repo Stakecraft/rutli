@@ -813,7 +813,8 @@ mod tests {
             // Lab and unset: the same finding is listed (and logged at startup), nothing refused.
             for profile in [Some(Profile::Lab), None] {
                 c.profile = profile;
-                c.validate().expect("lab or unset: the finding does not refuse");
+                c.validate()
+                    .expect("lab or unset: the finding does not refuse");
                 let f = required(&c);
                 assert_eq!(f.len(), 1, "{f:#?}");
                 assert_eq!(f[0].setting, SETTING);
@@ -831,10 +832,7 @@ mod tests {
                 .signing_policy
                 .refresh_waiver_ms()
                 .expect("the waiver time parses");
-            assert_eq!(
-                now < at + crate::config::REFRESH_WAIVER_LIFETIME_MS,
-                active
-            );
+            assert_eq!(now < at + crate::config::REFRESH_WAIVER_LIFETIME_MS, active);
             assert_eq!(findings(&waived), vec![]);
             waived.validate().expect("a waiver does not refuse");
             // And it does not stand in for the interval: with the interval off the node refuses.
