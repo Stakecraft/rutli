@@ -72,6 +72,7 @@ import run as base  # noqa: E402  (the compose suite: Runner, scenarios, key nam
 
 NODES = base.NODES
 DEALER_POD = "rutli-perf-dealer"  # scripts/e2e-migration-env-k8s.sh: one suite run per namespace
+CLIENT_POD = "rutli-perf-client"  # the same script's operator and refresher pod, of the cosigners' image
 HERE = os.path.dirname(os.path.abspath(__file__))
 # The driver's deadlines (#196): 5 s a sign attempt, 10 s an attempt of any other call, 30 s a
 # call. The key-class spot checks use them whatever the run's own policy is.
@@ -295,7 +296,9 @@ class Suite(base.Runner):
         (B1's Canton 3.6.1 test export) brought in by the split ceremony, as scripts/e2e-migration.sh
         runs it (E2E_ENV=k8s E2E_STAGES=ceremony: recipient requests and SAS, the dealer in a pod of
         its own, dry run, install, verify-key --sign-test, refresh with the refresher, founding
-        backups, the destruction checks). The imported key then is the first tenant's
+        backups, the destruction checks). The operator's and the refresher's commands run in a pod
+        of the image the cosigners run, not in the load generator: a verify-key of the build under
+        test does not accept the sign test of the previous release's cosigners. The imported key then is the first tenant's
         namespace-class key for every later suite. A new key prefix per run: imported ids are never
         deleted."""
         a = self.args
@@ -343,6 +346,13 @@ class Suite(base.Runner):
                     elif not done:
                         log(f"  WARNING: abort-import on {n} failed: its sealed recipient secret for {key_id} may "
                             f"remain. Run abort-import --key-id {key_id} --ceremony-id {ceremony} there by hand.")
+            # The client pod holds no key material (two client configs in memory): best effort, and
+            # it stops at its 30-minute deadline either way.
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                for kind in ("pod", "networkpolicy"):
+                    subprocess.run(argv + ["delete", kind, CLIENT_POD, "--wait=true", "--timeout=120s",
+                                           "--ignore-not-found"], capture_output=True, timeout=180,
+                                   start_new_session=True, check=False)
             try:
                 subprocess.run(argv + ["delete", "pod", DEALER_POD, "--wait=true", "--timeout=120s",
                                        "--ignore-not-found"], capture_output=True, timeout=180, start_new_session=True, check=False)

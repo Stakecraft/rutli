@@ -318,8 +318,11 @@ as the Compose end-to-end test, not a second copy:
      `--confirm-sas`.
 4. **Gates A to C** (all checks of `scripts/e2e-migration.sh`):
    - a dry run on every node, then the install; an identical re-import is accepted;
-   - `verify-key --sign-test` with the operator certificate, from the load generator pod, every
-     2-of-3 quorum signing;
+   - `verify-key --sign-test` with the operator certificate, every 2-of-3 quorum signing. The
+     operator's and the refresher's commands run in a pod of their own (`rutli-perf-client`),
+     started from the image the cosigners run: a `verify-key` must be of the cosigners' release
+     (0.5 signs a version 2 sign-test message and refuses the version 1 answer of a 0.4 cluster),
+     and the load generator is of the build under test;
    - a refresh with the refresher certificate;
    - `verify-key` again: same group key, new digest, refresh count 1;
    - the dealt bundles refused after the refresh;
