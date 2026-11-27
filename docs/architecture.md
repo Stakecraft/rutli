@@ -497,6 +497,10 @@ two keys, two DKGs, no collision. Rules:
   domain. An entry limits that CN to the key-id prefixes it lists, on every key-scoped Signer RPC
   including `Signer.Dkg`; `signer_acl_required` refuses a CN that has no entry
   ([approval-quorum.md](approval-quorum.md)).
+- **Share a cluster only between participants of one organisation.** The ACL separates
+  participants at the API. The sealing key, the key directory, the process and the hosted keys are
+  common to all of them, so different key owners get different clusters
+  ([isolation-levels.md](isolation-levels.md)).
 
 ## Hard constraints (design around these)
 

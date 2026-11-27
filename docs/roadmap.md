@@ -237,6 +237,12 @@ v0.4.0.
 | **0.6** | Sealing secret from an external key manager (issue #333) | The secret that seals the key files can come from an external key manager instead of a Kubernetes Secret. The chart gets an example, the docs a page, and the node authenticates with its workload identity |
 | **2.0** | Confidential computing (issue #335) | Cosigners in AWS Nitro Enclaves, AMD SEV-SNP or Intel TDX, so even root on the host or a memory snapshot does not reveal a share, and a share is decrypted only inside the attested environment (today a documented residual, audit L7) |
 
+**Several key owners.** One cosigner cluster serves the participants of one organisation; an
+operator with several key owners runs a cluster per owner today
+([isolation-levels.md](isolation-levels.md)). A cosigner held by the key owner, so that the
+operator does not hold every share, is a topic for 1.0. It has no design yet and is not in the
+table above.
+
 **Consequence for the audit.** Threshold ECIES was moved to 2.0 on 2026-11-02 and brought back into
 1.0 on 2026-11-19: without it one compromised cosigner can still read the encryption key. Like the
 other 1.0 features (emergency recovery, the signed audit export, and the encryption-key rotation with
