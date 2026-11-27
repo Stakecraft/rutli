@@ -112,10 +112,10 @@ class ClientPod(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         calls = self.read("calls").splitlines()
         self.assertEqual(calls, [
-            "-n ns1 exec rutli-perf-client -- env RUST_LOG=off rutli-cosigner --config /tmp/e2e-operator.json "
-            "verify-key --key-id k1 --sign-test",
-            "-n ns1 exec rutli-perf-client -- env RUST_LOG=off rutli-cosigner --config /tmp/e2e-refresher.json "
-            "refresh --key-id k1",
+            ("-n ns1 exec rutli-perf-client -- env RUST_LOG=off rutli-cosigner --config /tmp/e2e-operator.json "
+             "verify-key --key-id k1 --sign-test"),
+            ("-n ns1 exec rutli-perf-client -- env RUST_LOG=off rutli-cosigner --config /tmp/e2e-refresher.json "
+             "refresh --key-id k1"),
         ])
 
     def test_nothing_of_the_environment_runs_in_the_load_generator_pod(self):
