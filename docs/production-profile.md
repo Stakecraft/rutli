@@ -122,6 +122,11 @@ It covers a stolen control-plane disk or an etcd backup. It does not cover someo
 to read Secrets through the API. The cosigner cannot check it from inside the cluster, so it is on
 the operator's list (issue #334).
 
+One more item of the same kind: **one cosigner cluster per key owner, unless all its participants
+belong to the same organisation.** The profile makes the API separation between participants firm
+(ACL entries and pins for every driver CN); it adds no boundary between them on disk or in memory
+([isolation-levels.md](isolation-levels.md)).
+
 ## Process hardening (every profile)
 
 At start, before it opens a key store, the cosigner daemon turns core dumps off: `RLIMIT_CORE = 0`

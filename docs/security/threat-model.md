@@ -58,6 +58,47 @@ separate clusters or cloud accounts administered by different people; nothing in
 substitute for that. It is a go-live gate, and what counts as separate (control plane, account,
 credentials, operator) is listed in [audit-prep.md](../audit-prep.md#what-counts-as-a-separate-trust-domain).
 
+### One cluster, one key owner
+
+A cosigner cluster separates the participants that use it at the API only. **A cluster serves the
+participants of one organisation; different key owners get different clusters.**
+
+What separates two participants on one cluster:
+
+- **The driver certificate.** Each participant's driver has its own CN on `signer_allowlist`, and
+  `signing_policy.signer_pins` ties the CN to one key.
+- **The key ACL.** `signing_policy.signer_acl` limits a CN to the key-id prefixes it lists. The
+  node that is called checks it, and for a sign, a DKG, a refresh and a hosted-key generation every
+  participating node checks it again against the client's signed intent. Hosted-key operations
+  without an intent (decrypt among them) are checked by the node that serves them.
+- **Limits and approval rules**, which match key ids by prefix.
+
+This holds under the production profile. Without `signer_acl_required` a CN that has no ACL entry
+can use every key on the cluster.
+
+What does not separate them:
+
+- **The sealing key.** Each node has one DEK, and it seals every key file on that node: the shares
+  and hosted keys of every participant. A v2 key file is bound to its key id, so one file cannot be
+  passed off as another, but the same DEK opens them all. With the legacy shared master, one secret
+  does that for every node.
+- **Disk, process and backups.** One key directory, one cosigner process with one cache of loaded
+  shares, one backup archive per node. A compromised cosigner, a memory snapshot, a node's volume or
+  a backup with its DEK covers every participant alike.
+- **Hosted keys.** Whole on every node, so one compromised node reads the hosted keys of every
+  participant on the cluster.
+- **Cluster-wide policy.** One approver list (`signing_policy.approvers`) for every approval rule
+  and for hosted-key deletes. The refresher role can refresh any key, and the refresher and
+  operator roles read the status of every key; neither has a per-key ACL. One CA issues every
+  client certificate.
+
+So the ACL answers "can participant A call participant B's key", and nothing else. Every adversary
+below that holds a node, a seal bundle, a backup or the CA holds it for all participants of the
+cluster. Participants of one organisation can share a cluster on these terms. Participants of
+different organisations cannot: give each owner its own cosigner cluster, with its own namespace,
+seal bundles and CA. The levels above that, and what each one stops, are in
+[../isolation-levels.md](../isolation-levels.md).
+
 ## Adversaries
 
 ### A compromised leader (any one node, as the node the driver happens to call)
@@ -639,6 +680,8 @@ schedule, so that it needs no operator step, is planned for 0.6.
 - Single trust domain under one Kubernetes administration (P10).
 - Hosted keys are whole keys on every node: one compromised node reads them all, and rotation
   protects future traffic only.
+- No boundary between participants of one cluster on disk or in memory: one cluster serves one
+  key owner ([One cluster, one key owner](#one-cluster-one-key-owner)).
 - A compromised cosigner can still plant over a key whose other holders the receiving node cannot
   reach, or be the second of two write-quorum holders without keeping a copy. Since 0.5.0 it can no
   longer create a hosted key nobody asked for (generation needs a client generate intent), unless
