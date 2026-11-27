@@ -129,6 +129,28 @@ fails, it loses the lead again, at the cost of one attempt. Each change of leade
 with the new leader order (`FROST: leader is now … ; leader order a > b > c`). The driver has no
 metrics endpoint: that line and the `failover=` notes in the audit log show the order.
 
+**A cosigner that restarted while another one led.** The driver keeps one channel per cosigner, and
+with a sticky leader nothing is sent over the other channels while the leader serves. A cosigner
+that restarts in that time leaves its channel without a connection, and where the cosigner came
+back under another address (a pod under a new IP) the channel still has the address it resolved
+when the connection closed. The first call over such a channel fails before the request is sent
+(`UNAVAILABLE`), and only then does the channel resolve the name again and reconnect. So when a
+call has failed at every cosigner, the driver can make one more attempt, at a cosigner its request
+was never sent to: it waits for one of their channels to connect, at most one attempt deadline and
+within `request-timeout`, and asks that cosigner once, with the usual attempt deadline. If no
+channel connects in that time, the call fails as it would have; if the cosigner answers, its
+answer is handled like any other (a refusal stands, an answer counts for the roster). This second
+pass never repeats a request at a cosigner that may have seen it. (A sign that a cosigner
+refuses for a stale cluster id is still repeated once from that cosigner, as before.) The lead
+moves by the usual rules only, so the call after such a one may pay one failed attempt at the old
+leader before the lead moves. The generation of a hosted key and calls on an EC hosted key have no
+second pass. In the audit log it is one more `failover=` note, to a cosigner named earlier in the
+same entry. A call that fails at every cosigner while the request to at least one of them could
+not be sent (a cosigner that is down, a TLS handshake that fails) therefore takes up to one
+attempt deadline longer to fail than before. The WARN line of each failed attempt names the exception under a transport
+failure (`UNAVAILABLE: io exception; cause: … Connection refused: <host>/<address>`) and says when
+the request was not sent.
+
 **Which cosigner leads a sign (`frost.sign-leader`).**
 
 | Value | Where each sign starts | Load for 2-of-3 |

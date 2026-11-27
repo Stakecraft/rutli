@@ -31,7 +31,21 @@ import com.stakecraft.rutli.grpc.{
 }
 import com.stakecraft.rutli.audit.AuditNotes
 import io.grpc.netty.shaded.io.grpc.netty.{GrpcSslContexts, NettyChannelBuilder}
-import io.grpc.{ManagedChannel, ManagedChannelBuilder, Status, StatusRuntimeException}
+import io.grpc.{
+  Attributes,
+  CallOptions,
+  Channel,
+  ClientCall,
+  ClientInterceptor,
+  ClientStreamTracer,
+  ConnectivityState,
+  ManagedChannel,
+  ManagedChannelBuilder,
+  Metadata,
+  MethodDescriptor,
+  Status,
+  StatusRuntimeException,
+}
 import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
 import org.bouncycastle.crypto.signers.Ed25519Signer
 import org.slf4j.Logger
@@ -41,7 +55,7 @@ import java.security.KeyFactory
 import java.security.interfaces.ECPublicKey
 import java.security.spec.X509EncodedKeySpec
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import scala.annotation.tailrec
 import scala.jdk.CollectionConverters._
 import scala.concurrent.duration._
@@ -96,7 +110,10 @@ import scala.util.control.NonFatal
   *     that endpoint's status. That is retryable: Canton never retries a final error, and the
   *     unreachable cosigner may hold the key.
   * Every hop is logged at WARN and recorded in the operation's own audit entry
-  * (`failover=<from>→<to> reason=<CODE>`, see [[withAuditNotes]]). The leader is sticky: the
+  * (`failover=<from>→<to> reason=<CODE>`, see [[withAuditNotes]]). A call that every endpoint
+  * failed asks once more the endpoints its request was never sent to, once one of them has a
+  * connection ([[withCheckedFailover]]): a channel that was not used while its cosigner restarted
+  * fails the first call over it, although the cosigner is up. The leader is sticky: the
   * endpoint that last served a request successfully leads the next one, so once a node is found
   * sick later calls do not each pay a failed attempt against it. For sign, success means a verified
   * signature, and every error takes the lead from the node (see [[signDemotes]] for the
@@ -570,6 +587,28 @@ class FrostBackend(
   private def stubFor(ch: ManagedChannel, deadline: FiniteDuration = attemptTimeout): SignerGrpc.SignerBlockingStub =
     SignerGrpc.newBlockingStub(ch).withDeadlineAfter(math.max(deadline.toMillis, 1L), TimeUnit.MILLISECONDS)
 
+  /** Whether the channel to endpoint `j` reports its state: a test's own channel may not, and then
+    * no call waits for it to connect. */
+  private def reportsState(j: Int): Boolean =
+    try { channels(j).getState(false); true }
+    catch { case _: UnsupportedOperationException => false }
+
+  /** The first of the endpoints `candidates` whose channel is connected, waiting for one until
+    * `until` (System.nanoTime) and never past it. Asking for the state makes an idle channel
+    * connect; a channel that is shut down is not waited for. */
+  @tailrec private def firstConnected(candidates: Vector[Int], until: Long): Option[Int] = {
+    val open = candidates.filter(j => channels(j).getState(true) != ConnectivityState.SHUTDOWN)
+    val ready = open.find(j => channels(j).getState(false) == ConnectivityState.READY)
+    // The time is read after the channels were looked at: nothing is accepted past the cutoff.
+    val remaining = until - System.nanoTime()
+    if (remaining <= 0L || open.isEmpty) None
+    else if (ready.isDefined) ready
+    else {
+      Thread.sleep(math.max(1L, math.min(ReconnectPoll.toMillis, remaining / 1000000L)))
+      firstConnected(open, until)
+    }
+  }
+
   /** The preferred leader: the index into `endpoints` of the cosigner that last served a request,
     * with a count of how often the lead has moved ([[Lead]]). */
   private val preferred = new Lead
@@ -718,7 +757,36 @@ class FrostBackend(
     * when every endpoint of the roster was asked and every one was held back. However else the
     * call ends — the request budget is spent, a failure is thrown at once, the last endpoint fails
     * over and some endpoint was not held back — they lose the lead after all, and it goes where it
-    * would be had each been demoted as it failed. */
+    * would be had each been demoted as it failed.
+    *
+    * '''The second pass.''' A channel is long-lived, and with a sticky leader nothing is sent over
+    * the other channels for as long as the leader serves. A cosigner that restarted meanwhile left
+    * its channel idle with the address resolved when the connection closed, or waiting out a
+    * reconnect backoff: the first call over it fails (UNAVAILABLE) before gRPC has a connection to
+    * send it over, and only then does the channel resolve the name again and reconnect. So when
+    * the last endpoint of the roster has failed over, the endpoints whose request was never sent
+    * ([[Sent]]) get one more attempt between them instead of the call ending: the walk waits, at
+    * most one attempt deadline and within the call's budget, for one of their channels to connect,
+    * and asks that endpoint. That is the whole second pass: one attempt at one endpoint. Nothing
+    * is repeated at a cosigner that may have seen the request, and no endpoint is asked a third
+    * time. With no connection in that time, or with too little of the budget left for the
+    * attempt, the call ends as it did after the first pass, with the same error; an answer to the
+    * attempt is handled like any other endpoint's.
+    *
+    * `secondPass = false` switches it off: for the walk a sign repeats after it learned the
+    * cluster id again, and for the generation of a hosted key, whose copy check counts the
+    * attempts of one pass. The walk after a relearn is the one exception to "no endpoint is asked
+    * a third time", and it is the caller's: it starts at the endpoint that refused the stale
+    * cluster id and asks every endpoint afresh, as it always has. When that refusal came in a
+    * second pass, the refusing endpoint is called a third time — its first request was never
+    * sent, its second was refused — and the relearn walk itself has no second pass on top.
+    *
+    * The lead in the second pass: the first pass ended as it always has (every endpoint that
+    * failed lost the lead as `demoteOn` and `lacksKey` say; a sign releases the endpoints it held
+    * back). A failure in the second pass costs the lead as in the first, and a sign holds nobody
+    * back there. An answer in the second pass moves the lead by the rules of the first and by no
+    * other: after a first pass in which every endpoint lost the lead, that leaves the lead where
+    * the first pass put it, and the next call pays one failed attempt there before it moves. */
   private def withCheckedFailover[A](
       what: String,
       retryOn: Status => Boolean,
@@ -735,6 +803,7 @@ class FrostBackend(
       wholeRoster: Option[Either[StatusRuntimeException, Rejected] => Option[Boolean]] = None,
       lacksKey: Either[StatusRuntimeException, Rejected] => Boolean = (_: Either[StatusRuntimeException, Rejected]) => false,
       holdOnlyIfAll: Boolean = false,
+      secondPass: Boolean = true,
   )(op: SignerGrpc.SignerBlockingStub => A): A = {
     val n = channels.size
     // The lead as this walk found it. A success makes its endpoint the preferred leader only if
@@ -750,23 +819,26 @@ class FrostBackend(
     // by what is left of the budget, and no attempt starts once less than MinAttempt is left.
     def left: Long = budgetEnd - System.nanoTime()
     // `seen`: what the endpoints asked so far in this call failed with (for `wholeRoster`).
-    @tailrec def attempt(k: Int, lastReason: String, seen: Seen): A = {
-      if (k > 0 && left < MinAttempt.toNanos) {
+    // `k` counts the attempts, `i` is the endpoint of this one; `again` marks the one attempt of
+    // the second pass.
+    @tailrec def attempt(k: Int, i: Int, lastReason: String, seen: Seen, again: Boolean): A = {
+      // Only in the first pass: the second starts its attempt only when the budget has room for it.
+      if (k > 0 && !again && left < MinAttempt.toNanos) {
         // The call ends before this endpoint was asked: the next call starts at it.
-        release(seen.lackedKeyAt, (from + k) % n)
-        logger.warn(s"FROST: $what: request-timeout $requestTimeout spent after $k cosigner(s); last: $lastReason")
+        release(seen.lackedKeyAt, i)
+        logger.warn(s"FROST: $what: request-timeout $requestTimeout spent after $k attempt(s); last: $lastReason")
         notes.add("request-timeout=spent")
         throw Status.DEADLINE_EXCEEDED
-          .withDescription(s"$what: request-timeout $requestTimeout spent after $k cosigner(s); last: $lastReason")
+          .withDescription(s"$what: request-timeout $requestTimeout spent after $k attempt(s); last: $lastReason")
           .asRuntimeException()
       }
-      val i = (from + k) % n
       tried(i)
       val deadline: FiniteDuration = FiniteDuration(math.min(attemptDeadline.toNanos, math.max(left, 0L)), NANOSECONDS)
       val leadBefore: Long = preferred.state
+      val sent = new Sent
       val outcome: Either[Either[StatusRuntimeException, Rejected], A] =
         try {
-          val answer = op(stubFor(channels(i), deadline))
+          val answer = op(stubFor(channels(i), deadline).withInterceptors(sent))
           check(endpoints(i), answer) match {
             case Some(rejected) => Left(Right(rejected))
             case None           => Right(answer)
@@ -800,8 +872,10 @@ class FrostBackend(
             case Left(e)  => e.getStatus.getCode.toString
             case Right(r) => r.code
           }
+          // gRPC had no connection to send the request over: the cosigner has not seen it.
+          val notSent: Boolean = failure.isLeft && !sent.onTransport
           val reason: String = failure match {
-            case Left(e)  => Option(e.getStatus.getDescription).fold(code)(d => s"$code: $d")
+            case Left(e)  => describe(e) + (if (notSent) "; the request was not sent" else "")
             case Right(r) => s"$code: ${r.error.getMessage}"
           }
           // Held back only where this call would have demoted: `lacksKey` delays a demotion, it
@@ -816,29 +890,59 @@ class FrostBackend(
               }
           }
           // Held back only while the walk goes on: a failure that ends the call costs the lead now.
-          val held: Boolean = deferred && retry
-          val seenNow: Seen =
+          // And only in the first pass of a sign: at its end the endpoints it held back were
+          // released, so one held back in the second pass could not keep the lead either.
+          val held: Boolean = deferred && retry && !(holdOnlyIfAll && again)
+          val heldNow: Seen =
             if (held) counted.copy(lackedKeyAt = hold(i, leadBefore, answeredAt) :: counted.lackedKeyAt) else counted
           // A failure that is thrown at once ends the call here: the lead goes to this endpoint,
           // which keeps it or passes it on in the next line.
           if (!retry) release(seen.lackedKeyAt, i)
           if (loseLead && !held) demote(i)
           if (!retry) throw error
-          if (k + 1 < n) {
-            val next = endpoints((i + 1) % n)
-            logger.warn(s"FROST: $what via ${endpoints(i)} failed ($reason); failing over to $next")
-            notes.add(s"failover=${endpoints(i)}→$next reason=$code")
-            attempt(k + 1, reason, seenNow)
+          // Asked again in a second pass only when the request was not sent, and only once. The
+          // channel is told to reconnect now rather than after its backoff, so that it has the time
+          // of the rest of the walk; that also makes it resolve the name again. A walk without a
+          // second pass leaves its channels alone, as before.
+          val askAgain: Boolean = secondPass && notSent && !again && reportsState(i)
+          if (askAgain) channels(i).resetConnectBackoff()
+          val seenNow: Seen = if (askAgain) heldNow.copy(unsent = heldNow.unsent :+ i) else heldNow
+          if (!again && k + 1 < n) {
+            val next = (i + 1) % n
+            logger.warn(s"FROST: $what via ${endpoints(i)} failed ($reason); failing over to ${endpoints(next)}")
+            notes.add(s"failover=${endpoints(i)}→${endpoints(next)} reason=$code")
+            attempt(k + 1, next, reason, seenNow, again = false)
           } else {
-            // Every endpoint was asked. Unless every one was held back, the lead has gone round
-            // the ring: it is back at the endpoint the call started at.
-            if (seenNow.lackedKeyAt.size < n) release(seenNow.lackedKeyAt, from)
-            logger.warn(s"FROST: $what via ${endpoints(i)} failed ($reason); no cosigner left to try")
-            throw (if (wholeRoster.isDefined) rosterVerdict(what, notes, seenNow, error) else error)
+            val oneMore: Option[Int] =
+              if (again) None
+              else {
+                // Every endpoint was asked. Unless every one was held back, the lead has gone round
+                // the ring: it is back at the endpoint the call started at.
+                if (seenNow.lackedKeyAt.size < n) release(seenNow.lackedKeyAt, from)
+                // An endpoint is asked again only if an attempt still fits in the budget once its
+                // channel is connected; otherwise the call ends here, with the error it has.
+                val waitEnd = System.nanoTime() + math.min(attemptDeadline.toNanos, math.max(left, 0L))
+                firstConnected(seenNow.unsent, math.min(waitEnd, budgetEnd - MinAttempt.toNanos))
+                  .filter(_ => left >= MinAttempt.toNanos)
+              }
+            oneMore match {
+              case Some(next) =>
+                logger.warn(
+                  s"FROST: $what via ${endpoints(i)} failed ($reason); asking ${endpoints(next)} again " +
+                    "(the first request to it was not sent, and its channel is connected now)"
+                )
+                notes.add(s"failover=${endpoints(i)}→${endpoints(next)} reason=$code")
+                // What a sign held back was released above: it is not released again.
+                val released: Seen = if (holdOnlyIfAll) seenNow.copy(lackedKeyAt = Nil) else seenNow
+                attempt(k + 1, next, reason, released, again = true)
+              case None =>
+                logger.warn(s"FROST: $what via ${endpoints(i)} failed ($reason); no cosigner left to try")
+                throw (if (wholeRoster.isDefined) rosterVerdict(what, notes, seenNow, error) else error)
+            }
           }
       }
     }
-    attempt(0, "", Seen())
+    attempt(0, from, "", Seen(), again = false)
   }
 
   /** How many endpoints must give a cosigner's own "I do not have it" before it is the cluster's
@@ -1748,6 +1852,8 @@ class FrostBackend(
         // it takes its time from the same budget (above).
         attemptTimeout,
         budgetEnd,
+        // The copy check above counts the attempts of one pass over the roster.
+        secondPass = false,
       )(stub => stub.generateKey(request(stub)))
       preferred.moveIfUnmoved(leadAtStart, start, lastTried.get)
       reply
@@ -1976,6 +2082,9 @@ class FrostBackend(
                   // as a whole leaves the lead where it would be without holding back.
                   (failure: Either[StatusRuntimeException, Rejected]) => !relearned && signLeaderCannotSignNow(failure),
                   holdOnlyIfAll = true,
+                  // The walk after the cluster id was learned again asks every endpoint afresh:
+                  // it asks none of them once more on top of that.
+                  secondPass = !relearned,
                 )(_.sign(built))
               catch {
                 // A cosigner says the intent names another cluster: the learned id is wrong (one
@@ -2668,6 +2777,43 @@ object FrostBackend {
 
   /** No attempt starts with less of the call's budget left than this: it could not succeed. */
   private val MinAttempt: FiniteDuration = 50.millis
+
+  /** How often a call that waits for a channel to connect looks at the channels' state. */
+  private val ReconnectPoll: FiniteDuration = 20.millis
+
+  /** Whether one attempt's request can have reached its cosigner. gRPC tells a call's stream tracer
+    * when it creates the stream on a connected transport; before that nothing of the call has left
+    * the process. A call that failed with no stream created (no connection, a refused or timed-out
+    * connect, a channel waiting out its reconnect backoff, a name that does not resolve) was
+    * therefore never sent, and repeating it at the same cosigner repeats nothing there. With a
+    * stream created the request may or may not have arrived, and it is treated as sent. */
+  private final class Sent extends ClientInterceptor {
+    private val created = new AtomicBoolean(false)
+    private val tracers = new ClientStreamTracer.Factory {
+      override def newClientStreamTracer(info: ClientStreamTracer.StreamInfo, headers: Metadata): ClientStreamTracer =
+        new ClientStreamTracer {
+          override def streamCreated(transport: Attributes, headers: Metadata): Unit = created.set(true)
+        }
+    }
+
+    /** Whether a stream of the attempt was created on a connected transport. */
+    def onTransport: Boolean = created.get
+
+    override def interceptCall[Q, R](method: MethodDescriptor[Q, R], options: CallOptions, next: Channel): ClientCall[Q, R] =
+      next.newCall(method, options.withStreamTracerFactory(tracers))
+  }
+
+  /** A failed call's status for the log, with the exception under it when there is one: gRPC
+    * describes a failed connection only as "io exception", and the cause says which it was
+    * (connection refused, no route to host, timed out) and at which address. */
+  private[backend] def describe(e: StatusRuntimeException): String = {
+    val status = e.getStatus
+    val text = Option(status.getDescription).fold(status.getCode.toString)(d => s"${status.getCode}: $d")
+    Option(status.getCause).fold(text) { cause =>
+      val message = Option(cause.getMessage).fold("")(m => s": $m")
+      s"$text; cause: ${cause.getClass.getSimpleName}$message"
+    }
+  }
   /** How much longer than its calls' deadline the hosted-key copy probe waits for them. */
   private val ProbeSlack: FiniteDuration = 200.millis
   /** `observed` for a [[withCheckedFailover]] call whose answer must not make its node the
@@ -2727,6 +2873,9 @@ object FrostBackend {
       other: Option[Exception] = None,
       // The endpoints whose demotion is held back (they said they lack the key), latest first.
       lackedKeyAt: List[Held] = Nil,
+      // The endpoints (indexes) whose request was not sent, in the order asked: one of them gets
+      // the attempt of the second pass.
+      unsent: Vector[Int] = Vector.empty,
   )
 
   /** An endpoint whose demotion is held back: its index, the lead as it was when the endpoint
