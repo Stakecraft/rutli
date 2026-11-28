@@ -97,6 +97,19 @@ fn scratch_path(stem: &str) -> PathBuf {
     scratch().join(format!("{stem}-{}", N.fetch_add(1, Ordering::Relaxed)))
 }
 
+/// `std::fs::copy`, started again when a signal interrupts it. libFuzzer runs a timer in the
+/// process (`-timeout`), and `std::fs::copy` hands an interrupted system call back as an error:
+/// a nightly run ended on `Interrupted system call` here, with an input that never reached a
+/// handler (#360). A copy that starts again truncates what the interrupted one wrote.
+fn copy_file(from: &Path, to: &Path) -> std::io::Result<u64> {
+    loop {
+        match std::fs::copy(from, to) {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            done => return done,
+        }
+    }
+}
+
 fn binding_v2() -> rutli_cosigner::seal::KeyFileBinding {
     rutli_cosigner::seal::KeyFileBinding {
         node: NODE,
@@ -724,7 +737,7 @@ pub fn grpc(data: &[u8]) -> bool {
         for entry in std::fs::read_dir(&from).expect("template node dir") {
             let path = entry.expect("template entry").path();
             if path.is_file() {
-                std::fs::copy(&path, to.join(path.file_name().expect("file name")))
+                copy_file(&path, &to.join(path.file_name().expect("file name")))
                     .expect("copy key file");
             }
         }
