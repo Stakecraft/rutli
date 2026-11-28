@@ -3121,9 +3121,11 @@ async fn a_sign_test_the_acl_refuses_spends_no_budget_and_leaves_no_marker() {
         })
         .await
         .unwrap_err();
-    assert_eq!(
-        malformed.code(),
-        tonic::Code::PermissionDenied,
+    // The text is matched too, so a later check that answers with the same code cannot pass for
+    // the ACL.
+    assert!(
+        malformed.code() == tonic::Code::PermissionDenied
+            && malformed.message().contains("signer_acl"),
         "{malformed:?}"
     );
     assert_eq!(markers(&c), before);

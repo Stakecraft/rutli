@@ -75,10 +75,14 @@ q_info scala.sbt "sbt exit $rc, sbt-scoverage $SCOVERAGE_VERSION"
 
 # A failed download is named before the compile heuristic reads the log: the metrics are empty
 # because sbt never got that far, not because the driver failed to compile.
+# Every failed download gets the same note, whether a module could not be resolved or an artifact
+# could not be fetched. When a com.daml artifact was not found in the local ivy repository, where
+# scripts/publish-canton-deps.sh puts the Canton artifacts, an extra line says so.
+download_failed() { grep -qE 'ResolveException|FetchError|Error (downloading|fetching artifacts)' "$W/sbt.log"; }
 why=""
 if [ "$rc" != 0 ] && rate_limited; then
   why="sbt could not download a dependency: a repository rate-limited the runner (HTTP 429)"
-elif [ "$rc" != 0 ] && grep -q 'ResolveException' "$W/sbt.log" && ! grep -q 'com\.daml' "$W/sbt.log"; then
+elif [ "$rc" != 0 ] && download_failed; then
   why="sbt could not download a dependency (see the sbt log)"
 elif ! grep -qiE 'compiling [0-9]+ Scala source' "$W/sbt.log" || grep -q 'Compilation failed' "$W/sbt.log"; then
   why="sbt could not compile the driver (Canton artifacts missing?)"
@@ -86,6 +90,9 @@ fi
 if [ -n "$why" ]; then
   tail -30 "$W/sbt.log" >&2
   for k in "${SBT_KEYS[@]}"; do q_null "$k" "$why"; done
+  if [ "$rc" != 0 ] && grep -qE 'not found: .*/com\.daml/' "$W/sbt.log"; then
+    q_log "sbt: a com.daml artifact was not found in the local ivy repository: Canton artifacts not published? (scripts/publish-canton-deps.sh)"
+  fi
   exit 0
 fi
 
