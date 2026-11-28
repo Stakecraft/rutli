@@ -158,6 +158,13 @@ Remove it (back to the default `5s`) after the last cosigner runs 0.5.0, at the 
 restart. Detail: [architecture.md](architecture.md), "Deadlines, keepalive and what Canton waits
 for".
 
+When the cosigner that leads restarts, the driver fails over to the other two. If those were
+restarted earlier in the roll, the first call over their channels fails before it is sent; the
+driver then waits for a channel to reconnect (at most one sign attempt timeout) and asks that
+cosigner again within the same call, so the sign can succeed a few seconds late instead of failing
+(0.5.0-rc.1 failed that one sign and left it to Canton's retry, which still covers the case where
+no channel reconnects in time).
+
 Then, per cosigner, wait for the gate before the next:
 
 1. Upgrade one node to 0.5.0. It checks that every roster entry has a pin and that its own key is in
