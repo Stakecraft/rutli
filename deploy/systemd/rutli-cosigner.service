@@ -1,0 +1,86 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# One Rütli cosigner on a plain Linux host (docs/bare-metal.md). One host runs one cosigner: two
+# shares on one machine are no better than one.
+#
+# Fixed layout, the same as the Ansible role in deploy/ansible/ installs:
+#   /usr/local/bin/rutli-cosigner            the binary (a link to /opt/rutli-cosigner/<version>/)
+#   /etc/rutli-cosigner/cosigner.json        this node's config (root:rutli 0640), no secret in it
+#   /etc/rutli-cosigner/ca.crt, cosigner.crt the cluster CA and this node's certificate
+#   /etc/rutli-cosigner/secrets/             root:root 0700; seal.json and tls.key, each 0400
+#   /var/lib/rutli-cosigner                  data_dir: the sealed key files and the journals
+#
+# The service user cannot read /etc/rutli-cosigner/secrets. systemd hands the two files to this
+# unit only (LoadCredential), in memory, under /run/credentials/rutli-cosigner.service/. The config
+# names those paths:
+#   "tls":        { "key": "/run/credentials/rutli-cosigner.service/tls.key", ... }
+#   "share_seal": { "secret_file": "/run/credentials/rutli-cosigner.service/seal.json" }
+# Needs systemd 250 or later (Debian 12 and 13).
+[Unit]
+Description=Rütli cosigner
+Documentation=https://github.com/Stakecraft/rutli/blob/main/docs/bare-metal.md
+Wants=network-online.target
+After=network-online.target
+# A node that refuses its config (the production profile) exits at once. Stop after five tries in
+# five minutes and leave the reason in the journal.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=rutli
+Group=rutli
+ExecStart=/usr/local/bin/rutli-cosigner --config /etc/rutli-cosigner/cosigner.json
+Environment=RUST_LOG=info
+Restart=on-failure
+RestartSec=5
+# The daemon finishes its open sessions on SIGTERM.
+TimeoutStopSec=30
+
+LoadCredential=seal.json:/etc/rutli-cosigner/secrets/seal.json
+LoadCredential=tls.key:/etc/rutli-cosigner/secrets/tls.key
+
+# data_dir. Created 0700 for the service user; never removed by systemd.
+StateDirectory=rutli-cosigner
+StateDirectoryMode=0700
+UMask=0077
+
+# /tmp in memory, private to the unit: ceremony commands write request and bundle files there.
+TemporaryFileSystem=/tmp:mode=1777,size=64M,nosuid,nodev,noexec /var/tmp:mode=1777,size=16M,nosuid,nodev,noexec
+# Nothing of this unit goes to swap: shares in memory, the credentials, /tmp.
+MemorySwapMax=0
+# The daemon also sets RLIMIT_CORE=0 and makes itself not dumpable at start.
+LimitCORE=0
+LimitNOFILE=65536
+
+# The whole file system is read-only except data_dir and the mounts above.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+KeyringMode=private
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

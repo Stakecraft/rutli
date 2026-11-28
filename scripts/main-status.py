@@ -28,6 +28,7 @@ WATCHED = [
     "Image build check",
     "Generated code",
     "Workflow lint",
+    "Host install files",
     "Release assets check",
     "Quality",
 ]

@@ -1,0 +1,89 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+---
+- name: Required variables are set
+  ansible.builtin.assert:
+    that:
+      - rutli_cosigner_version is defined and rutli_cosigner_version | string | length > 0
+      - rutli_cosigner_binary_src is defined
+      - rutli_cosigner_binary_sha256 is defined
+      - rutli_cosigner_binary_sha256 is match('^[0-9a-f]{64}$')
+      - rutli_cosigner_id is defined and rutli_cosigner_id | int >= 1
+      - rutli_cosigner_peers is defined and rutli_cosigner_peers | length >= rutli_cosigner_threshold | int
+      - rutli_cosigner_id | int in rutli_cosigner_peers | map(attribute='id') | map('int') | list
+      - rutli_cosigner_peers | map(attribute='id') | map('int') | unique | list | length == rutli_cosigner_peers | length
+      - rutli_cosigner_ca_cert_src is defined
+      - rutli_cosigner_cert_src is defined
+      - rutli_cosigner_profile in ['production', 'lab']
+      - rutli_cosigner_cluster_id == '' or rutli_cosigner_cluster_id is match('^[0-9a-f]{16}$')
+    fail_msg: >-
+      A required variable is missing or malformed. See roles/rutli_cosigner/defaults/main.yml
+      for the list and docs/bare-metal.md for an example.
+    quiet: true
+
+- name: Every peer endpoint is an https URL with a port
+  ansible.builtin.assert:
+    that:
+      - item.endpoint is match('^https://[^/:]+:[0-9]+$')
+    fail_msg: "peer {{ item.id }}: endpoint must look like https://<host>:<port>"
+    quiet: true
+  loop: "{{ rutli_cosigner_peers }}"
+  loop_control:
+    label: "{{ item.id }}"
+
+- name: The production profile takes no secret from the control machine
+  ansible.builtin.assert:
+    that:
+      - rutli_cosigner_lab_seal_bundle_src == ''
+      - rutli_cosigner_lab_tls_key_src == ''
+    fail_msg: >-
+      rutli_cosigner_lab_seal_bundle_src and rutli_cosigner_lab_tls_key_src are for
+      rutli_cosigner_profile=lab only. Under production a person places seal.json and tls.key in
+      /etc/rutli-cosigner/secrets on the host (docs/bare-metal.md, "Production").
+    quiet: true
+  when: rutli_cosigner_profile == 'production'
+
+- name: Debian, or an untested distribution on request
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Debian' or (rutli_cosigner_allow_untested_distribution | bool)
+    fail_msg: >-
+      Supported: Debian 12 and 13. This host is {{ ansible_facts['distribution'] }}. Other distributions
+      with systemd 250 or later should work and are not tested: set
+      rutli_cosigner_allow_untested_distribution=true to go on.
+    quiet: true
+
+- name: Read the systemd version
+  ansible.builtin.command:
+    cmd: systemctl --version
+  register: rutli_cosigner__systemd
+  changed_when: false
+  check_mode: false
+
+- name: The units need systemd 250 or later
+  ansible.builtin.assert:
+    that:
+      - (rutli_cosigner__systemd.stdout_lines[0].split()[1] | int) >= 250
+    fail_msg: "systemd 250 or later is needed, found: {{ rutli_cosigner__systemd.stdout_lines[0] }}"
+    quiet: true
+
+- name: Read the checksum of the binary on the control machine
+  ansible.builtin.stat:
+    path: "{{ rutli_cosigner_binary_src }}"
+    checksum_algorithm: sha256
+    get_checksum: true
+  delegate_to: localhost
+  become: false
+  register: rutli_cosigner__binary_local
+  check_mode: false
+
+- name: The binary on the control machine is the one named by rutli_cosigner_binary_sha256
+  ansible.builtin.assert:
+    that:
+      - rutli_cosigner__binary_local.stat.exists
+      - rutli_cosigner__binary_local.stat.checksum == rutli_cosigner_binary_sha256
+    fail_msg: >-
+      {{ rutli_cosigner_binary_src }} is missing or its sha256 is not
+      {{ rutli_cosigner_binary_sha256 }}. Take the value from the release's SHA256SUMS after
+      verifying its signature (docs/bare-metal.md, "Get the binary").
+    quiet: true

@@ -1,0 +1,73 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+---
+- name: Unit files
+  ansible.builtin.copy:
+    src: "{{ rutli_cosigner_systemd_src }}/{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - rutli-cosigner.service
+    - rutli-cosigner-backup.service
+    - rutli-cosigner-backup.timer
+    - rutli-cosigner-backup-check.service
+    - rutli-cosigner-backup-check.timer
+  register: rutli_cosigner__unit_files
+
+- name: Directory for the backup script
+  ansible.builtin.file:
+    path: /usr/local/libexec
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Backup script
+  ansible.builtin.copy:
+    src: "{{ rutli_cosigner_systemd_src }}/rutli-cosigner-backup"
+    dest: /usr/local/libexec/rutli-cosigner-backup
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Command wrapper
+  ansible.builtin.copy:
+    src: "{{ rutli_cosigner_systemd_src }}/rutli-cosigner-cli"
+    dest: /usr/local/sbin/rutli-cosigner-cli
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Backup settings
+  ansible.builtin.template:
+    src: backup.env.j2
+    dest: /etc/rutli-cosigner/backup.env
+    owner: root
+    group: rutli
+    mode: "0640"
+
+# Sealed key files only. Kept when the role is removed.
+- name: Local backup destination
+  ansible.builtin.file:
+    path: /var/backups/rutli-cosigner
+    state: directory
+    owner: rutli
+    group: rutli
+    mode: "0700"
+
+- name: Start the cosigner at boot
+  ansible.builtin.systemd_service:
+    name: rutli-cosigner.service
+    enabled: true
+    daemon_reload: true
+
+- name: Backup timers
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: "{{ rutli_cosigner_backup_enabled | bool }}"
+    state: "{{ rutli_cosigner_backup_enabled | bool | ternary('started', 'stopped') }}"
+  loop:
+    - rutli-cosigner-backup.timer
+    - rutli-cosigner-backup-check.timer

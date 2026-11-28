@@ -1,0 +1,43 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# The plain-host install files (deploy/systemd, deploy/ansible; docs/bare-metal.md): shellcheck,
+# yamllint, ansible-lint, the config the role renders, and `systemd-analyze verify` on every unit.
+# Nothing is installed on a real host and no cosigner is started. It runs on every pull request and
+# on every push to main (watched by main-status.yml).
+name: Host install files
+
+on:
+  push:
+    branches: [main]
+  # No path filter: a job that is skipped by one never reports. It takes about a minute, on a
+  # GitHub-hosted runner.
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-hosts-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: systemd units and Ansible role
+    # GitHub-hosted on purpose: the script installs placeholder files under /usr/local and adds a
+    # system user, which must not happen on a runner that is reused.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      # shellcheck and systemd-analyze ship with the runner image.
+      - name: ansible-lint and yamllint (pinned)
+        run: python -m pip install ansible-core==2.21.5 ansible-lint==26.10.1 yamllint==1.38.0
+      - name: Check deploy/systemd and deploy/ansible
+        run: scripts/ci-deploy-hosts.sh

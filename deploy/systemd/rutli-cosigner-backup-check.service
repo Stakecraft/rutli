@@ -1,0 +1,66 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# A backup only when the key files changed since the last good one (a refresh commit, a new or
+# deleted key). Started by rutli-cosigner-backup-check.timer every five minutes; signing never
+# changes the fingerprint, so most runs do nothing. See rutli-cosigner-backup.service.
+#
+# It runs as the cosigner's user, because the key files are readable by that user only, and it gets
+# less than the cosigner: no credential (no seal bundle, no TLS key), /run/credentials hidden, the
+# data directory read-only, no network. Nothing in the backup path can open a share.
+#
+# A failed run leaves the unit failed (`systemctl --failed`) and one BACKUP_FAILED line in the
+# journal; a good run logs BACKUP_OK. Alert on either.
+[Unit]
+Description=Rütli cosigner backup when the key files changed
+Documentation=https://github.com/Stakecraft/rutli/blob/main/docs/bare-metal.md
+
+[Service]
+Type=oneshot
+User=rutli
+Group=rutli
+EnvironmentFile=-/etc/rutli-cosigner/backup.env
+ExecStart=/usr/local/libexec/rutli-cosigner-backup --if-changed
+UMask=0077
+
+# The tar is built here, in memory (/run is a tmpfs), and removed after the run.
+RuntimeDirectory=rutli-cosigner-backup-check
+RuntimeDirectoryMode=0700
+# The fingerprint of the key files of the last good backup.
+StateDirectory=rutli-cosigner-backup
+StateDirectoryMode=0700
+# The local destination. With a ship hook (/etc/rutli-cosigner/backup-ship) nothing is written here.
+ReadWritePaths=/var/backups/rutli-cosigner
+
+InaccessiblePaths=-/run/credentials
+InaccessiblePaths=-/etc/rutli-cosigner/secrets
+# A ship hook that sends the tar off the host needs the network: set PrivateNetwork=no in a drop-in
+# and limit it there with IPAddressDeny=any / IPAddressAllow=<the one endpoint>.
+PrivateNetwork=yes
+MemorySwapMax=0
+LimitCORE=0
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM

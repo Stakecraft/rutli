@@ -1,0 +1,31 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+---
+# LAB example: three throwaway hosts, one control machine, certificates and seal bundles made on
+# that machine. Never for an authority key. The names are placeholders.
+#
+# The material in certs/ and seal/ comes from scripts/gen-frost-certs.sh and
+# `rutli-cosigner seal new-node` (docs/bare-metal.md, "Lab").
+all:
+  children:
+    rutli_cosigners:
+      vars:
+        rutli_cosigner_profile: lab
+        rutli_cosigner_version: "0.6.0"
+        rutli_cosigner_binary_src: "{{ playbook_dir }}/../files/rutli-cosigner-0.6.0-linux-x86_64"
+        rutli_cosigner_binary_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+        rutli_cosigner_ca_cert_src: "{{ playbook_dir }}/../files/certs/ca.crt"
+        rutli_cosigner_cert_src: "{{ playbook_dir }}/../files/certs/cosigner{{ rutli_cosigner_id }}.crt"
+        rutli_cosigner_lab_tls_key_src: "{{ playbook_dir }}/../files/certs/cosigner{{ rutli_cosigner_id }}.key"
+        rutli_cosigner_lab_seal_bundle_src: "{{ playbook_dir }}/../files/seal/node-{{ rutli_cosigner_id }}.json"
+        rutli_cosigner_operator_allowlist: [operator]
+        rutli_cosigner_peers:
+          - { id: 1, endpoint: "https://cosigner1.example.internal:9101" }
+          - { id: 2, endpoint: "https://cosigner2.example.internal:9101" }
+          - { id: 3, endpoint: "https://cosigner3.example.internal:9101" }
+        # No key pins in the lab. Production needs a tls_spki_sha256 for every peer.
+        rutli_cosigner_tls_require_peer_pins: false
+      hosts:
+        cosigner1.example.internal: { rutli_cosigner_id: 1 }
+        cosigner2.example.internal: { rutli_cosigner_id: 2 }
+        cosigner3.example.internal: { rutli_cosigner_id: 3 }

@@ -1,0 +1,61 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+---
+# Renders the role's config template with the two example inventories' variables and checks the
+# result, on the control machine, without touching any host:
+#
+#   ansible-playbook -i inventory/lab.example.yml tests/render.yml
+#   ansible-playbook -i inventory/production.example.yml tests/render.yml
+- name: Render the cosigner config for every host of the inventory
+  hosts: rutli_cosigners
+  connection: local
+  gather_facts: false
+  become: false
+  vars:
+    template: "{{ playbook_dir }}/../roles/rutli_cosigner/templates/cosigner.json.j2"
+  tasks:
+    - name: Load the role's defaults
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../roles/rutli_cosigner/defaults/main.yml"
+        name: role_defaults
+
+    - name: Render both configs
+      vars:
+        mine: "{{ hostvars[inventory_hostname] | dict2items | selectattr('key', 'match', '^rutli_cosigner_') | items2dict }}"
+      ansible.builtin.set_fact:
+        daemon: "{{ lookup('ansible.builtin.template', template, template_vars=role_defaults | combine(mine) | combine({'rutli_cosigner__unit': 'rutli-cosigner.service'})) | from_json }}"
+        cli: "{{ lookup('ansible.builtin.template', template, template_vars=role_defaults | combine(mine) | combine({'rutli_cosigner__unit': 'rutli-cosigner-cli.service'})) | from_json }}"
+
+    - name: Check what was rendered
+      ansible.builtin.assert:
+        that:
+          - daemon.identifier == rutli_cosigner_id
+          - daemon.identifier is integer and daemon.threshold is integer
+          - daemon.profile == rutli_cosigner_profile
+          - daemon.data_dir == '/var/lib/rutli-cosigner'
+          - daemon.peers | length == 3
+          - daemon.peers | map(attribute='identifier') | list == [1, 2, 3]
+          - daemon.peer_allowlist == ['cosigner1', 'cosigner2', 'cosigner3']
+          - "daemon.share_seal.secret_file == '/run/credentials/rutli-cosigner.service/seal.json'"
+          - "'secret_env' not in daemon.share_seal"
+          - daemon.tls.key == '/run/credentials/rutli-cosigner.service/tls.key'
+          - cli.tls.key == '/run/credentials/rutli-cosigner-cli.service/tls.key'
+          - cli.share_seal.secret_file == '/run/credentials/rutli-cosigner-cli.service/seal.json'
+          - "cli | combine({'tls': daemon.tls, 'share_seal': daemon.share_seal}) == daemon"
+          - (rutli_cosigner_profile == 'lab') == (daemon.tls.require_peer_pins is defined)
+          - (rutli_cosigner_profile == 'production') == (daemon.cluster_id is defined)
+          - (rutli_cosigner_profile == 'production') == (daemon.signing_policy is defined)
+        quiet: true
+
+    # -e rutli_cosigner_test_out=<dir> writes <dir>/<host>.json, to feed `rutli-cosigner check-config`.
+    - name: Write the rendered config
+      ansible.builtin.copy:
+        content: "{{ daemon | to_nice_json(indent=2) }}\n"
+        dest: "{{ rutli_cosigner_test_out }}/{{ inventory_hostname }}.json"
+        mode: "0600"
+      when: rutli_cosigner_test_out is defined
+
+    - name: Show one rendered config
+      ansible.builtin.debug:
+        var: daemon
+      run_once: true

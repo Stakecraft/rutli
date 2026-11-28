@@ -1,0 +1,43 @@
+{#- Copyright 2026 StakeCraft LLC. SPDX-License-Identifier: Apache-2.0
+    One node's config. No secret in here, only where the two secrets are: the credentials directory
+    of the unit that runs the binary (rutli_cosigner__unit). -#}
+{%- set cred = '/run/credentials/' ~ rutli_cosigner__unit -%}
+{%- set peers = [] -%}
+{%- set names = [] -%}
+{%- for p in rutli_cosigner_peers | sort(attribute='id') -%}
+  {%- set peer = {'identifier': p.id | int, 'endpoint': p.endpoint} -%}
+  {%- if p.dist_public_key | default('') -%}
+    {%- set _ = peer.update({'dist_public_key': p.dist_public_key | lower}) -%}
+  {%- endif -%}
+  {%- if p.tls_spki_sha256 | default([]) -%}
+    {%- set _ = peer.update({'tls_spki_sha256': p.tls_spki_sha256}) -%}
+  {%- endif -%}
+  {%- set _ = peers.append(peer) -%}
+  {%- set _ = names.append('cosigner' ~ (p.id | int)) -%}
+{%- endfor -%}
+{%- set cfg = {
+  'profile': rutli_cosigner_profile,
+  'identifier': rutli_cosigner_id | int,
+  'listen': rutli_cosigner_listen,
+  'threshold': rutli_cosigner_threshold | int,
+  'data_dir': '/var/lib/rutli-cosigner',
+  'peers': peers,
+  'tls': {
+    'ca_cert': '/etc/rutli-cosigner/ca.crt',
+    'cert': '/etc/rutli-cosigner/cosigner.crt',
+    'key': cred ~ '/tls.key'
+  },
+  'share_seal': {'secret_file': cred ~ '/seal.json'},
+  'signer_allowlist': rutli_cosigner_signer_allowlist,
+  'peer_allowlist': rutli_cosigner_peer_allowlist or names
+} -%}
+{%- if not (rutli_cosigner_tls_require_peer_pins | bool) -%}{%- set _ = cfg.tls.update({'require_peer_pins': false}) -%}{%- endif -%}
+{%- if rutli_cosigner_cluster_id -%}{%- set _ = cfg.update({'cluster_id': rutli_cosigner_cluster_id}) -%}{%- endif -%}
+{%- if rutli_cosigner_metrics_listen -%}{%- set _ = cfg.update({'metrics_listen': rutli_cosigner_metrics_listen}) -%}{%- endif -%}
+{%- if rutli_cosigner_operator_allowlist -%}{%- set _ = cfg.update({'operator_allowlist': rutli_cosigner_operator_allowlist}) -%}{%- endif -%}
+{%- if rutli_cosigner_refresh_allowlist -%}{%- set _ = cfg.update({'refresh_allowlist': rutli_cosigner_refresh_allowlist}) -%}{%- endif -%}
+{%- if rutli_cosigner_signing_policy -%}{%- set _ = cfg.update({'signing_policy': rutli_cosigner_signing_policy}) -%}{%- endif -%}
+{%- if rutli_cosigner_keyfile -%}{%- set _ = cfg.update({'keyfile': rutli_cosigner_keyfile}) -%}{%- endif -%}
+{%- if rutli_cosigner_peer_deadlines -%}{%- set _ = cfg.update({'peer_deadlines': rutli_cosigner_peer_deadlines}) -%}{%- endif -%}
+{%- if rutli_cosigner_hosted_keys -%}{%- set _ = cfg.update({'hosted_keys': rutli_cosigner_hosted_keys}) -%}{%- endif -%}
+{{ cfg | combine(rutli_cosigner_extra_config, recursive=true) | to_nice_json(indent=2) }}

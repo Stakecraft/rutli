@@ -1,0 +1,58 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+---
+# The new config is checked by the NEW binary before it replaces the old file: `check-config` exits
+# 0 with no required finding, 1 with required findings (a production node would refuse to start),
+# 2 when the file does not load. Production accepts 0 only; lab accepts 0 and 1.
+- name: Config of the daemon
+  ansible.builtin.template:
+    src: cosigner.json.j2
+    dest: /etc/rutli-cosigner/cosigner.json
+    owner: root
+    group: rutli
+    mode: "0640"
+    validate: >-
+      /bin/sh -c '"/opt/rutli-cosigner/{{ rutli_cosigner_version }}/rutli-cosigner" --config "$0" check-config;
+      rc=$?; [ "$rc" -eq 0 ] || [ "$rc" -eq {{ (rutli_cosigner_profile == "lab") | ternary(1, 0) }} ]' %s
+  vars:
+    rutli_cosigner__unit: rutli-cosigner.service
+  register: rutli_cosigner__config
+
+# The same config for commands run with rutli-cosigner-cli: only the credential paths differ.
+- name: Config of the command wrapper
+  ansible.builtin.template:
+    src: cosigner.json.j2
+    dest: /etc/rutli-cosigner/cli.json
+    owner: root
+    group: rutli
+    mode: "0640"
+  vars:
+    rutli_cosigner__unit: rutli-cosigner-cli.service
+
+- name: List the findings of check-config
+  ansible.builtin.command:
+    cmd: >-
+      /opt/rutli-cosigner/{{ rutli_cosigner_version }}/rutli-cosigner
+      --config /etc/rutli-cosigner/cosigner.json check-config
+  register: rutli_cosigner__check
+  changed_when: false
+  failed_when: rutli_cosigner__check.rc not in [0, 1]
+  when: not ansible_check_mode
+
+- name: Show the findings
+  ansible.builtin.debug:
+    msg: "{{ rutli_cosigner__check.stdout_lines | default([]) }}"
+  when:
+    - not ansible_check_mode
+    - rutli_cosigner__check.stdout | default('') | length > 0
+
+# Last, once the config is accepted: the running daemon keeps the old binary until it restarts.
+- name: Point /usr/local/bin/rutli-cosigner at this release
+  ansible.builtin.file:
+    src: "/opt/rutli-cosigner/{{ rutli_cosigner_version }}/rutli-cosigner"
+    dest: /usr/local/bin/rutli-cosigner
+    state: link
+    owner: root
+    group: root
+    force: true
+  register: rutli_cosigner__link

@@ -223,6 +223,7 @@ Before protecting a real key, run the witnessed **[key ceremony](docs/key-ceremo
 | [docs/hosted-keys.md](docs/hosted-keys.md) | Cluster-hosted keys (ECIES, RSA, AES): what they are, what they are not |
 | [docs/hosted-keys-design.md](docs/hosted-keys-design.md) | Why they are replicated and not threshold — the design record, with what did and did not ship |
 | [docs/production-profile.md](docs/production-profile.md) | The production profile, `check-config`, and every setting it requires |
+| [docs/bare-metal.md](docs/bare-metal.md) | Cosigners on plain Linux hosts: systemd units and an Ansible role (new in 0.6, lab first) |
 | [docs/upgrading-to-0.5.md](docs/upgrading-to-0.5.md) | What an operator does to move a 0.4.x cluster to 0.5.0, in order |
 | [docs/security/threat-model.md](docs/security/threat-model.md) | What each adversary can and cannot do, and which setting each claim rests on |
 | [docs/isolation-levels.md](docs/isolation-levels.md) | One cluster serves one key owner: what separates participants, and the isolation levels for several owners |

@@ -1,0 +1,92 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+---
+# One cosigner on one host (docs/bare-metal.md). The paths on the host are fixed, the same as in
+# deploy/systemd/: /etc/rutli-cosigner, /var/lib/rutli-cosigner, /usr/local/bin/rutli-cosigner.
+
+# --- required, no default ---------------------------------------------------------------------
+# rutli_cosigner_version:        "0.6.0"   the release of the binary
+# rutli_cosigner_binary_src:     path ON THE CONTROL MACHINE of the rutli-cosigner binary for the
+#                                host's architecture, downloaded and verified by you
+# rutli_cosigner_binary_sha256:  its sha256 from the release's SHA256SUMS (64 hex)
+# rutli_cosigner_id:             this node's identifier (1..n)
+# rutli_cosigner_peers:          the whole roster, this node included, the same on every node:
+#                                  - id: 1
+#                                    endpoint: "https://cosigner1.example.internal:9101"
+#                                    tls_spki_sha256: ["<sha256 of node 1's TLS public key>"]
+#                                    dist_public_key: "<64 hex>"   # only with hosted keys
+# rutli_cosigner_ca_cert_src:    path on the control machine of ca.crt (public)
+# rutli_cosigner_cert_src:       path on the control machine of this node's certificate (public)
+
+# production: the cosigner refuses to start while an enforcement setting is not at its production
+# value (docs/production-profile.md), and this role refuses to install such a config.
+# lab: findings are printed, nothing is refused. Never for an authority key.
+rutli_cosigner_profile: production
+
+rutli_cosigner_threshold: 2
+rutli_cosigner_listen: "0.0.0.0:9101"
+# Empty = no metrics listener. Set the address Prometheus reaches and let the firewall admit only it.
+rutli_cosigner_metrics_listen: "127.0.0.1:9200"
+
+# Exactly 16 lowercase hex characters, the same on every node, never changed afterwards
+# (docs/ca-rotation.md). Empty = derived from ca.crt; the production profile requires it set.
+rutli_cosigner_cluster_id: ""
+
+# false writes tls.require_peer_pins=false: a peer is then accepted under its name and the cluster CA
+# whatever its key. The production profile refuses it; give every peer its tls_spki_sha256 instead.
+rutli_cosigner_tls_require_peer_pins: true
+
+rutli_cosigner_signer_allowlist: [driver]
+# Empty = cosigner<id> for every entry of rutli_cosigner_peers.
+rutli_cosigner_peer_allowlist: []
+rutli_cosigner_operator_allowlist: []
+rutli_cosigner_refresh_allowlist: []
+
+# Written into the config verbatim under the key of the same name, in the config's own snake_case
+# (docs/approval-quorum.md, docs/hosted-keys.md, docs/production-profile.md). Empty = left out.
+rutli_cosigner_signing_policy: {}
+rutli_cosigner_keyfile: {}
+rutli_cosigner_peer_deadlines: {}
+rutli_cosigner_hosted_keys: {}
+# Any other config key, merged last (recursively: {tls: {allow_expired_ca: true}} adds one key).
+rutli_cosigner_extra_config: {}
+
+# Supported hosts are Debian 12 and 13. true lets the role run on another distribution with systemd
+# 250 or later; that should work and is not tested.
+rutli_cosigner_allow_untested_distribution: false
+
+# --- secrets ----------------------------------------------------------------------------------
+# The seal bundle and the TLS private key live on the host in /etc/rutli-cosigner/secrets
+# (root:root 0700), as seal.json and tls.key (root:root 0400). Under the production profile a
+# person puts them there; this role only checks that they exist and who can read them. It never
+# reads, copies or creates them.
+#
+# LAB ONLY: paths on the control machine to copy from. The role refuses them under `production`:
+# a control machine that holds every node's seal bundle is one machine above the threshold.
+rutli_cosigner_lab_seal_bundle_src: ""
+rutli_cosigner_lab_tls_key_src: ""
+
+# --- running ----------------------------------------------------------------------------------
+# Start the daemon if it is not running. Set false while a node is stopped on purpose (an offline
+# command, a restore).
+rutli_cosigner_start: true
+# Restart a RUNNING daemon so it picks up a new binary or config. Off by default: an install run
+# over three hosts must not restart three cosigners at once. playbooks/upgrade.yml sets it and
+# takes one host at a time.
+rutli_cosigner_restart: false
+# Before a restart the role checks that every other cosigner's gRPC port answers, and refuses
+# otherwise: with one node already down, a second restart leaves no quorum. true = restart anyway
+# (the upgrade is the repair of this one node).
+rutli_cosigner_allow_degraded: false
+# How long to wait for `rutli-cosigner health` after a start.
+rutli_cosigner_health_timeout_seconds: 300
+# Wait after a restarted node is healthy before the play moves on. `health` proves the key store
+# and the port, not that the peer connections are back.
+rutli_cosigner_settle_seconds: 120
+
+# --- backups ----------------------------------------------------------------------------------
+rutli_cosigner_backup_enabled: true
+rutli_cosigner_backup_keep: 14
+rutli_cosigner_backup_retention: true
+rutli_cosigner_backup_min_proof_age_days: 7
+rutli_cosigner_backup_keep_older_epochs: 0

@@ -1,0 +1,27 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+---
+# Roll a new binary or config onto the cosigners ONE HOST AT A TIME. Never restart all three at
+# once: with threshold 2 of 3 nothing can sign until two are back.
+#
+# For each host: install the new files, check that every other cosigner's port answers, restart,
+# wait for `rutli-cosigner health`, wait rutli_cosigner_settle_seconds, then the next host. The
+# first failure stops the whole run with the remaining hosts untouched.
+#
+#   ansible-playbook -i inventory/<yours>.yml playbooks/upgrade.yml
+#
+# This needs one control machine that reaches every host, which suits a lab. In production run it
+# per host instead (docs/bare-metal.md, "Upgrade"):
+#
+#   ansible-playbook -i <this host's inventory> playbooks/upgrade.yml --limit cosigner1
+- name: Upgrade the Rütli cosigners one at a time
+  hosts: rutli_cosigners
+  become: true
+  gather_facts: true
+  serial: 1
+  any_errors_fatal: true
+  max_fail_percentage: 0
+  roles:
+    - role: rutli_cosigner
+      vars:
+        rutli_cosigner_restart: true

@@ -1,0 +1,14 @@
+# Copyright 2026 StakeCraft LLC
+# SPDX-License-Identifier: Apache-2.0
+---
+galaxy_info:
+  role_name: rutli_cosigner
+  namespace: stakecraft
+  author: StakeCraft
+  description: One Rütli cosigner on a plain Linux host, as a hardened systemd service
+  license: Apache-2.0
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Debian
+      versions: [bookworm, trixie]
+dependencies: []
