@@ -2,8 +2,8 @@
 # Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 #
-# The release assets that are not the container image: the driver jar and the dealer binary, with an
-# SBOM for each, a SHA256SUMS file, and a cosign signature (a bundle) for every file. The release
+# The release assets that are not the container image: the driver jar, the dealer binary and the
+# cosigner binary, with an SBOM for the jar and one for the Rust workspace, a SHA256SUMS file, and a cosign signature (a bundle) for every file. The release
 # workflow (.github/workflows/release-assets.yml) and its dry run (release-assets-check.yml) run the same
 # commands, so a step that would fail on a tag fails on a pull request first.
 #
@@ -11,6 +11,8 @@
 #   scripts/release-assets.sh version-check [TAG]    build.sbt and frost/Cargo.toml agree (and with TAG)
 #   scripts/release-assets.sh build-jar OUT          sbt driver/assembly -> OUT/rutli-driver-<version>.jar
 #   scripts/release-assets.sh build-dealer OUT       cargo build --release -> OUT/rutli-dealer-<version>-<os>-<arch>
+#   scripts/release-assets.sh build-cosigner OUT     cargo build --release -> OUT/rutli-cosigner-<version>-<os>-<arch>
+#   scripts/release-assets.sh glibc-floor FILE [MAX] the newest glibc symbol version FILE needs; fails if above MAX
 #   scripts/release-assets.sh licenses OUT           LICENSE and THIRD-PARTY-LICENSES-rust.txt next to the binary
 #   scripts/release-assets.sh sbom OUT               SPDX SBOMs: rutli-driver-<version>.spdx.json, rutli-dealer-<version>.spdx.json
 #   scripts/release-assets.sh gather SRC OUT         copy each build artifact (SRC/asset-<kind>/) into OUT, one expected file from each
@@ -124,6 +126,36 @@ cmd_build_dealer() {
   ls -l "$1/rutli-dealer-${v}-${os}-${arch}"
 }
 
+# The cosigner daemon as a file, for hosts without a container runtime. The same
+# crate and lock file as the dealer, so the workspace SBOM (rutli-dealer-<version>.spdx.json, made
+# from frost/Cargo.lock) covers it.
+cmd_build_cosigner() {
+  need_out "${1:-}"
+  local v os arch
+  v="$(version)"
+  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  arch="$(uname -m)"
+  (cd "$REPO/frost" && cargo build --release --locked -p rutli-cosigner --bin rutli-cosigner)
+  cp "$REPO/frost/target/release/rutli-cosigner" "$1/rutli-cosigner-${v}-${os}-${arch}"
+  ls -l "$1/rutli-cosigner-${v}-${os}-${arch}"
+}
+
+# The newest glibc symbol version a binary asks for, which is the oldest glibc it starts on. With
+# MAX (for example 2.35) a newer requirement is an error: the release builds the cosigner on an older
+# distribution on purpose, and a build that silently needs a newer glibc would not start on the
+# distributions docs/releasing.md names.
+cmd_glibc_floor() {
+  [ -f "${1:-}" ] || die "usage: $0 glibc-floor FILE [MAX]"
+  local need
+  need="$(objdump -T "$1" | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/^GLIBC_//' | sort -V | tail -n 1)"
+  [ -n "$need" ] || die "glibc-floor: no GLIBC symbol versions in $1 (not a dynamically linked glibc binary?)"
+  echo "$(basename "$1") needs glibc ${need} or newer"
+  if [ -n "${2:-}" ]; then
+    [ "$(printf '%s\n%s\n' "$need" "$2" | sort -V | tail -n 1)" = "$2" ] \
+      || die "$(basename "$1") needs glibc ${need}, above the limit ${2}"
+  fi
+}
+
 cmd_licenses() {
   need_out "${1:-}"
   cp "$REPO/LICENSE" "$1/LICENSE"
@@ -138,8 +170,9 @@ cmd_sbom() {
   [ -f "$jar" ] || die "no $jar: run build-jar first"
   # The jar: syft reads the Maven metadata inside the assembled archive.
   syft scan "file:${jar}" -o "spdx-json=$1/rutli-driver-${v}.spdx.json" -q
-  # The dealer: the crates of frost/Cargo.lock (the whole workspace, dev dependencies included; the
-  # binary is one for every platform and the lock file is the same). A copy of the lock file alone, so
+  # The dealer and the cosigner: the crates of frost/Cargo.lock (the whole workspace, dev
+  # dependencies included; both binaries come from it, on every platform, and the lock file is the
+  # same). One SBOM for both, under the dealer's name since 0.5.0. A copy of the lock file alone, so
   # a build directory next to it cannot change the result.
   dealers="$(find "$1" -maxdepth 1 -name "rutli-dealer-${v}-*" ! -name '*.json' ! -name '*.spdx.json' | wc -l | tr -d ' ')"
   [ "$dealers" -ge 1 ] || die "no dealer binary in $1: run build-dealer first"
@@ -171,12 +204,13 @@ check_sboms() { # OUT
 
 # The files the release consists of, nothing else: the build jobs' artifacts are trusted by the job
 # that signs them, so an unexpected or missing file stops the run before anything is hashed or signed.
-# RELEASE_DEALER_ARCHS: the dealer builds to expect (default both; the dry run builds on one machine).
+# RELEASE_ARCHS: the dealer and cosigner builds to expect (default both architectures; the dry run
+# builds on one machine).
 expected_files() { # STAGE
   local v a
   v="$(version)"
   local built=("rutli-driver-${v}.jar")
-  for a in ${RELEASE_DEALER_ARCHS:-x86_64 aarch64}; do built+=("rutli-dealer-${v}-linux-${a}"); done
+  for a in ${RELEASE_ARCHS:-x86_64 aarch64}; do built+=("rutli-dealer-${v}-linux-${a}" "rutli-cosigner-${v}-linux-${a}"); done
   local extra=(LICENSE THIRD-PARTY-LICENSES-rust.txt "rutli-driver-${v}.spdx.json" "rutli-dealer-${v}.spdx.json" SHA256SUMS)
   case "$1" in
     built) printf '%s\n' "${built[@]}" ;;
@@ -205,18 +239,19 @@ cmd_check_set() {
 }
 
 # Each build artifact is read from its own directory and may hold exactly the one file that build job
-# makes: the jar job cannot supply a dealer, a dealer job cannot supply the other architecture or the
-# jar. Nothing is merged before this check.
+# makes: the jar job cannot supply a dealer, a dealer job cannot supply a cosigner, the other
+# architecture or the jar. Nothing is merged before this check.
 cmd_gather() {
   [ -d "${1:-}" ] || die "usage: $0 gather SRC OUT"
   need_out "${2:-}"
   local v kind want n a kinds=(jar)
   v="$(version)"
-  for a in ${RELEASE_DEALER_ARCHS:-x86_64 aarch64}; do kinds+=("dealer-${a}"); done
+  for a in ${RELEASE_ARCHS:-x86_64 aarch64}; do kinds+=("dealer-${a}" "cosigner-${a}"); done
   for kind in "${kinds[@]}"; do
     case "$kind" in
       jar) want="rutli-driver-${v}.jar" ;;
       dealer-*) want="rutli-dealer-${v}-linux-${kind#dealer-}" ;;
+      cosigner-*) want="rutli-cosigner-${v}-linux-${kind#cosigner-}" ;;
     esac
     [ -d "$1/asset-${kind}" ] || die "no build artifact asset-${kind} in $1"
     n="$(find "$1/asset-${kind}" -mindepth 1 | wc -l | tr -d ' ')"
@@ -244,13 +279,14 @@ cmd_gather_sbom() {
   echo "OK: the two SBOMs"
 }
 
-# KIND names a file of the release: jar, dealer-<arch>, sbom-driver, sbom-dealer.
+# KIND names a file of the release: jar, dealer-<arch>, cosigner-<arch>, sbom-driver, sbom-dealer.
 kind_file() { # KIND
   local v
   v="$(version)"
   case "$1" in
     jar) echo "rutli-driver-${v}.jar" ;;
     dealer-x86_64 | dealer-aarch64) echo "rutli-dealer-${v}-linux-${1#dealer-}" ;;
+    cosigner-x86_64 | cosigner-aarch64) echo "rutli-cosigner-${v}-linux-${1#cosigner-}" ;;
     sbom-driver) echo "rutli-driver-${v}.spdx.json" ;;
     sbom-dealer) echo "rutli-dealer-${v}.spdx.json" ;;
     *) die "unknown kind '$1'" ;;
@@ -381,13 +417,15 @@ cmd_verify() {
 
 main() {
   local c="${1:-}"
-  [ -n "$c" ] || die "usage: $0 install-tools|version-check|build-jar|build-dealer|licenses|sbom|gather|gather-sbom|digest|check-digests|check-set|check-sboms|manifest-digest|check-manifest|release-state|sums|sign|verify [args]"
+  [ -n "$c" ] || die "usage: $0 install-tools|version-check|build-jar|build-dealer|build-cosigner|glibc-floor|licenses|sbom|gather|gather-sbom|digest|check-digests|check-set|check-sboms|manifest-digest|check-manifest|release-state|sums|sign|verify [args]"
   shift
   case "$c" in
     install-tools) cmd_install_tools "$@" ;;
     version-check) cmd_version_check "$@" ;;
     build-jar) cmd_build_jar "$@" ;;
     build-dealer) cmd_build_dealer "$@" ;;
+    build-cosigner) cmd_build_cosigner "$@" ;;
+    glibc-floor) cmd_glibc_floor "$@" ;;
     licenses) cmd_licenses "$@" ;;
     sbom) cmd_sbom "$@" ;;
     gather) cmd_gather "$@" ;;

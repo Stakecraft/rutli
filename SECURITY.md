@@ -150,7 +150,8 @@ gh attestation verify "oci://$IMAGE" --repo Stakecraft/rutli --bundle-from-oci \
   --source-ref "refs/tags/$TAG" --deny-self-hosted-runners
 ```
 
-The driver jar and the dealer binary are signed and attested the same way (their own workflow,
+The driver jar, the dealer binary and, from 0.6.0, the cosigner binary are signed and attested the
+same way (their own workflow,
 `release-assets.yml`); how to verify them: [docs/releasing.md](docs/releasing.md#verify-the-release-assets).
 
 The release workflow runs these exact commands as its last step. The first two must succeed; the

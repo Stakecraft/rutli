@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 name: Release assets
 
-# The driver jar and the dealer binary of a release, built from the tag on GitHub-hosted runners,
+# The driver jar, the dealer binary and the cosigner binary of a release, built from the tag on
+# GitHub-hosted runners,
 # each with an SPDX SBOM, a SHA256SUMS file, a keyless cosign signature (a Sigstore bundle per file)
 # and a GitHub build provenance attestation; everything is attached to the release for the tag.
 #   guard   refuses any ref that is not a v* tag (and carries the `release` environment)
 #   precheck stops a run for a release that already carries SHA256SUMS (before anything is signed)
-#   build-* the jar (sbt driver/assembly) and the dealer for linux-x86_64 and linux-aarch64, three
-#           jobs; each states the sha256 of its file as a job output
+#   build-* the jar (sbt driver/assembly), and the dealer and the cosigner for linux-x86_64 and
+#           linux-aarch64: five jobs; each states the sha256 of its file as a job output
 #   sbom    the two SBOMs, from the built files, in a job without a signing identity or write access;
 #           checks the build digests, states the SBOM digests
 # Every job that reads another job's file compares it with the digest in that job's outputs: the jobs
@@ -230,11 +231,117 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  build-cosigner-x86_64:
+    name: Build cosigner linux-x86_64
+    needs: [guard, precheck]
+    # An older distribution than the dealer's, on purpose: the binary then starts on glibc 2.35
+    # and newer (Debian 12 and 13). The step after the build checks it.
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.digest.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The tag and the versions in the tree agree
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
+          scripts/release-assets.sh version-check "$TAG"
+
+      # The Rust version of frost/rust-toolchain.toml, no build cache. Keep the two cosigner jobs
+      # identical apart from the runner and the names.
+      - name: Rust version (frost/rust-toolchain.toml)
+        id: rust
+        run: |
+          set -euo pipefail
+          v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
+          [ -n "$v" ] || { echo "::error::no channel in frost/rust-toolchain.toml"; exit 1; }
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
+      - name: Build the cosigner
+        run: scripts/release-assets.sh build-cosigner out
+
+      - name: The binary needs no glibc newer than 2.35
+        run: scripts/release-assets.sh glibc-floor out/rutli-cosigner-*-linux-* 2.35
+
+      # The digest of the file this job made, as a job output: the jobs that use the file compare
+      # against it (an artifact could be replaced by another job of the run; this output cannot).
+      - name: Digest
+        id: digest
+        run: scripts/release-assets.sh digest out cosigner-x86_64 >>"$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: asset-cosigner-x86_64
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
+
+  build-cosigner-aarch64:
+    name: Build cosigner linux-aarch64
+    needs: [guard, precheck]
+    # An older distribution than the dealer's, on purpose: the binary then starts on glibc 2.35
+    # and newer (Debian 12 and 13). The step after the build checks it.
+    runs-on: ubuntu-22.04-arm
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.digest.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The tag and the versions in the tree agree
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::bad tag '${TAG}'"; exit 1; }
+          scripts/release-assets.sh version-check "$TAG"
+
+      # The Rust version of frost/rust-toolchain.toml, no build cache. Keep the two cosigner jobs
+      # identical apart from the runner and the names.
+      - name: Rust version (frost/rust-toolchain.toml)
+        id: rust
+        run: |
+          set -euo pipefail
+          v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
+          [ -n "$v" ] || { echo "::error::no channel in frost/rust-toolchain.toml"; exit 1; }
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
+      - name: Build the cosigner
+        run: scripts/release-assets.sh build-cosigner out
+
+      - name: The binary needs no glibc newer than 2.35
+        run: scripts/release-assets.sh glibc-floor out/rutli-cosigner-*-linux-* 2.35
+
+      # The digest of the file this job made, as a job output: the jobs that use the file compare
+      # against it (an artifact could be replaced by another job of the run; this output cannot).
+      - name: Digest
+        id: digest
+        run: scripts/release-assets.sh digest out cosigner-aarch64 >>"$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: asset-cosigner-aarch64
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
+
   # Only this job reads the built files with a parser tool (syft). It has no signing identity and no
   # write access, so a flaw in that tool cannot be turned into a signature or a release upload.
   sbom:
     name: SBOMs
-    needs: [build-jar, build-dealer-x86_64, build-dealer-aarch64]
+    needs: [build-jar, build-dealer-x86_64, build-dealer-aarch64, build-cosigner-x86_64, build-cosigner-aarch64]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -263,13 +370,16 @@ jobs:
           JAR_SHA256: ${{ needs.build-jar.outputs.sha256 }}
           DEALER_X86_64_SHA256: ${{ needs.build-dealer-x86_64.outputs.sha256 }}
           DEALER_AARCH64_SHA256: ${{ needs.build-dealer-aarch64.outputs.sha256 }}
+          COSIGNER_X86_64_SHA256: ${{ needs.build-cosigner-x86_64.outputs.sha256 }}
+          COSIGNER_AARCH64_SHA256: ${{ needs.build-cosigner-aarch64.outputs.sha256 }}
         run: |
           set -euo pipefail
           scripts/release-assets.sh version-check "$TAG"
           scripts/release-assets.sh gather built out
           scripts/release-assets.sh check-set out built
           scripts/release-assets.sh check-digests out \
-            jar="$JAR_SHA256" dealer-x86_64="$DEALER_X86_64_SHA256" dealer-aarch64="$DEALER_AARCH64_SHA256"
+            jar="$JAR_SHA256" dealer-x86_64="$DEALER_X86_64_SHA256" dealer-aarch64="$DEALER_AARCH64_SHA256" \
+            cosigner-x86_64="$COSIGNER_X86_64_SHA256" cosigner-aarch64="$COSIGNER_AARCH64_SHA256"
           scripts/release-assets.sh sbom out
 
       - name: Digests of the SBOMs
@@ -288,7 +398,7 @@ jobs:
 
   sign:
     name: Signatures and provenance
-    needs: [build-jar, build-dealer-x86_64, build-dealer-aarch64, sbom]
+    needs: [build-jar, build-dealer-x86_64, build-dealer-aarch64, build-cosigner-x86_64, build-cosigner-aarch64, sbom]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -310,7 +420,7 @@ jobs:
           pattern: asset-*
           path: built
 
-      # The build jobs are trusted only to produce these three files, each from its own job:
+      # The build jobs are trusted only to produce these five files, each from its own job:
       # anything else, a missing file, or a file from the wrong job stops the run before it is
       # hashed or signed. (A compromised build still gets its own bytes signed: the signature and
       # the provenance say what this workflow released, not that the bytes derive from the source.)
@@ -331,6 +441,8 @@ jobs:
           JAR_SHA256: ${{ needs.build-jar.outputs.sha256 }}
           DEALER_X86_64_SHA256: ${{ needs.build-dealer-x86_64.outputs.sha256 }}
           DEALER_AARCH64_SHA256: ${{ needs.build-dealer-aarch64.outputs.sha256 }}
+          COSIGNER_X86_64_SHA256: ${{ needs.build-cosigner-x86_64.outputs.sha256 }}
+          COSIGNER_AARCH64_SHA256: ${{ needs.build-cosigner-aarch64.outputs.sha256 }}
           SBOM_DRIVER_SHA256: ${{ needs.sbom.outputs.driver_sha256 }}
           SBOM_DEALER_SHA256: ${{ needs.sbom.outputs.dealer_sha256 }}
         run: |
@@ -341,6 +453,7 @@ jobs:
           # outputs, which no other job can change.
           scripts/release-assets.sh check-digests out \
             jar="$JAR_SHA256" dealer-x86_64="$DEALER_X86_64_SHA256" dealer-aarch64="$DEALER_AARCH64_SHA256" \
+            cosigner-x86_64="$COSIGNER_X86_64_SHA256" cosigner-aarch64="$COSIGNER_AARCH64_SHA256" \
             sbom-driver="$SBOM_DRIVER_SHA256" sbom-dealer="$SBOM_DEALER_SHA256"
           scripts/release-assets.sh check-sboms out
           scripts/release-assets.sh sums out
@@ -371,7 +484,8 @@ jobs:
         run: |
           set -euo pipefail
           scripts/release-assets.sh verify out
-          for f in out/rutli-driver-*.jar out/rutli-dealer-*-linux-x86_64 out/rutli-dealer-*-linux-aarch64; do
+          for f in out/rutli-driver-*.jar out/rutli-dealer-*-linux-x86_64 out/rutli-dealer-*-linux-aarch64 \
+            out/rutli-cosigner-*-linux-x86_64 out/rutli-cosigner-*-linux-aarch64; do
             gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-assets.yml" \
               --source-ref "$GITHUB_REF" --deny-self-hosted-runners
@@ -445,7 +559,7 @@ jobs:
           gh release upload "$TAG" out/SHA256SUMS out/SHA256SUMS.sigstore.json --clobber
           # Only files of this workflow's own kind are removed; anything else on the release (notes,
           # reports, a binary for another platform) stays.
-          ours='^(rutli-driver-[0-9A-Za-z.-]+\.(jar|spdx\.json)|rutli-dealer-[0-9A-Za-z.-]+(-linux-(x86_64|aarch64)|\.spdx\.json)|SHA256SUMS|LICENSE|THIRD-PARTY-LICENSES-rust\.txt)(\.sigstore\.json)?$'
+          ours='^(rutli-driver-[0-9A-Za-z.-]+\.(jar|spdx\.json)|rutli-dealer-[0-9A-Za-z.-]+(-linux-(x86_64|aarch64)|\.spdx\.json)|rutli-cosigner-[0-9A-Za-z.-]+-linux-(x86_64|aarch64)|SHA256SUMS|LICENSE|THIRD-PARTY-LICENSES-rust\.txt)(\.sigstore\.json)?$'
           gh release view "$TAG" --json assets --jq '.assets[].name' | while read -r name; do
             if [[ "$name" =~ $ours ]] && [ ! -e "out/${name}" ]; then
               echo "removing ${name}, which is not in this set"

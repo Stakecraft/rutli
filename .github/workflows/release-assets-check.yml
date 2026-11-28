@@ -3,7 +3,7 @@
 name: Release assets check
 
 # release-assets.yml runs only on a v* tag. This runs the same scripts/release-assets.sh steps without
-# one: it builds the driver jar and the dealer, writes their SBOMs and SHA256SUMS, signs every file with
+# one: it builds the driver jar, the dealer and the cosigner, writes their SBOMs and SHA256SUMS, signs every file with
 # a throwaway key made here (no transparency log upload) and verifies the signatures as a user would,
 # then checks that a changed file and a swapped signature are refused. Nothing is signed with the
 # project's identity and nothing is published. Not covered: the keyless identity, the provenance
@@ -38,7 +38,7 @@ jobs:
     env:
       CANTON_TAG: v3.6.1 # as ci.yml (image-build-check.yml checks that they agree)
       COSIGN_PASSWORD: ""
-      RELEASE_DEALER_ARCHS: x86_64 # one machine here; the release builds both
+      RELEASE_ARCHS: x86_64 # one machine here; the release builds both
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -85,23 +85,30 @@ jobs:
           scripts/release-assets.sh version-check
           scripts/release-assets.sh build-jar out
           scripts/release-assets.sh build-dealer out
+          scripts/release-assets.sh build-cosigner out
+          # Printed only: this job runs on a newer distribution than the release's cosigner jobs,
+          # which enforce the limit (glibc 2.35).
+          scripts/release-assets.sh glibc-floor out/rutli-cosigner-*-linux-x86_64
           scripts/release-assets.sh check-set out built
           scripts/release-assets.sh licenses out
           scripts/release-assets.sh sbom out
           # The release signs what it gathers from one directory per artifact: do the same here.
-          mkdir -p art/asset-jar art/asset-dealer-x86_64 art/asset-sbom gathered
+          mkdir -p art/asset-jar art/asset-dealer-x86_64 art/asset-cosigner-x86_64 art/asset-sbom gathered
           cp out/rutli-driver-*.jar art/asset-jar/
           cp out/rutli-dealer-*-linux-x86_64 art/asset-dealer-x86_64/
+          cp out/rutli-cosigner-*-linux-x86_64 art/asset-cosigner-x86_64/
           cp out/*.spdx.json art/asset-sbom/
           rm -rf out
           # As the release: digests stated before the hand-over, compared after it.
           jar_sha="$(scripts/release-assets.sh digest art/asset-jar jar | cut -d= -f2)"
           dealer_sha="$(scripts/release-assets.sh digest art/asset-dealer-x86_64 dealer-x86_64 | cut -d= -f2)"
+          cosigner_sha="$(scripts/release-assets.sh digest art/asset-cosigner-x86_64 cosigner-x86_64 | cut -d= -f2)"
           scripts/release-assets.sh gather art out
           scripts/release-assets.sh gather-sbom art out
           sbom_driver_sha="$(scripts/release-assets.sh digest art/asset-sbom sbom-driver | cut -d= -f2)"
           sbom_dealer_sha="$(scripts/release-assets.sh digest art/asset-sbom sbom-dealer | cut -d= -f2)"
           scripts/release-assets.sh check-digests out jar="$jar_sha" dealer-x86_64="$dealer_sha" \
+            cosigner-x86_64="$cosigner_sha" \
             sbom-driver="$sbom_driver_sha" sbom-dealer="$sbom_dealer_sha"
           scripts/release-assets.sh check-sboms out
           echo "$jar_sha" >"$RUNNER_TEMP/jar.sha256"
