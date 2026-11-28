@@ -55,6 +55,7 @@ live config. It works under any `profile`.
 | `signing_policy.sign_rate_limit_per_min`, `_per_day` | 300, 20000 | above 0 | A brake on bulk signing with a stolen credential. |
 | `signing_policy.rate_limits` | empty | `per_min` and `per_day` above 0 in every rule | A rule with 0 turns the brake off for its prefix. |
 | `ceremony_sign_test_rate_limit_per_min` | 10 | above 0 | Every sign test burns a nonce marker on each signer. |
+| `signing_policy.refresh_min_interval_secs` | 259200 (72 h) | at least 259200 (not `0`, not a shorter interval) | A stolen refresher certificate must not move a key to new epochs faster than backups follow ([ceremonies.md](ceremonies.md#refresh-interval)). |
 | `keyfile.write_version` | 1 | 2 | Key files bound to the cluster, node and key (M4). |
 | `keyfile.cluster_uuid` | unset | set, the same on every node | Required by v2. |
 | `keyfile.accept_v1` | `true` | `false` | Once every file is v2. |
@@ -73,9 +74,10 @@ checked by the profile: any value within the bounds (500 to 5000 and 1000 to 900
 when the peer-call latency histogram shows less than a 3x margin
 ([architecture.md](architecture.md), "Peer liveness").
 
-Not checked by the profile yet: `signing_policy.refresh_min_interval_secs` (the minimum interval between
-refreshes, 72 h by default; `0` turns it off). A required finding for `0` is tracked in
-[issue #184](https://github.com/Stakecraft/rutli/issues/184).
+`signing_policy.refresh_interval_waived_at` is not checked by the profile: it is the incident path
+past the refresh interval, lets one refresh of a key through and lapses 24 h after its time
+([ceremonies.md](ceremonies.md#refresh-interval)). A node warns at every start while it is in the
+config.
 
 ## Driver: what the profile requires
 
@@ -158,7 +160,10 @@ not meet the list stops starting after a chart upgrade.** Do it in this order:
    - the roles and ACLs and pins first;
    - then key-file v2: set `keyfile.cluster_uuid`, then `write_version: 2`, then let every node
      re-seal; `accept_v1: false` comes last, once every file is v2;
-   - then `cluster_id`, set to the current derived value.
+   - then `cluster_id`, set to the current derived value;
+   - `signing_policy.refresh_min_interval_secs`: remove the key (the default is 72 h) or set it to
+     259200 or more (at most 2592000, 30 days). A `production` config written for 0.5.0-rc.1 with `0` or a shorter interval
+     stops starting with the next release.
 4. Render the chart with the new values, run `check-config` on the rendered config again, then
    upgrade.
 

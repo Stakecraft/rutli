@@ -21,7 +21,8 @@ topology: perNode
 # The production profile (docs/production-profile.md), written into every node's config as
 # `profile`. production: a cosigner refuses to start while any enforcement setting is not at its
 # production value, and its log names each one (TLS, per-node sealing, the operator and refresher
-# roles, intents, epoch match, signer ACL and pins, rate limits, key-file v2, the cluster id pin).
+# roles, intents, epoch match, signer ACL and pins, rate limits, a refresh interval of 72 h or more,
+# key-file v2, the cluster id pin).
 # lab: the same gaps are logged, nothing is refused — never for an authority key. topology=legacy
 # cannot meet the profile (one shared seal secret) and needs `lab` until it migrates.
 # Before upgrading an existing install to this chart, run `rutli-cosigner check-config` against
@@ -169,7 +170,8 @@ refreshAllowlist: []
 # the driver signs. Switch the other enforcement on (signer_acl_required, signer_may_refresh: false)
 # only after every cosigner AND the driver run this release.
 # Refreshes: each node takes part in at most one refresh of a key per
-# `refresh_min_interval_secs` (default 259200 = 72 h; the shipped CronJob is weekly). For an incident
+# `refresh_min_interval_secs` (default 259200 = 72 h; the shipped CronJob is weekly). Under
+# `profile: production` a node refuses to start with 0 or less than 259200 here. For an incident
 # refresh that cannot wait, set `refresh_interval_waived_at: "<UTC time of the decision>"` on every
 # node, roll out, refresh, then remove it (docs/ceremonies.md, "Refresh interval").
 # Example:
